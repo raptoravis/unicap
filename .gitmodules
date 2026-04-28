@@ -1,0 +1,9 @@
+[submodule "reshade-addons"]
+	path = reshade-addons
+	url = https://github.com/murchalloo/reshade-addons.git
+[submodule "murchFX"]
+	path = murchFX
+	url = https://github.com/murchalloo/murchFX.git
+[submodule "reshade"]
+	path = reshade
+	url = https://github.com/crosire/reshade.git
