@@ -6,7 +6,7 @@ find_program(MSBUILD_EXE msbuild HINTS
     "$ENV{ProgramFiles}/Microsoft Visual Studio/2022/Enterprise/MSBuild/Current/Bin"
     "$ENV{ProgramFiles}/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin"
     "$ENV{ProgramFiles}/Microsoft Visual Studio/2022/Community/MSBuild/Current/Bin"
-    "$ENV{ProgramFiles(x86)}/Microsoft Visual Studio/2022/BuildTools/MSBuild/Current/Bin"
+    "C:/Program Files/Microsoft Visual Studio/2022/BuildTools/MSBuild/Current/Bin"
     REQUIRED
 )
 message(STATUS "MSBuild: ${MSBUILD_EXE}")
@@ -18,20 +18,21 @@ message(STATUS "MSBuild: ${MSBUILD_EXE}")
 include(ExternalProject)
 
 set(RESHADE_SLN "${CMAKE_SOURCE_DIR}/reshade/ReShade.sln")
-set(RESHADE_DLL "${CMAKE_SOURCE_DIR}/reshade/bin/x64/Release/dxgi.dll")
+set(RESHADE_DLL "${CMAKE_SOURCE_DIR}/reshade/bin/x64/Release/ReShade64.dll")
 
 ExternalProject_Add(reshade_core
     SOURCE_DIR       "${CMAKE_SOURCE_DIR}/reshade"
     CONFIGURE_COMMAND ""
     BUILD_COMMAND    "${MSBUILD_EXE}" "${RESHADE_SLN}"
                      /p:Configuration=Release
-                     /p:Platform=x64
+                     "/p:Platform=64-bit"
                      /p:PlatformToolset=v143
                      /t:ReShade
                      /m
     BUILD_IN_SOURCE  1
     INSTALL_COMMAND  ${CMAKE_COMMAND} -E copy "${RESHADE_DLL}"
                      "${CMAKE_SOURCE_DIR}/dist/dxgi.dll"
+    # ReShade builds a single ReShade64.dll; renamed to dxgi.dll for DX12/DXGI proxy injection
     STAMP_DIR        "${CMAKE_BINARY_DIR}/stamps/reshade_core"
     BUILD_BYPRODUCTS "${RESHADE_DLL}"
 )
@@ -59,11 +60,15 @@ set_target_properties(frame_capture PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/dist"
 )
 target_include_directories(frame_capture PRIVATE
-    "${CMAKE_SOURCE_DIR}/reshade/include"
-    "${ADDON_ROOT}/deps/imgui"
+    "${ADDON_ROOT}/deps/reshade/include"   # old wrapper API (log_message/config_get_value)
+    "${ADDON_ROOT}/deps/imgui"             # imgui 18600 — matches addon's reshade_overlay.hpp
     "${ADDON_ROOT}/deps/tinyexr"
     "${ADDON_ROOT}/deps/stb"
 )
+# Note: we use reshade-addons' bundled reshade headers (older wrapper names) because
+# frame_capture.cpp calls reshade::log_message / reshade::config_get_value.
+# The underlying C exports (ReShadeLogMessage etc.) are identical in v5.9.2, so the
+# compiled .addon is fully binary-compatible with dxgi.dll built from reshade v5.9.2.
 target_compile_definitions(frame_capture PRIVATE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
