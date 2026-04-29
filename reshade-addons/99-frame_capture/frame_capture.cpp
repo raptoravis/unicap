@@ -403,6 +403,21 @@ static void on_reshade_present(effect_runtime* runtime)
 
 		runtime->capture_screenshot(pixels.data());
 
+		// capture_screenshot returns BGRA (not RGBA) when the swapchain uses BGRA format (common on DX12/Windows).
+		// stbi_write_bmp expects RGBA, so swap R↔B channels.
+		switch (resource_desc.texture.format)
+		{
+		case format::b8g8r8a8_unorm:
+		case format::b8g8r8a8_unorm_srgb:
+		case format::b8g8r8x8_unorm:
+		case format::b8g8r8x8_unorm_srgb:
+			for (uint32_t i = 0; i < width * height * 4; i += 4)
+				std::swap(pixels[i], pixels[i + 2]);
+			break;
+		default:
+			break;
+		}
+
 		WCHAR file_prefix[MAX_PATH] = L"";
 		GetModuleFileNameW(nullptr, file_prefix, ARRAYSIZE(file_prefix));
 
