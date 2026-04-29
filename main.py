@@ -30,7 +30,7 @@ _KEY_NAMES["SCROLLLOCK"] = 0x91
 def _wait_for_hotkey(key_name: str):
     vk = _KEY_NAMES.get(key_name.upper())
     if vk is None:
-        sys.exit(f"[ERROR] unsupported --start-key '{key_name}'. Valid: {', '.join(_KEY_NAMES)}")
+        sys.exit(f"[错误] 不支持的 --start-key '{key_name}'，可用按键：{', '.join(_KEY_NAMES)}")
     print(f"[LAUNCH] 在游戏中按 {key_name.upper()} 开始采集 (Ctrl+C 取消)...")
     # drain any current press so we don't false-trigger immediately
     while _user32.GetAsyncKeyState(vk) & 0x8000:
@@ -72,7 +72,7 @@ def _ensure_addon_enabled(game_dir: Path):
     cfg.set("ADDON", "FC_ExportNormal",  "1")
     with open(ini, "w", encoding="utf-8") as f:
         cfg.write(f)
-    print(f"         ReShade.ini addon settings enabled")
+    print(f"         ReShade.ini 采集设置已启用")
 
 
 def cmd_deploy(args):
@@ -81,28 +81,28 @@ def cmd_deploy(args):
 
     for f in [src_dll, src_addon]:
         if not f.exists():
-            sys.exit(f"[ERROR] not found: {f}\n        custom mode requires building first (scripts\\build.ps1)")
+            sys.exit(f"[错误] 文件不存在：{f}\n        custom 模式需先执行 scripts\\build.ps1")
 
     if not game_dir.exists():
-        sys.exit(f"[ERROR] game directory not found: {game_dir}")
+        sys.exit(f"[错误] 游戏目录不存在：{game_dir}")
 
     dst_dll = game_dir / "dxgi.dll"
     if dst_dll.exists() and not (game_dir / "dxgi.dll.bak").exists():
         shutil.copy2(dst_dll, game_dir / "dxgi.dll.bak")
-        print("[DEPLOY] backed up dxgi.dll -> dxgi.dll.bak")
+        print("[部署] 已备份 dxgi.dll -> dxgi.dll.bak")
 
     shutil.copy2(src_dll,   dst_dll)
     shutil.copy2(src_addon, game_dir / "frame_capture.addon")
     _ensure_addon_enabled(game_dir)
-    print(f"[DEPLOY] mode={args.mode} -> {game_dir}")
-    print(f"         dxgi.dll + frame_capture.addon deployed")
+    print(f"[部署] 模式={args.mode} -> {game_dir}")
+    print(f"       dxgi.dll + frame_capture.addon 已部署")
 
     if deploy_shaders:
         shader_dst = game_dir / "reshade-shaders" / "Shaders"
         shader_dst.mkdir(parents=True, exist_ok=True)
         shutil.copy2(shader_src / "DepthToAddon.fx", shader_dst)
         shutil.copy2(shader_src / "UIRemove.fx",     shader_dst)
-        print(f"         Shaders -> {shader_dst}")
+        print(f"       着色器 -> {shader_dst}")
 
 
 def cmd_capture(args):
@@ -121,25 +121,25 @@ def cmd_capture(args):
         inputs_out=inputs_out,
     )
     _make_video(frames_dir, video_out, args.fps)
-    print(f"\n[SESSION] {session_dir}")
-    print(f"          打包命令: uv run main.py pack --frames-dir {frames_dir} --inputs {inputs_out} --output {hdf5_out}")
+    print(f"\n[会话] {session_dir}")
+    print(f"       打包命令: uv run main.py pack --frames-dir {frames_dir} --inputs {inputs_out} --output {hdf5_out}")
 
 
 def cmd_launch(args):
     cmd_deploy(args)
     if args.deploy_only:
-        print("\n[DONE] deploy only, capture pipeline not started")
+        print("\n[完成] 仅部署，未启动采集")
         return
 
     game_exe = Path(args.game_exe)
     if not game_exe.is_absolute():
         game_exe = Path(args.game_dir) / game_exe
     if not game_exe.exists():
-        sys.exit(f"[ERROR] game executable not found: {game_exe}\n        set --game-exe or edit tools/capture/config.py")
+        sys.exit(f"[错误] 游戏可执行文件不存在：{game_exe}\n       请设置 --game-exe 或修改 tools/capture/config.py")
 
     if not args.game_name:
         args.game_name = game_exe.stem
-    print(f"\n[LAUNCH] {game_exe}")
+    print(f"\n[启动] {game_exe}")
     subprocess.Popen([str(game_exe)], cwd=str(game_exe.parent))
     _wait_for_hotkey(args.start_key)
     cmd_capture(args)
