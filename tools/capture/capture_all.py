@@ -157,10 +157,7 @@ def _thread_watcher(stop: threading.Event):
     print(f"[WATCHER] 完成：共移动 {moved} 个文件 → {FRAMES_DIR}")
 
 # ── 主入口 ────────────────────────────────────────────────────────────────────
-def main():
-    fps      = int(sys.argv[1])   if len(sys.argv) > 1 else 30
-    duration = float(sys.argv[2]) if len(sys.argv) > 2 else None
-
+def run(fps: int = 30, duration=None):
     print(f"[START] fps={fps}  时长={'∞' if not duration else f'{duration}s'}")
     print(f"        帧 → {FRAMES_DIR}")
     print(f"        输入 → {INPUTS_OUT}")
@@ -168,9 +165,9 @@ def main():
 
     stop = threading.Event()
     threads = [
-        threading.Thread(target=_thread_input,   args=(stop,),            name="input",   daemon=True),
-        threading.Thread(target=_thread_capture, args=(stop, fps, duration), name="capture", daemon=True),
-        threading.Thread(target=_thread_watcher, args=(stop,),            name="watcher", daemon=True),
+        threading.Thread(target=_thread_input,   args=(stop,),               name="input",   daemon=True),
+        threading.Thread(target=_thread_capture, args=(stop, fps, duration),  name="capture", daemon=True),
+        threading.Thread(target=_thread_watcher, args=(stop,),               name="watcher", daemon=True),
     ]
     for t in threads:
         t.start()
@@ -185,6 +182,11 @@ def main():
     for t in threads:
         t.join(timeout=10)
     print("[DONE]")
+
+def main():
+    fps      = int(sys.argv[1])   if len(sys.argv) > 1 else 30
+    duration = float(sys.argv[2]) if len(sys.argv) > 2 else None
+    run(fps, duration)
 
 if __name__ == "__main__":
     main()
