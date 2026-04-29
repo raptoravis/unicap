@@ -74,8 +74,8 @@ def _parse_xinput(state):
     }
 
 # ── 线程：输入录制 ─────────────────────────────────────────────────────────────
-def _thread_input(stop: threading.Event):
-    INPUTS_OUT.parent.mkdir(parents=True, exist_ok=True)
+def _thread_input(stop: threading.Event, inputs_out: Path):
+    inputs_out.parent.mkdir(parents=True, exist_ok=True)
     log = []
     t_start = time.time_ns()
 
@@ -94,11 +94,11 @@ def _thread_input(stop: threading.Event):
         stop.wait(1 / 120)
 
     elapsed = (time.time_ns() - t_start) / 1e9
-    with open(INPUTS_OUT, "w", encoding="utf-8") as f:
+    with open(inputs_out, "w", encoding="utf-8") as f:
         for entry in log:
             f.write(json.dumps(entry) + "\n")
     count = len(log)
-    print(f"[INPUT ] 完成：{count} 条，{elapsed:.1f}s，{count/elapsed:.1f} Hz → {INPUTS_OUT}")
+    print(f"[INPUT ] 完成：{count} 条，{elapsed:.1f}s，{count/elapsed:.1f} Hz → {inputs_out}")
 
 # ── 线程：自动帧捕获 ───────────────────────────────────────────────────────────
 def _thread_capture(stop: threading.Event, fps: int, duration):
@@ -129,8 +129,8 @@ def _thread_capture(stop: threading.Event, fps: int, duration):
     print(f"[CAPTURE] 完成：{count} 帧，{elapsed:.1f}s，{count/elapsed:.1f} fps")
 
 # ── 线程：文件搬运 ─────────────────────────────────────────────────────────────
-def _thread_watcher(stop: threading.Event):
-    FRAMES_DIR.mkdir(parents=True, exist_ok=True)
+def _thread_watcher(stop: threading.Event, frames_dir: Path):
+    frames_dir.mkdir(parents=True, exist_ok=True)
     seen = set(WATCH_DIR.glob("*"))
     moved = 0
 
@@ -144,8 +144,8 @@ def _thread_watcher(stop: threading.Event):
                     time.sleep(0.05)
                     if f.stat().st_size != s1:
                         continue  # 还在写，下次再处理
-                    shutil.move(str(f), str(FRAMES_DIR / f.name))
-                    seen.add(f)  # 仅在移动成功后加入，保证写中文件下轮重试
+                    shutil.move(str(f), str(frames_dir / f.name))
+                    seen.add(f)
                     moved += 1
                     print(f"[WATCHER] {moved:4d} → {f.name}", flush=True)
                 except Exception:
@@ -154,20 +154,23 @@ def _thread_watcher(stop: threading.Event):
             pass
         stop.wait(POLL_S)
 
-    print(f"[WATCHER] 完成：共移动 {moved} 个文件 → {FRAMES_DIR}")
+    print(f"[WATCHER] 完成：共移动 {moved} 个文件 → {frames_dir}")
 
 # ── 主入口 ────────────────────────────────────────────────────────────────────
-def run(fps: int = 30, duration=None):
+def run(fps: int = 30, duration=None, frames_dir: Path = None, inputs_out: Path = None):
+    frames_dir = frames_dir or FRAMES_DIR
+    inputs_out = inputs_out or INPUTS_OUT
+
     print(f"[START] fps={fps}  时长={'∞' if not duration else f'{duration}s'}")
-    print(f"        帧 → {FRAMES_DIR}")
-    print(f"        输入 → {INPUTS_OUT}")
+    print(f"        帧 → {frames_dir}")
+    print(f"        输入 → {inputs_out}")
     print("        Ctrl+C 随时停止\n")
 
     stop = threading.Event()
     threads = [
-        threading.Thread(target=_thread_input,   args=(stop,),               name="input",   daemon=True),
-        threading.Thread(target=_thread_capture, args=(stop, fps, duration),  name="capture", daemon=True),
-        threading.Thread(target=_thread_watcher, args=(stop,),               name="watcher", daemon=True),
+        threading.Thread(target=_thread_input,   args=(stop, inputs_out),        name="input",   daemon=True),
+        threading.Thread(target=_thread_capture, args=(stop, fps, duration),      name="capture", daemon=True),
+        threading.Thread(target=_thread_watcher, args=(stop, frames_dir),         name="watcher", daemon=True),
     ]
     for t in threads:
         t.start()

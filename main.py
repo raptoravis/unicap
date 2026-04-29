@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import ctypes
+from datetime import datetime
 import shutil
 import subprocess
 import sys
@@ -87,7 +88,18 @@ def cmd_deploy(args):
 
 
 def cmd_capture(args):
-    capture_all.run(fps=args.fps, duration=args.duration if args.duration > 0 else None)
+    tag        = datetime.now().strftime("%Y%m%d_%H%M%S")
+    frames_dir = DATASET_ROOT / f"frames_{tag}"
+    inputs_out = DATASET_ROOT / f"inputs_{tag}.jsonl"
+    hdf5_out   = DATASET_ROOT / f"dataset_{tag}.h5"
+    capture_all.run(
+        fps=args.fps,
+        duration=args.duration if args.duration > 0 else None,
+        frames_dir=frames_dir,
+        inputs_out=inputs_out,
+    )
+    print(f"\n[SESSION] tag={tag}")
+    print(f"          打包命令: uv run main.py pack --frames-dir {frames_dir} --inputs {inputs_out} --output {hdf5_out}")
 
 
 def cmd_launch(args):
