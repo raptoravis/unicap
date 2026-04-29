@@ -22,9 +22,8 @@ from pathlib import Path
 from .config import GAME_WIN64, FRAMES_DIR, INPUTS_OUT
 
 # ── 路径配置 ──────────────────────────────────────────────────────────────────
-WATCH_DIR  = GAME_WIN64
-EXTS       = {".bmp", ".exr"}
-POLL_S     = 0.1
+EXTS   = {".bmp", ".exr"}
+POLL_S = 0.1
 
 # ── Windows API ───────────────────────────────────────────────────────────────
 VK_F10            = 0x79
@@ -129,14 +128,14 @@ def _thread_capture(stop: threading.Event, fps: int, duration):
     print(f"[CAPTURE] 完成：{count} 帧，{elapsed:.1f}s，{count/elapsed:.1f} fps")
 
 # ── 线程：文件搬运 ─────────────────────────────────────────────────────────────
-def _thread_watcher(stop: threading.Event, frames_dir: Path):
+def _thread_watcher(stop: threading.Event, frames_dir: Path, watch_dir: Path):
     frames_dir.mkdir(parents=True, exist_ok=True)
-    seen = set(WATCH_DIR.glob("*"))
+    seen = set(watch_dir.glob("*"))
     moved = 0
 
     while not stop.is_set():
         try:
-            for f in WATCH_DIR.iterdir():
+            for f in watch_dir.iterdir():
                 if f in seen or f.suffix.lower() not in EXTS:
                     continue
                 try:
@@ -157,20 +156,21 @@ def _thread_watcher(stop: threading.Event, frames_dir: Path):
     print(f"[WATCHER] 完成：共移动 {moved} 个文件 → {frames_dir}")
 
 # ── 主入口 ────────────────────────────────────────────────────────────────────
-def run(fps: int = 30, duration=None, frames_dir: Path = None, inputs_out: Path = None):
+def run(fps: int = 30, duration=None, frames_dir: Path = None, inputs_out: Path = None, watch_dir: Path = None):
     frames_dir = frames_dir or FRAMES_DIR
     inputs_out = inputs_out or INPUTS_OUT
+    watch_dir  = watch_dir  or GAME_WIN64
 
-    print(f"[START] fps={fps}  时长={'∞' if not duration else f'{duration}s'}")
-    print(f"        帧 → {frames_dir}")
-    print(f"        输入 → {inputs_out}")
-    print("        Ctrl+C 随时停止\n")
+    print(f"[采集] fps={fps}  时长={'∞' if not duration else f'{duration}s'}")
+    print(f"       帧 → {frames_dir}")
+    print(f"       输入 → {inputs_out}")
+    print("       Ctrl+C 随时停止\n")
 
     stop = threading.Event()
     threads = [
-        threading.Thread(target=_thread_input,   args=(stop, inputs_out),        name="input",   daemon=True),
-        threading.Thread(target=_thread_capture, args=(stop, fps, duration),      name="capture", daemon=True),
-        threading.Thread(target=_thread_watcher, args=(stop, frames_dir),         name="watcher", daemon=True),
+        threading.Thread(target=_thread_input,   args=(stop, inputs_out),              name="input",   daemon=True),
+        threading.Thread(target=_thread_capture, args=(stop, fps, duration),            name="capture", daemon=True),
+        threading.Thread(target=_thread_watcher, args=(stop, frames_dir, watch_dir),   name="watcher", daemon=True),
     ]
     for t in threads:
         t.start()

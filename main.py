@@ -43,9 +43,32 @@ def _wait_for_hotkey(key_name: str):
 
 ROOT = Path(__file__).parent
 
-from tools.capture.config import GAME_WIN64, GAME_EXE, FRAMES_DIR, INPUTS_OUT, HDF5_OUT, DATASET_ROOT
+from tools.capture.config import GAME_PATH, GAME_WIN64, FRAMES_DIR, INPUTS_OUT, HDF5_OUT, DATASET_ROOT
 import tools.capture.capture_all as capture_all
 import tools.capture.pack_hdf5 as pack_hdf5
+
+
+_SKIP_EXE = {
+    "crashreportclient.exe", "ue4prereqsetup_x64.exe", "ueprereqsetup_x64.exe",
+    "dxsetup.exe", "uninstall.exe", "uninst.exe", "vcredist_x64.exe",
+    "vc_redist.x64.exe", "dotnetfx.exe",
+}
+
+def _resolve_game_path(path_str: str):
+    p = Path(path_str)
+    if p.is_file():
+        if p.suffix.lower() != ".exe":
+            sys.exit(f"[错误] --game-path 指定的文件不是 .exe：{p}")
+        return p.parent, p
+    if p.is_dir():
+        candidates = [f for f in p.glob("*.exe") if f.name.lower() not in _SKIP_EXE]
+        if not candidates:
+            sys.exit(f"[错误] 在 {p} 中未找到可执行文件")
+        exe = max(candidates, key=lambda f: f.stat().st_size)
+        if len(candidates) > 1:
+            print(f"[提示] 找到多个 exe，自动选择最大的：{exe.name}")
+        return p, exe
+    sys.exit(f"[错误] --game-path 路径不存在：{p}")
 
 
 def _sources(mode: str):
@@ -77,16 +100,11 @@ def _ensure_addon_enabled(game_dir: Path):
 
 def cmd_deploy(args):
     src_dll, src_addon, shader_src, deploy_shaders = _sources(args.mode)
-    game_dir = Path(args.game_dir)
+    game_dir, _ = _resolve_game_path(args.game_path)
 
     for f in [src_dll, src_addon]:
         if not f.exists():
-            sys.exit(f"[错误] 文件不存在：{f}\n        custom 模式需先执行 scripts\\build.ps1")
-
-    if game_dir.is_file():
-        sys.exit(f"[错误] --game-dir 传入的是文件而非目录：{game_dir}\n       正确用法：--game-dir <目录> --game-exe <exe文件名>")
-    if not game_dir.exists():
-        sys.exit(f"[错误] 游戏目录不存在：{game_dir}")
+            sys.exit(f"[错误] 文件不存在：{f}\n       custom 模式需先执行 scripts\\build.ps1")
 
     dst_dll = game_dir / "dxgi.dll"
     if dst_dll.exists() and not (game_dir / "dxgi.dll.bak").exists():
@@ -110,6 +128,7 @@ def cmd_deploy(args):
 def cmd_capture(args):
     tag        = datetime.now().strftime("%Y%m%d_%H%M%S")
     game_name  = getattr(args, "game_name", "") or "capture"
+    watch_dir  = getattr(args, "watch_dir",  None)
     session_dir = DATASET_ROOT / f"{game_name}_{tag}"
     frames_dir  = session_dir / "frames"
     inputs_out  = session_dir / "inputs.jsonl"
@@ -121,6 +140,7 @@ def cmd_capture(args):
         duration=args.duration if args.duration > 0 else None,
         frames_dir=frames_dir,
         inputs_out=inputs_out,
+        watch_dir=watch_dir,
     )
     _make_video(frames_dir, video_out, args.fps)
     print(f"\n[会话] {session_dir}")
@@ -133,16 +153,12 @@ def cmd_launch(args):
         print("\n[完成] 仅部署，未启动采集")
         return
 
-    game_exe = Path(args.game_exe)
-    if not game_exe.is_absolute():
-        game_exe = Path(args.game_dir) / game_exe
-    if not game_exe.exists():
-        sys.exit(f"[错误] 游戏可执行文件不存在：{game_exe}\n       请设置 --game-exe 或修改 tools/capture/config.py")
-
+    game_dir, game_exe = _resolve_game_path(args.game_path)
     if not args.game_name:
         args.game_name = game_exe.stem
+    args.watch_dir = game_dir
     print(f"\n[启动] {game_exe}")
-    subprocess.Popen([str(game_exe)], cwd=str(game_exe.parent))
+    subprocess.Popen([str(game_exe)], cwd=str(game_dir))
     _wait_for_hotkey(args.start_key)
     cmd_capture(args)
 
@@ -194,22 +210,22 @@ def main():
     parser = argparse.ArgumentParser(prog="main.py")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("deploy", help="deploy ReShade DLL + addon to game directory")
-    p.add_argument("--mode",     choices=["custom", "official592", "official673"], default="custom")
-    p.add_argument("--game-dir", default=str(GAME_WIN64))
+    p = sub.add_parser("deploy", help="部署 ReShade DLL + addon 到游戏目录")
+    p.add_argument("--mode",      choices=["custom", "official592", "official673"], default="custom")
+    p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录（目录时自动寻找最大 exe）")
 
-    p = sub.add_parser("capture", help="start capture pipeline (no deploy)")
-    p.add_argument("--game-name", default="", help="游戏名，用于输出目录前缀（默认 'capture'）")
+    p = sub.add_parser("capture", help="启动采集（不部署）")
+    p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录，用于确定帧文件监视目录")
+    p.add_argument("--game-name", default="", help="输出目录前缀（默认从 --game-path 推导）")
     p.add_argument("--fps",       type=int,   default=30)
-    p.add_argument("--duration",  type=float, default=0, metavar="SEC", help="seconds to record, 0=unlimited")
+    p.add_argument("--duration",  type=float, default=0, metavar="SEC", help="录制秒数，0=无限")
 
-    p = sub.add_parser("launch", help="deploy + launch game + start capture pipeline")
+    p = sub.add_parser("launch", help="部署 + 启动游戏 + 采集")
     p.add_argument("--mode",       choices=["custom", "official592", "official673"], default="custom")
-    p.add_argument("--game-dir",   default=str(GAME_WIN64))
-    p.add_argument("--game-exe",   default=str(GAME_EXE))
-    p.add_argument("--game-name",  default="", help="覆盖游戏名前缀（默认从 --game-exe 文件名推导）")
+    p.add_argument("--game-path",  default=str(GAME_PATH), help="游戏 exe 路径或目录")
+    p.add_argument("--game-name",  default="", help="输出目录前缀（默认从 exe 文件名推导）")
     p.add_argument("--start-key",  default="F9",
-                   help="在游戏中按此键触发采集开始，支持 F1-F12 / ScrollLock (default: F9)")
+                   help="游戏内按此键触发采集，支持 F1-F12 / ScrollLock（默认 F9）")
     p.add_argument("--fps",        type=int,   default=30)
     p.add_argument("--duration",   type=float, default=10, metavar="SEC")
     p.add_argument("--deploy-only", action="store_true")
