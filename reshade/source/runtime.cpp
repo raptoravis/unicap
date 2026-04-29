@@ -3487,7 +3487,7 @@ void reshade::runtime::reload_effects(bool force_load_all)
 
 #if RESHADE_GUI
 	_preset_is_modified = false;
-	_show_splash = true; // Always show splash bar when reloading everything
+	_show_splash = false; // splash disabled
 	_reload_count++;
 #endif
 	_last_reload_successful = true;
