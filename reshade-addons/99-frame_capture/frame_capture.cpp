@@ -23,9 +23,9 @@
 #include "miniz.c"
 #include "miniz.h"
 
-static bool enableCapturing = false;
-static bool enableDepthExp = false;
-static bool enableNormalExp = false;
+static bool enableCapturing = true;
+static bool enableDepthExp = true;
+static bool enableNormalExp = true;
 
 static bool doOnce = false;
 static int windowSize[2] = { 320, 560 };
