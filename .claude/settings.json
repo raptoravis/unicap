@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=$(python -c \"import sys,json; d=json.load(sys.stdin); print(d.get('tool_input',{}).get('file_path') or d.get('tool_response',{}).get('filePath') or '')\"); case \"$f\" in *.md|*.txt|*.rst) case \"$f\" in graphify-out/*) exit 0 ;; esac; mkdir -p graphify-out; touch graphify-out/.needs_update; echo \"{\\\"systemMessage\\\": \\\"graphify: $f changed — run /graphify . --update to rebuild knowledge graph\\\"}\" ;; esac",
+            "timeout": 10,
+            "async": true,
+            "statusMessage": "Flagging graphify update..."
+          }
+        ]
+      }
+    ]
+  }
+}
