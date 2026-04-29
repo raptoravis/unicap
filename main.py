@@ -89,18 +89,21 @@ def cmd_deploy(args):
 
 def cmd_capture(args):
     tag        = datetime.now().strftime("%Y%m%d_%H%M%S")
-    frames_dir = DATASET_ROOT / f"frames_{tag}"
-    inputs_out = DATASET_ROOT / f"inputs_{tag}.jsonl"
-    hdf5_out   = DATASET_ROOT / f"dataset_{tag}.h5"
+    game_name  = getattr(args, "game_name", "") or "capture"
+    session_dir = DATASET_ROOT / f"{game_name}_{tag}"
+    frames_dir  = session_dir / "frames"
+    inputs_out  = session_dir / "inputs.jsonl"
+    hdf5_out    = session_dir / "dataset.h5"
+    video_out   = session_dir / "video.mp4"
+    session_dir.mkdir(parents=True, exist_ok=True)
     capture_all.run(
         fps=args.fps,
         duration=args.duration if args.duration > 0 else None,
         frames_dir=frames_dir,
         inputs_out=inputs_out,
     )
-    video_out = DATASET_ROOT / f"video_{tag}.mp4"
     _make_video(frames_dir, video_out, args.fps)
-    print(f"\n[SESSION] tag={tag}")
+    print(f"\n[SESSION] {session_dir}")
     print(f"          打包命令: uv run main.py pack --frames-dir {frames_dir} --inputs {inputs_out} --output {hdf5_out}")
 
 
@@ -116,6 +119,8 @@ def cmd_launch(args):
     if not game_exe.exists():
         sys.exit(f"[ERROR] game executable not found: {game_exe}\n        set --game-exe or edit tools/capture/config.py")
 
+    if not args.game_name:
+        args.game_name = game_exe.stem
     print(f"\n[LAUNCH] {game_exe}")
     subprocess.Popen([str(game_exe)], cwd=str(game_exe.parent))
     _wait_for_hotkey(args.start_key)
@@ -174,13 +179,15 @@ def main():
     p.add_argument("--game-dir", default=str(GAME_WIN64))
 
     p = sub.add_parser("capture", help="start capture pipeline (no deploy)")
-    p.add_argument("--fps",      type=int,   default=30)
-    p.add_argument("--duration", type=float, default=0, metavar="SEC", help="seconds to record, 0=unlimited")
+    p.add_argument("--game-name", default="", help="游戏名，用于输出目录前缀（默认 'capture'）")
+    p.add_argument("--fps",       type=int,   default=30)
+    p.add_argument("--duration",  type=float, default=0, metavar="SEC", help="seconds to record, 0=unlimited")
 
     p = sub.add_parser("launch", help="deploy + launch game + start capture pipeline")
     p.add_argument("--mode",       choices=["custom", "official592", "official673"], default="custom")
     p.add_argument("--game-dir",   default=str(GAME_WIN64))
     p.add_argument("--game-exe",   default=str(GAME_EXE))
+    p.add_argument("--game-name",  default="", help="覆盖游戏名前缀（默认从 --game-exe 文件名推导）")
     p.add_argument("--start-key",  default="F9",
                    help="在游戏中按此键触发采集开始，支持 F1-F12 / ScrollLock (default: F9)")
     p.add_argument("--fps",        type=int,   default=30)
