@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import configparser
 import ctypes
 from datetime import datetime
 import shutil
@@ -58,6 +59,22 @@ def _sources(mode: str):
     return ROOT / "vendor" / "reshade673" / "dxgi.dll", addon, None, False
 
 
+def _ensure_addon_enabled(game_dir: Path):
+    ini = game_dir / "ReShade.ini"
+    cfg = configparser.RawConfigParser()
+    cfg.optionxform = str  # preserve key case
+    if ini.exists():
+        cfg.read(ini, encoding="utf-8")
+    if not cfg.has_section("ADDON"):
+        cfg.add_section("ADDON")
+    cfg.set("ADDON", "FC_EnableCapture", "1")
+    cfg.set("ADDON", "FC_ExportDepth",   "1")
+    cfg.set("ADDON", "FC_ExportNormal",  "1")
+    with open(ini, "w", encoding="utf-8") as f:
+        cfg.write(f)
+    print(f"         ReShade.ini addon settings enabled")
+
+
 def cmd_deploy(args):
     src_dll, src_addon, shader_src, deploy_shaders = _sources(args.mode)
     game_dir = Path(args.game_dir)
@@ -76,6 +93,7 @@ def cmd_deploy(args):
 
     shutil.copy2(src_dll,   dst_dll)
     shutil.copy2(src_addon, game_dir / "frame_capture.addon")
+    _ensure_addon_enabled(game_dir)
     print(f"[DEPLOY] mode={args.mode} -> {game_dir}")
     print(f"         dxgi.dll + frame_capture.addon deployed")
 
