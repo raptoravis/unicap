@@ -419,7 +419,7 @@ namespace reshade
 		#pragma region Overlay
 		ImGuiContext *_imgui_context = nullptr;
 
-		bool _show_splash = true;
+		bool _show_splash = false;
 		bool _show_overlay = false;
 		unsigned int _show_fps = 2;
 		unsigned int _show_clock = false;
