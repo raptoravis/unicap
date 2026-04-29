@@ -95,7 +95,6 @@ def _ensure_addon_enabled(game_dir: Path):
     cfg.set("ADDON", "FC_ExportNormal",  "1")
     with open(ini, "w", encoding="utf-8") as f:
         cfg.write(f)
-    print(f"         ReShade.ini 采集设置已启用")
 
 
 def cmd_deploy(args):
@@ -109,20 +108,16 @@ def cmd_deploy(args):
     dst_dll = game_dir / "dxgi.dll"
     if dst_dll.exists() and not (game_dir / "dxgi.dll.bak").exists():
         shutil.copy2(dst_dll, game_dir / "dxgi.dll.bak")
-        print("[部署] 已备份 dxgi.dll -> dxgi.dll.bak")
 
     shutil.copy2(src_dll,   dst_dll)
     shutil.copy2(src_addon, game_dir / "frame_capture.addon")
     _ensure_addon_enabled(game_dir)
-    print(f"[部署] 模式={args.mode} -> {game_dir}")
-    print(f"       dxgi.dll + frame_capture.addon 已部署")
 
     if deploy_shaders:
         shader_dst = game_dir / "reshade-shaders" / "Shaders"
         shader_dst.mkdir(parents=True, exist_ok=True)
         shutil.copy2(shader_src / "DepthToAddon.fx", shader_dst)
         shutil.copy2(shader_src / "UIRemove.fx",     shader_dst)
-        print(f"       着色器 -> {shader_dst}")
 
 
 def cmd_capture(args):
