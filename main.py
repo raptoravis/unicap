@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-reshade-custom main controller
+unicap main controller
 
 Usage:
   python main.py deploy   [--mode custom|official592|official673] [--game-dir PATH]

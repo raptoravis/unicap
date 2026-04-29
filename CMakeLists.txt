@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(reshade-custom LANGUAGES CXX)
+project(unicap LANGUAGES CXX)
 
 # ── Locate MSBuild (Visual Studio 2022) ──────────────────────────────────────
 find_program(MSBUILD_EXE msbuild HINTS

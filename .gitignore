@@ -4,9 +4,10 @@ dist/
 *.suo
 .vs/
 .claude/settings.local.json
+__pycache__
 
 # 二进制/大文件：本地保留，不入库
-vendor/installers/
-vendor/**/*.dll
-vendor/**/*.addon
-vendor/**/*.exe
+# vendor/installers/
+# vendor/**/*.dll
+# vendor/**/*.addon
+# vendor/**/*.exe

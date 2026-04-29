@@ -1,217 +1,213 @@
-# Handoff: ReShade 5.9.2 + frame_capture Addon 本地源码构建
+# Handoff: unicap — FF7 Remake 深度采集流水线整合
 
 **Generated**: 2026-04-29
 **Branch**: master
-**Status**: In Progress — 构建成功，待部署验证 + 后续定制开发
+**Status**: In Progress — 工具链整合完成，待测试验证
 
 ---
 
 ## Goal
 
-将 FF7 Remake 帧捕获流水线所用的 ReShade 5.9.2 及 frame_capture addon 的源码
-纳入本地 git 仓库（`D:\dev\reshade-custom\`），以 CMake + Visual Studio 2022 构建，
-为后续自定义采集行为（内置 HTTP 控制、自动触发等）创造条件。
+将 FF7 Remake 视频深度输入采集流水线所需的全部工具（ReShade 定制构建 + Python 采集脚本）
+统一纳入 `D:\dev\unicap.git\`（项目名 unicap），以 `main.py` 为唯一入口，支持官方/自定义
+两种 ReShade 模式切换，最终实现一键拉起录制。
 
 ---
 
 ## Completed
 
-- [x] 创建 `D:\dev\reshade-custom\` git 仓库，推送到 `github.com:raptoravis/reshade-custom`
-- [x] 添加三个 git submodule：`reshade` (v5.9.2)、`reshade-addons`、`murchFX`
-- [x] 解决 Windows Schannel TLS 不稳定导致的 deps 克隆失败（HTTP/1.1 + 串行兜底）
-- [x] 将 reshade/deps/ 下 11 个子依赖全部校验并切换到 v5.9.2 要求的精确 commit
-- [x] 编写 `CMakeLists.txt`（ExternalProject for ReShade core + add_library for addon）
-- [x] 修复 5 个构建错误（见 Failed Approaches）
-- [x] 首次构建成功，产物在 `dist/`：
-  - `dxgi.dll` (5.4 MB)、`frame_capture.addon` (113 KB)
-  - `reshade-shaders/Shaders/DepthToAddon.fx`、`UIRemove.fx`
-- [x] `scripts/setup.ps1` 内置 deps 精确 commit 兜底，可在新机器一键复现
+- [x] Python 采集脚本从 `D:\ff7_tools\` 迁移到 `tools/capture/`，路径集中到 `config.py`
+- [x] `vendor/` 目录存放官方 ReShade 二进制（592/673 + 官方 addon + 安装包）
+- [x] `main.py` 统一入口，子命令：`deploy` / `launch` / `capture` / `pack`
+- [x] 删除冗余独立脚本（auto_capture, file_watcher, record_inputs 已内联进 capture_all.py）
+- [x] 删除 `scripts/deploy.ps1` 和 `scripts/launch.ps1`（功能移入 main.py）
+- [x] `capture_all.py` 新增 `run(fps, duration)` 函数供 main.py 调用
+- [x] Python 项目初始化（uv + pyproject.toml，name=unicap，Python 3.13）
+- [x] C++ 自定义构建（前序 session 完成）：`dist/dxgi.dll` + `dist/frame_capture.addon` 已生成
 
 ---
 
 ## Not Yet Done
 
-- [ ] 运行 `scripts\deploy.ps1` 将 `dist/` 部署到游戏目录，验证与现有流水线兼容
-- [ ] 用部署后的 `dxgi.dll + frame_capture.addon` 跑一次 10 秒小规模采集，确认功能与原预编译版本一致
-- [ ] 后续定制方向（可选）：
-  - 修改 `reshade-addons/99-frame_capture/frame_capture.cpp`，内置 HTTP 控制接口，消除 F10 键盘模拟
-  - 将 frame_capture + UIRemove 合并为单一 `ff7r_capture.addon`
+- [ ] **测试 official592 模式**：`python main.py launch --mode official592`，验证 Python 管线与官方 5.9.2 正常配合
+- [ ] **测试 custom 模式**：`python main.py launch`，验证自定义构建产物功能与官方版一致
+- [ ] **pack 验证**：采集完后跑 `python main.py pack --spot-check`，确认深度/法线对齐
+- [ ] **后续定制**（可选）：修改 `reshade-addons/99-frame_capture/frame_capture.cpp`，内置 HTTP 控制替代 F10 键盘模拟
+- [ ] 提交当前未 commit 的改动（见下方 Uncommitted Changes）
 
 ---
 
 ## Failed Approaches (Don't Repeat These)
 
-### 1. `$ENV{ProgramFiles(x86)}` 在 CMake 中直接使用
-**错误**：`Invalid character '(' in a variable name: 'ProgramFiles'`  
-**修复**：改为硬编码路径或省略（VS 2022 Community 在标准 ProgramFiles 路径下）
+### Write tool 写中文注释产生乱码
 
-### 2. MSBuild `/p:Platform=x64`
-**错误**：`MSB4126: 指定的解决方案配置"Release|x64"无效`  
-**原因**：ReShade.sln 的 Solution-level 平台名是 `64-bit`，不是 `x64`  
-**修复**：`"/p:Platform=64-bit"`（需引号，因含连字符）
+尝试在 `main.py` 的 section 分隔注释行（`# ── ... ──`）中写中文，Write tool 将部分字符替换为 `�`。
+**修复**：section 注释改为纯 ASCII，中文仅出现在字符串字面量（argparse help 文本等）中。
 
-### 3. 期望输出文件是 `dxgi.dll`
-**错误**：`Error copying file ".../reshade/bin/x64/Release/dxgi.dll": No such file or directory`  
-**原因**：ReShade 构建出通用代理 `ReShade64.dll`，不直接输出 `dxgi.dll`  
-**修复**：INSTALL_COMMAND 从 `ReShade64.dll` 复制并重命名为 `dxgi.dll`
+### deploy.ps1 / launch.ps1 单独维护成本高
 
-### 4. frame_capture 使用 `reshade/include/`（v5.9.2 新 API）
-**错误**：`error C1189: Unexpected ImGui version 19250` + `C2039: 'config_get_value' 不是 'reshade' 的成员`  
-**原因**：
-- `frame_capture.cpp` 用旧包装函数名 `reshade::log_message`/`reshade::config_get_value`，v5.9.2 已改名
-- `reshade/include/reshade_overlay.hpp` 要求 imgui 19250，但 addon 是为 18600 写的  
-**修复**：改用 `reshade-addons/deps/reshade/include`（旧包装 API）+ `reshade-addons/deps/imgui`（18600）  
-**兼容性**：底层 C 导出名（`ReShadeLogMessage`、`ReShadeGetConfigValue`）在 v5.9.2 中与旧版完全相同，二进制兼容
+两个 PowerShell 脚本与 Python 脚本分开维护，路径配置重复出现在多处。
+**修复**：全部合并到 `main.py`，PowerShell 脚本删除。
 
-### 5. `--depth 1` 浅克隆拉到最新 imgui/vma/d3d12 而非 v5.9.2 所需旧 commit
-**错误**：`error C2061: 语法错误: ImGuiDockNodeFlags` 等大量 API 不兼容错误  
-**原因**：imgui docking branch 在 commit `3912b3d` 之后修改了 API  
-**修复**：对每个 dep 单独 `git fetch --depth 1 origin <exact-sha> && git checkout FETCH_HEAD`
-
-### 6. `git submodule update --init --recursive` 并发克隆在 Windows Schannel 下频繁失败
-**现象**：`schannel: server closed abruptly`，多个 deps 停留在空目录（只有 .git gitlink）  
-**修复**：`git config http.version HTTP/1.1 + http.postBuffer 524288000` + setup.ps1 串行逐个 fix_dep 兜底
+_C++ 构建阶段的 Failed Approaches 见上一份 HANDOFF.md（2026-04-29 首版，git log 中 `186c47c`）。_
 
 ---
 
 ## Key Decisions
 
-| 决策 | 理由 |
-|------|------|
-| ReShade 通过 ExternalProject + MSBuild 构建 | ReShade 无原生 CMake 支持；ExternalProject 包装 MSBuild 是最省力的正确路径 |
-| frame_capture 用 addon 自带 reshade headers（旧 API 名）| 底层 C 导出不变，二进制兼容；避免改源码 |
-| deps/ 不作为 submodule-in-submodule，而是直接 clone | reshade 的 submodule 机制在浅克隆 + 网络不稳时太脆，setup.ps1 串行 fix_dep 更可靠 |
-| ReShade 版本锁死 v5.9.2 | 6.x EXR 导出 API 已断，frame_capture.addon 会静默只产生 BMP |
+| 决策                           | 理由                                                            |
+| ------------------------------ | --------------------------------------------------------------- |
+| `main.py` 统一入口替代多个 ps1 | 跨工具链统一路径配置，Python 在 Windows 比 ps1 更可移植         |
+| vendor 二进制 gitignore        | DLL/exe 不入库；本地 `vendor/` 作为 staging area                |
+| capture_all 内联三线程         | 三个独立脚本功能完全重叠，运行时始终一起启动                    |
+| uv + pyproject.toml            | Python 3.13 环境隔离，依赖可重现（cv2/h5py/numpy 供 pack_hdf5） |
+| 项目名 unicap                  | 更简洁的名称，已同步更新 CMakeLists.txt 和 pyproject.toml       |
 
 ---
 
 ## Current State
 
 **Working**：
-- `cmake -S . -B build -G "Visual Studio 17 2022" -A x64` + `cmake --build build --config Release` → 成功
-- `dist/dxgi.dll`（5.4 MB）、`dist/frame_capture.addon`（113 KB）已生成
-- `scripts/setup.ps1`：新机器一键初始化所有 deps（含精确 commit 兜底）
-- `scripts/build.ps1` / `deploy.ps1` 可用
 
-**Broken**：无
+- `python main.py --help` 正常
+- `dist/dxgi.dll` + `dist/frame_capture.addon` 已构建（上一 session）
+- `vendor/reshade592/`、`vendor/reshade673/`、`vendor/addon_official/` 二进制就位
 
-**Uncommitted Changes**：无（working tree clean）
+**Broken**：无已知问题
+
+**Uncommitted Changes**：
+
+- `CMakeLists.txt`：project 名改为 `unicap`
+- `tools/capture/config.py`：注释文字改为 unicap
+- `main.py`：docstring 改为 "unicap main controller"
+- `HANDOFF.md`：本文件
+- 新增未跟踪：`.python-version`（3.13）、`pyproject.toml`、`uv.lock`
 
 ---
 
 ## Files to Know
 
-| 文件 | 说明 |
-|------|------|
-| `CMakeLists.txt` | 顶层构建，ExternalProject for ReShade core + add_library for addon |
-| `scripts/setup.ps1` | 首次初始化，含所有 11 个 deps 的精确 commit SHA 兜底 |
-| `scripts/build.ps1` | cmake configure（VS 17 2022 x64）+ build |
-| `scripts/deploy.ps1` | `dist/` → 游戏目录，备份旧 dxgi.dll |
-| `shaders/UIRemove.fx` | UE4 Reverse-Z UI 遮罩 shader（本 repo 维护的源码） |
-| `reshade-addons/99-frame_capture/frame_capture.cpp` | addon 主源文件，后续定制改这里 |
+| 文件                           | 说明                                                          |
+| ------------------------------ | ------------------------------------------------------------- |
+| `main.py`                      | **唯一入口**：deploy / launch / capture / pack 四个子命令     |
+| `tools/capture/config.py`      | 所有路径常量（游戏目录、数据集目录、仓库根）—— 换机器只改这里 |
+| `tools/capture/capture_all.py` | 采集管线：三线程（输入录制 120Hz + F10 帧触发 + 文件搬运）    |
+| `tools/capture/pack_hdf5.py`   | 离线打包：frames/ + inputs.jsonl → dataset.h5                 |
+| `scripts/build.ps1`            | CMake configure + MSBuild（自定义构建用）                     |
+| `scripts/setup.ps1`            | 首次初始化 git submodule deps（含精确 commit 兜底）           |
+| `dist/`                        | 自定义构建产物（gitignore，本地存在）                         |
+| `vendor/`                      | 官方二进制 staging（gitignore，本地存在）                     |
 
 ---
 
 ## Code Context
 
-### CMake 关键参数（不要改这些，有坑）
+### main.py 子命令接口
 
-```cmake
-"/p:Platform=64-bit"    # 必须是 64-bit，不是 x64（sln 层 platform 名）
-/t:ReShade              # 只构建主项目，不构建 setup/inject
-# 实际输出名：
-set(RESHADE_DLL ".../reshade/bin/x64/Release/ReShade64.dll")
+```python
+# deploy: 部署 DLL + addon 到游戏目录
+python main.py deploy --mode custom|official592|official673 [--game-dir PATH]
 
-# frame_capture include 顺序（顺序重要）：
-"${ADDON_ROOT}/deps/reshade/include"   # 旧包装 API：log_message / config_get_value
-"${ADDON_ROOT}/deps/imgui"             # imgui 18600，匹配 addon 的 reshade_overlay.hpp
+# launch: deploy + 启动 capture（最常用）
+python main.py launch [--mode custom] [--fps 30] [--duration 0] [--deploy-only]
+
+# capture: 只启动采集，不部署
+python main.py capture --fps 30 --duration 60
+
+# pack: 打包 HDF5
+python main.py pack [--frames-dir ...] [--inputs ...] [--output ...]
+python main.py pack --spot-check D:/ff7_dataset/dataset.h5
 ```
 
-### deps 精确 commit（v5.9.2 所需，不要 pull 到新版）
+### capture_all.run() 签名
 
-```
-imgui             3912b3d9a9c1b3f17431aebafd86d2f40ee6e59c
-vma               1076b348abd17859a116f4b111c43d58a588a086
-d3d12             9e393d6d8a3b30dcc6f2806ef604ec16a27b0d7e
-glad              27bed1181560211b55e39a9b132fef8c5846aae5
-minhook           8fda4f5481fed5797dc2651cd91e238e9b3928c6
-stb               28d546d5eb77d4585506a20480f4de2e706dff4c
-spirv             7845730cab6ebbdeb621e7349b7dc1a59c3377be
-utfcpp            63d64de49fd6b829f7c8694df5ab2ee625cb7134
-openxr            288d3a7ebc1ad959f62d51da75baa3d27438c499
-fpng              925796543b9d26b8edfcdcecd94c1dac280f29fc
-jxl_simple_lossless  8dc970fc771e35239db55dfbce8f46f83f8e9b73
+```python
+# 供 main.py 调用；也可直接 python capture_all.py [fps] [duration]
+def run(fps: int = 30, duration=None): ...
 ```
 
-### 路径速查
+### config.py 路径常量
+
+```python
+GAME_WIN64   = Path(r"E:\games\ff7remake\End\Binaries\Win64")
+DATASET_ROOT = Path(r"D:\ff7_dataset")
+FRAMES_DIR   = DATASET_ROOT / "frames"
+INPUTS_OUT   = DATASET_ROOT / "inputs.jsonl"
+HDF5_OUT     = DATASET_ROOT / "dataset.h5"
+REPO_ROOT    = Path(__file__).parents[2]   # D:\dev\unicap.git
+DIST_DIR     = REPO_ROOT / "dist"
+VENDOR_DIR   = REPO_ROOT / "vendor"
+```
+
+### vendor 目录布局
 
 ```
-游戏 Win64：  E:\games\ff7remake\End\Binaries\Win64\
-源码仓库：    D:\dev\reshade-custom\
-构建中间物：  D:\dev\reshade-custom\reshade\bin\x64\Release\ReShade64.dll
-部署产物：    D:\dev\reshade-custom\dist\
-```
-
-### API 兼容性说明
-
-```
-v5.9.2 新 C++ 包装：  reshade::log::message()   / reshade::get_config_value()
-addon 旧 C++ 包装：   reshade::log_message()    / reshade::config_get_value()
-底层 C 导出（相同）：  ReShadeLogMessage()        / ReShadeGetConfigValue()
+vendor/
+  reshade592/dxgi.dll          <- 官方 5.9.2（用于测试）
+  reshade673/dxgi.dll          <- 官方 6.7.3（EXR 导出已断，仅备用）
+  reshade673/backup.dll        <- 之前部署的 6.7.3 备份
+  addon_official/frame_capture.addon
+  installers/ReShade_Setup_5.9.2_Addon.exe
+  installers/ReShade_Setup_6.7.3_Addon.exe
 ```
 
 ---
 
 ## Resume Instructions
 
-### 1. 部署并验证功能（首要任务）
+### 1. 提交未 commit 的改动
 
-```powershell
-cd D:\dev\reshade-custom
-.\scripts\deploy.ps1
-```
-
-预期：游戏目录下 `dxgi.dll` 被更新，旧版备份为 `dxgi.dll.bak`。
-
-然后启动游戏，配置 ReShade（见原始 HANDOFF.md 的 Resume Instructions），跑 10 秒验证：
 ```bash
-python D:\ff7_tools\capture_all.py 30 10
-python D:\ff7_tools\pack_hdf5.py
-```
-预期：`[SCAN] 模式=triplet, 帧数=~300`，最大对齐误差 < 10 ms。
-
-### 2. 修改 addon 行为后重编部署
-
-```powershell
-# 只重编 addon（不触碰 ReShade core）
-cmake --build D:\dev\reshade-custom\build --config Release --target frame_capture
-.\scripts\deploy.ps1
+cd D:\dev\unicap.git
+git add CMakeLists.txt main.py tools/capture/config.py HANDOFF.md pyproject.toml .python-version uv.lock
+git commit -m "Rename project to unicap; add uv Python project setup"
 ```
 
-### 3. 强制重建 ReShade core（只在需要时）
+### 2. 测试官方 5.9.2 模式（先跑这个，验证 Python 管线无误）
 
-```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DRESHADE_ALWAYS_REBUILD=ON
-cmake --build build --config Release
+```bash
+# 部署官方 5.9.2 到游戏目录
+python main.py deploy --mode official592
+
+# 启动游戏，进入场景后：
+python main.py capture --fps 30 --duration 10
+
+# 预期输出：
+# [CAPTURE] 完成：~300 帧
+# [INPUT  ] 完成：~1200 条
+# [WATCHER] 共移动 ~300 个文件 → D:\ff7_dataset\frames\
+
+# 打包验证
+python main.py pack --spot-check D:/ff7_dataset/dataset.h5
+# 预期：spot_checks/ 目录下 PNG 图片，深度叠加色彩合理，dt < 10 ms
 ```
 
-### 4. 在新机器上从零开始
+如果采集时帧文件没有被移动：检查 `config.py` 中 `GAME_WIN64` 路径是否与实际游戏安装路径一致。
+
+### 3. 测试自定义构建（官方验证通过后）
+
+```bash
+python main.py launch  # 等价于 deploy --mode custom + capture
+```
+
+预期行为与官方版相同。如果 addon 未触发，检查游戏内 ReShade overlay 是否启用了 frame_capture.addon。
+
+### 4. 重新构建自定义版本（修改 addon 代码后）
 
 ```powershell
-git clone https://github.com/raptoravis/reshade-custom.git D:\dev\reshade-custom
-cd D:\dev\reshade-custom
-.\scripts\setup.ps1   # 克隆所有 deps，自动串行兜底到正确 commit（约 10–20 分钟）
-.\scripts\build.ps1   # CMake configure + build（首次 ReShade core 约 20 分钟）
-.\scripts\deploy.ps1
+# 只重编 addon
+cmake --build D:\dev\unicap.git\build --config Release --target frame_capture
+
+# 重新部署
+python main.py deploy
 ```
 
 ---
 
 ## Warnings
 
-- **ReShade 版本锁死 v5.9.2**：不要 `git -C reshade checkout main`，6.x EXR 导出静默失败
-- **deps/ 不要随意 git pull**：imgui 等必须停在特定旧 commit，拉新版重现 API 不兼容错误
-- **frame_capture include 路径**：必须用 `reshade-addons/deps/reshade/include` 而非 `reshade/include`
-- **build/stamps 卡住时**：删除 `build/stamps/reshade_core/` 目录，强制 ExternalProject 重跑
-- **ReShade64.dll → dxgi.dll 是正常的**：ReShade 构建通用代理二进制，不直接输出 dxgi.dll
-- **Windows Schannel TLS**：此机器 GitHub 并发克隆不稳定，setup.ps1 已内置串行兜底，不要替换为 `--recurse-submodules`
+- **ReShade 6.7.3 的 EXR 导出已断**：`vendor/reshade673/dxgi.dll` 只能产生 BMP，不产生深度/法线 EXR。只用 5.9.2 或自定义构建。
+- **vendor/ 中的 DLL 是 gitignore 的**：换机器需重新从 `D:\ff7_tools\` 手动复制，或重新安装官方 ReShade。
+- **pack_hdf5 依赖 cv2/h5py/numpy**：首次运行前需安装：`uv add opencv-python h5py numpy`（或 pip install）。
+- **frame_capture addon 触发键**：默认 F10（`capture_all.py` 的 `VK_F10 = 0x79`）。若游戏内 ReShade 改了按键需同步修改。
+- **C++ 构建相关警告**见原始 HANDOFF（commit `186c47c`）。
