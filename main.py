@@ -126,9 +126,15 @@ def cmd_deploy(args):
 
 
 def cmd_capture(args):
-    tag        = datetime.now().strftime("%Y%m%d_%H%M%S")
-    game_name  = getattr(args, "game_name", "") or "capture"
-    watch_dir  = getattr(args, "watch_dir",  None)
+    tag       = datetime.now().strftime("%Y%m%d_%H%M%S")
+    game_name = getattr(args, "game_name", "") or ""
+    watch_dir = getattr(args, "watch_dir",  None)
+    if watch_dir is None:
+        game_dir, game_exe = _resolve_game_path(args.game_path)
+        watch_dir = game_dir
+        if not game_name:
+            game_name = game_exe.stem
+    game_name = game_name or "capture"
     session_dir = DATASET_ROOT / f"{game_name}_{tag}"
     frames_dir  = session_dir / "frames"
     inputs_out  = session_dir / "inputs.jsonl"
