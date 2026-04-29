@@ -83,6 +83,8 @@ def cmd_deploy(args):
         if not f.exists():
             sys.exit(f"[错误] 文件不存在：{f}\n        custom 模式需先执行 scripts\\build.ps1")
 
+    if game_dir.is_file():
+        sys.exit(f"[错误] --game-dir 传入的是文件而非目录：{game_dir}\n       正确用法：--game-dir <目录> --game-exe <exe文件名>")
     if not game_dir.exists():
         sys.exit(f"[错误] 游戏目录不存在：{game_dir}")
 
