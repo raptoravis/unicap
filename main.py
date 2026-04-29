@@ -11,13 +11,37 @@ Usage:
 """
 
 import argparse
+import ctypes
 import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
+
+_user32 = ctypes.WinDLL("user32")
+
+# F1–F12 → VK 0x70–0x7B; also support scroll lock (0x91) as a non-intrusive default
+_KEY_NAMES = {f"F{i}": 0x70 + i - 1 for i in range(1, 13)}
+_KEY_NAMES["SCROLLLOCK"] = 0x91
+
+
+def _wait_for_hotkey(key_name: str):
+    vk = _KEY_NAMES.get(key_name.upper())
+    if vk is None:
+        sys.exit(f"[ERROR] unsupported --start-key '{key_name}'. Valid: {', '.join(_KEY_NAMES)}")
+    print(f"[LAUNCH] 在游戏中按 {key_name.upper()} 开始采集 (Ctrl+C 取消)...")
+    # drain any current press so we don't false-trigger immediately
+    while _user32.GetAsyncKeyState(vk) & 0x8000:
+        time.sleep(0.05)
+    while True:
+        if _user32.GetAsyncKeyState(vk) & 0x8000:
+            print(f"[LAUNCH] {key_name.upper()} 已按下，开始采集\n")
+            return
+        time.sleep(0.05)
 
 ROOT = Path(__file__).parent
 
-from tools.capture.config import GAME_WIN64, FRAMES_DIR, INPUTS_OUT, HDF5_OUT, DATASET_ROOT
+from tools.capture.config import GAME_WIN64, GAME_EXE, FRAMES_DIR, INPUTS_OUT, HDF5_OUT, DATASET_ROOT
 import tools.capture.capture_all as capture_all
 import tools.capture.pack_hdf5 as pack_hdf5
 
@@ -71,7 +95,14 @@ def cmd_launch(args):
     if args.deploy_only:
         print("\n[DONE] deploy only, capture pipeline not started")
         return
-    print()
+
+    game_exe = Path(args.game_exe)
+    if not game_exe.exists():
+        sys.exit(f"[ERROR] game executable not found: {game_exe}\n        set --game-exe or edit tools/capture/config.py")
+
+    print(f"\n[LAUNCH] {game_exe}")
+    subprocess.Popen([str(game_exe)], cwd=str(game_exe.parent))
+    _wait_for_hotkey(args.start_key)
     cmd_capture(args)
 
 
@@ -99,11 +130,14 @@ def main():
     p.add_argument("--fps",      type=int,   default=30)
     p.add_argument("--duration", type=float, default=0, metavar="SEC", help="seconds to record, 0=unlimited")
 
-    p = sub.add_parser("launch", help="deploy + start capture pipeline")
-    p.add_argument("--mode",        choices=["custom", "official592", "official673"], default="custom")
-    p.add_argument("--game-dir",    default=str(GAME_WIN64))
-    p.add_argument("--fps",         type=int,   default=30)
-    p.add_argument("--duration",    type=float, default=0, metavar="SEC")
+    p = sub.add_parser("launch", help="deploy + launch game + start capture pipeline")
+    p.add_argument("--mode",       choices=["custom", "official592", "official673"], default="custom")
+    p.add_argument("--game-dir",   default=str(GAME_WIN64))
+    p.add_argument("--game-exe",   default=str(GAME_EXE))
+    p.add_argument("--start-key",  default="F9",
+                   help="在游戏中按此键触发采集开始，支持 F1-F12 / ScrollLock (default: F9)")
+    p.add_argument("--fps",        type=int,   default=30)
+    p.add_argument("--duration",   type=float, default=10, metavar="SEC")
     p.add_argument("--deploy-only", action="store_true")
 
     p = sub.add_parser("pack", help="pack frame data into HDF5")
