@@ -15,11 +15,11 @@ import shutil
 import sys
 from pathlib import Path
 
-ROOT        = Path(__file__).parent
-CAPTURE_DIR = ROOT / "tools" / "capture"
-sys.path.insert(0, str(CAPTURE_DIR))
+ROOT = Path(__file__).parent
 
-from config import GAME_WIN64, FRAMES_DIR, INPUTS_OUT, HDF5_OUT, DATASET_ROOT
+from tools.capture.config import GAME_WIN64, FRAMES_DIR, INPUTS_OUT, HDF5_OUT, DATASET_ROOT
+import tools.capture.capture_all as capture_all
+import tools.capture.pack_hdf5 as pack_hdf5
 
 
 def _sources(mode: str):
@@ -63,7 +63,6 @@ def cmd_deploy(args):
 
 
 def cmd_capture(args):
-    import capture_all
     capture_all.run(fps=args.fps, duration=args.duration if args.duration > 0 else None)
 
 
@@ -77,7 +76,6 @@ def cmd_launch(args):
 
 
 def cmd_pack(args):
-    import pack_hdf5
     if args.spot_check:
         indices = [int(x) for x in args.check_frames.split(",")]
         pack_hdf5.spot_check(Path(args.spot_check), indices, Path(args.check_out))

@@ -51,7 +51,7 @@ os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 import cv2
 import numpy as np
 import h5py
-from config import FRAMES_DIR, INPUTS_OUT, HDF5_OUT, DATASET_ROOT
+from .config import FRAMES_DIR, INPUTS_OUT, HDF5_OUT, DATASET_ROOT
 
 # ─── 常量 ────────────────────────────────────────────────────────────────────
 

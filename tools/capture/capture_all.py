@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from config import GAME_WIN64, FRAMES_DIR, INPUTS_OUT
+from .config import GAME_WIN64, FRAMES_DIR, INPUTS_OUT
 
 # ── 路径配置 ──────────────────────────────────────────────────────────────────
 WATCH_DIR  = GAME_WIN64
