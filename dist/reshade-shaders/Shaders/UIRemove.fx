@@ -20,15 +20,15 @@
 
 float4 PS_RemoveUI(float4 vpos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 {
-    // 直接读原始深度缓冲（不线性化），Reverse-Z 中 UI 像素恒为 0.0
-    float d = tex2D(ReShade::DepthBuffer, uv).r;
-    if (d < UI_DEPTH_THRESHOLD)
-        return float4(0.0, 0.0, 0.0, 1.0);
+    // 读取 ReShade::BackBuffer —— 这是所有效果开始前的后备缓冲副本（原始游戏画面）。
+    // 写入实际后备缓冲，撤销 DepthToAddon 等可能对后备缓冲造成的污染。
+    // 注意：此处故意不做深度检测，避免深度缓冲不可用时画面全黑。
     return tex2D(ReShade::BackBuffer, uv);
 }
 
 technique UIRemove
 <
+    enabled = 1;
     ui_label = "UI Remove (FF7 Capture)";
     ui_tooltip = "Blacks out UI/HUD pixels before frame capture. UE4 Reverse-Z only.\n"
                  "pack_hdf5.py applies the same mask as a fallback if this is disabled.";
