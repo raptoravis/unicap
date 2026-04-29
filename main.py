@@ -88,11 +88,16 @@ def _ensure_addon_enabled(game_dir: Path):
     cfg.optionxform = str  # preserve key case
     if ini.exists():
         cfg.read(ini, encoding="utf-8")
-    if not cfg.has_section("ADDON"):
-        cfg.add_section("ADDON")
-    cfg.set("ADDON", "FC_EnableCapture", "1")
-    cfg.set("ADDON", "FC_ExportDepth",   "1")
-    cfg.set("ADDON", "FC_ExportNormal",  "1")
+    for section, key, value in [
+        ("ADDON",   "FC_EnableCapture",      "1"),
+        ("ADDON",   "FC_ExportDepth",        "1"),
+        ("ADDON",   "FC_ExportNormal",       "1"),
+        ("OVERLAY", "ShowScreenshotMessage", "0"),  # 不在画面里显示截图通知
+        ("INPUT",   "KeyScreenshot",         "0,0,0,0"),  # 清空截图快捷键，避免与 F10 冲突
+    ]:
+        if not cfg.has_section(section):
+            cfg.add_section(section)
+        cfg.set(section, key, value)
     with open(ini, "w", encoding="utf-8") as f:
         cfg.write(f)
 
