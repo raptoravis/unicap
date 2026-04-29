@@ -109,6 +109,8 @@ def cmd_launch(args):
         return
 
     game_exe = Path(args.game_exe)
+    if not game_exe.is_absolute():
+        game_exe = Path(args.game_dir) / game_exe
     if not game_exe.exists():
         sys.exit(f"[ERROR] game executable not found: {game_exe}\n        set --game-exe or edit tools/capture/config.py")
 
