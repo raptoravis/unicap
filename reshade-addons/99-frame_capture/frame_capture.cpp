@@ -268,6 +268,9 @@ static format   s_last_non_bb_fmt  = format::unknown;
 // Previous frame's non-BB RT count — used by reverse-skip to hit the Nth-from-last pass.
 static uint32_t s_prev_non_bb_total = 0;
 
+// Survey mode: Python writes fc_skip_count.txt to sweep skip values at runtime.
+static bool     s_survey_mode  = false;
+
 // Diagnostic: log first N capture frames to diagnose pre-UI detection
 static bool     s_cap_armed   = false;  // true in frames where sidecar exists + timer passed
 static uint32_t s_cap_diag_n  = 0;     // number of capture frames logged so far
@@ -688,6 +691,23 @@ static void on_reshade_present(effect_runtime* runtime)
         WCHAR exe_buf[MAX_PATH] = L"";
         GetModuleFileNameW(nullptr, exe_buf, ARRAYSIZE(exe_buf));
         std::filesystem::path exe_fs(exe_buf);
+
+        // Survey mode: fc_skip_count.txt lets Python drive g_pre_ui_skip at runtime.
+        // g_pre_ui_skip currently holds the value used in THIS frame's on_bind_rts_dsv;
+        // record it for the filename, then update for the next frame.
+        uint32_t this_frame_skip = g_pre_ui_skip;
+        {
+            std::ifstream sf(exe_fs.parent_path() / L"fc_skip_count.txt");
+            std::string   sl;
+            if (std::getline(sf, sl)) {
+                while (!sl.empty() && (sl.back() == '\r' || sl.back() == '\n')) sl.pop_back();
+                s_survey_mode = !sl.empty();
+                if (s_survey_mode) g_pre_ui_skip = (uint32_t)std::stoul(sl);
+            } else {
+                s_survey_mode = false;
+            }
+        }
+
         std::filesystem::path out_dir;
         {
             std::ifstream cfg(exe_fs.parent_path() / L"fc_output_dir.txt");
@@ -711,9 +731,15 @@ static void on_reshade_present(effect_runtime* runtime)
                   tm_val.tm_hour, tm_val.tm_min, tm_val.tm_sec,
                   std::chrono::duration_cast<std::chrono::milliseconds>(now - now_seconds).count());
 
-        std::filesystem::path save_prefix = out_dir / exe_fs.filename();
-        save_prefix += L' ';
-        save_prefix += ts;
+        std::filesystem::path save_prefix;
+        if (s_survey_mode) {
+            char sn[32]; sprintf_s(sn, "survey_skip_%03u_", this_frame_skip);
+            save_prefix = out_dir / sn;
+        } else {
+            save_prefix = out_dir / exe_fs.filename();
+            save_prefix += L' ';
+            save_prefix += ts;
+        }
 
         device*        dev   = runtime->get_device();
         command_queue* queue = runtime->get_command_queue();

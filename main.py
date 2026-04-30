@@ -24,6 +24,7 @@ from pathlib import Path
 
 import tools.capture.capture_all as capture_all
 import tools.capture.pack_hdf5 as pack_hdf5
+import tools.capture.survey as survey_mod
 from tools.capture.config import DATASET_ROOT, FRAMES_DIR, GAME_PATH, HDF5_OUT, INPUTS_OUT
 
 ROOT = Path(__file__).parent
@@ -323,6 +324,39 @@ def _make_video(frames_dir: Path, output: Path, fps: int):
     print(f"[VIDEO] 完成：{len(bmps)} 帧 @ {fps}fps → {output}")
 
 
+def cmd_survey(args):
+    game_dir, game_exe = _resolve_game_path(args.game_path)
+
+    # Deploy first so the addon is up to date
+    args.pre_ui      = True
+    args.pre_ui_skip = 0
+    cmd_deploy(args)
+
+    if not args.no_launch:
+        print(f"\n[启动] {game_exe}")
+        env = {**os.environ, "RESHADE_BASE_PATH_OVERRIDE": str(UNICAP_TEMP)}
+        subprocess.Popen([str(game_exe)], cwd=str(game_dir), env=env)
+        _wait_for_hotkey(args.start_key)
+
+    survey_dir = DATASET_ROOT / "survey" if not args.survey_dir else Path(args.survey_dir)
+    recommended = survey_mod.run(
+        game_dir=game_dir,
+        survey_dir=survey_dir,
+        max_skip=args.survey_max,
+        step=args.survey_step,
+        fps=args.fps,
+        timeout_per_skip=args.timeout,
+    )
+
+    if recommended is not None and not args.dry_run:
+        print(f"\n[SURVEY] 自动写入推荐 skip={recommended} 到 unicap.ini")
+        _ensure_addon_enabled(
+            _sources(args.mode)[1].parent,
+            pre_ui=True,
+            pre_ui_skip=recommended,
+        )
+
+
 def cmd_video(args):
     _make_video(Path(args.frames_dir), Path(args.output), args.fps)
 
@@ -376,6 +410,27 @@ def main():
     p.add_argument("--pre-ui-skip", type=int, default=0, metavar="N",
                    help="跳过前 N 次无 DSV 的 BackBuffer 绑定（调参用，默认 0）")
 
+    p = sub.add_parser("survey", help="自动扫描 pre_ui_skip 范围，找到 UI 消失的临界值")
+    p.add_argument("--mode", choices=["custom", "official592", "official673"], default="official592")
+    p.add_argument("--game-path", default=str(GAME_PATH))
+    p.add_argument("--start-key", default="F9")
+    p.add_argument("--fps", type=float, default=1.0, metavar="FPS",
+                   help="扫描时的采集帧率（默认 1fps）")
+    p.add_argument("--survey-max", type=int, default=70, metavar="N",
+                   help="最大 skip 值（默认 70）")
+    p.add_argument("--survey-step", type=int, default=5, metavar="STEP",
+                   help="skip 步长（默认 5）")
+    p.add_argument("--survey-dir", default="", metavar="PATH",
+                   help="扫描帧保存目录（默认 DATASET_ROOT/survey）")
+    p.add_argument("--timeout", type=float, default=10.0, metavar="SEC",
+                   help="每个 skip 值等待超时（默认 10s）")
+    p.add_argument("--no-launch", action="store_true",
+                   help="不启动游戏（游戏已在运行时使用）")
+    p.add_argument("--dry-run", action="store_true",
+                   help="只分析，不自动写入推荐 skip 到 unicap.ini")
+    p.add_argument("--width",  type=int, default=1600, metavar="W")
+    p.add_argument("--height", type=int, default=1200, metavar="H")
+
     p = sub.add_parser("video", help="从 frames 目录生成 MP4 视频")
     p.add_argument("--frames-dir", default=str(FRAMES_DIR))
     p.add_argument("--output", default=str(DATASET_ROOT / "video.mp4"))
@@ -390,9 +445,8 @@ def main():
     p.add_argument("--check-out", default=str(DATASET_ROOT / "spot_checks"))
 
     args = parser.parse_args()
-    {"deploy": cmd_deploy, "capture": cmd_capture, "launch": cmd_launch, "video": cmd_video, "pack": cmd_pack}[
-        args.cmd
-    ](args)
+    {"deploy": cmd_deploy, "capture": cmd_capture, "launch": cmd_launch,
+     "survey": cmd_survey, "video": cmd_video, "pack": cmd_pack}[args.cmd](args)
 
 
 if __name__ == "__main__":
