@@ -1,234 +1,231 @@
-# Handoff: unicap pipeline — 定时采集 + 按键禁用
+# Handoff: unicap pipeline — Pre-UI 场景 RT 采集
 
 **Generated**: 2026-04-30
-**Branch**: master (up to date with origin)
-**Status**: Working — 待实机二次验证（Batman AK / FF7 Remake）
+**Branch**: master (up to date with origin/master, commit f94e114)
+**Status**: In Progress — 颜色已正确，UI 仍可见，需要调参找正确 skip 值
 
 ## Goal
 
-FF7 Remake / Batman: Arkham Knight (及其他 DX11/DX12 游戏) 帧采集管线：
-- 游戏内按 F9 触发 Python 会话开始，之后 addon 自动定时采集帧
-- 零 ReShade UI/splash，零按键模拟（不发 F10/Home），游戏目录仅 dxgi.dll symlink
-- 输出分辨率可配置（默认 1600×1200），采集结束自动生成 HDF5 dataset
+FF7 Remake (DX12 / UE4) 帧采集：**只保存 3D 游戏画面，不含 HUD/UI**，同时输出深度 EXR。
+核心问题是 UE4 的 UI 通过中间 RT 合成（不是直接画到 backbuffer），需找到合成前的那个 RT。
 
 ## Completed
 
-- [x] DX11 全黑帧修复：`copy_texture_region` + staging texture + `map_texture_region`
-- [x] 分辨率参数：`FC_CaptureWidth`/`FC_CaptureHeight`（默认1600×1200），stbir_resize 缩放
-- [x] **定时采集**：`on_reshade_present` 用 `steady_clock` 按 `FC_TargetFPS` 自动触发，不再需要 F10 按键
-- [x] **F10 模拟移除**：`capture_all.py` 删除 `_thread_capture` 和所有 `keybd_event` 调用
-- [x] **Home/F10 overlay 禁用**：`_ensure_addon_enabled` 写入所有 INPUT 快捷键 = `0,0,0,0`（含 `KeyOverlay`）
-- [x] `_make_video` ffmpeg pipe deadlock 修复：`proc.stderr.read()` 移至 `proc.wait()` 之前
-- [x] `FC_TargetFPS` 写入 `unicap.ini`，`--fps` CLI 参数控制 addon 采集帧率
-- [x] 游戏目录最小化：deploy 仅 dxgi.dll symlink
-- [x] ReShade 重命名为 unicap（ini_file.cpp, dll_main.cpp, runtime_manager.cpp）
-- [x] UNICAP_TEMP = `%TEMP%\unicap`，RESHADE_BASE_PATH_OVERRIDE env var
+- [x] 定时采集（steady_clock），fc_output_dir.txt sidecar 控制开关（F9 之前不采集）
+- [x] GPU TDR 崩溃修复：场景 RT 拷贝移至 `on_bind_rts_dsv` backbuffer bind 事件（mid-frame，游戏自己的 cmd list），而非 `reshade_present`
+- [x] Reverse-skip 机制：`FC_PreUISkipCount=N` 捕捉倒数第 N+1 个非 BB RT
+- [x] HDR 格式解码：`decode_to_rgba8` 新增 `r16g16b16a16_float`（half_to_float + Reinhard + sRGB gamma）和 `r11g11b10_float`
+- [x] EXR（深度）拷贝加入 use_scene_rt 路径（原来只在 UIRemove fallback 路径才拷贝深度）
+- [x] `--pre-ui` / `--pre-ui-skip` CLI 参数加入 `deploy` 和 `launch`
+- [x] `official592` 模式改用 `dist/frame_capture.addon`（不再用 vendor/addon_official）
+- [x] sidecar unlink PermissionError 修复（try/except，fallback 写空字符串）
+- [x] 会话结束分别打印 BMP 和 EXR 数量
 
 ## Not Yet Done
 
-- [ ] **端到端二次验证**：含新 timer 机制的实际运行，确认 BMP 有内容、帧率正确
-- [ ] save queue full 问题（Batman AK 2423×1363 @ 30fps = ~390 MB/s）→ 观察 1600×1200 是否改善
-- [ ] CLAUDE.md 内容已过时（仍描述 F10 机制）— 若需准确可更新
-- [ ] 决定是否保留 `reshade/` 源码（6.7.3.16 UNOFFICIAL，体积大）
-- [ ] 后续 ML 训练定制
+- [ ] **找到正确的 skip 值**：`skip=5`（pass 67/73）还有 UI，需 binary search（试 skip=15、30、50）
+- [ ] **验证 EXR 深度**：use_scene_rt 路径的深度拷贝是本次新加的，尚未实机确认 EXR 正常输出
+- [ ] **颜色质量**：当前使用 Reinhard tone map，可能与游戏实际画面有偏差；对 ML 训练是否够用待评估
+- [ ] Batman AK 适配（本次工作集中在 FF7 Remake）
 
 ## Failed Approaches (Don't Repeat These)
 
-1. **`copy_texture_to_buffer` + staging buffer**：DX11 不支持 texture→buffer 直接 copy，静默失败，BMP 全黑。改为 staging texture + `copy_texture_region`。
+1. **在 `reshade_present` 时拷贝 `s_last_non_bb_rt`（GPU TDR 崩溃）**
+   UE4 在 Present 之后对 transient resource 发出 aliasing barrier（deactivate），
+   此时再对该 resource 发 `barrier(shader_resource → copy_source)` 导致 GPU hang / TDR。
+   **修复**：在 `on_bind_rts_dsv` backbuffer bind 事件（帧渲染中途，Present 之前）发拷贝命令。
 
-2. **手动计算 `color_row_pitch`**：`(format_row_pitch(...) + 255) & ~255` 硬编码 D3D12 256字节对齐，DX11 对齐不同。改为 `map_texture_region` 直接返回真实 `row_pitch`。
+2. **Forward-skip of backbuffer binds（g_pre_ui_skip 跳过前 N 次 BB bind）**
+   `on_bind_rts_dsv` 在 BB bind 时 backbuffer 内容是上一帧残留（FLIP_DISCARD 语义），
+   拷贝出来是上一帧带 UI 的内容。整个思路作废。
 
-3. **staging buffer 用于 depth**：同上，DX11 下 `copy_texture_to_buffer` 静默失败。同样改为 staging texture。
+3. **捕捉最后一个非 BB RT（skip=0, 即 pass 72/73）显示有 UI**
+   说明 FF7 Remake 的 UI 是渲染到中间 RT 再合成到 backbuffer 的（Slate 通过 UE4 RDG 渲染），
+   而非直接画 backbuffer。所以最后几个非 BB RT 已含 UI。需要往前跳。
 
-4. **watcher 线程监控 + shutil.move**：跨磁盘时 move = copy+delete，极慢。已改为 addon 直接写目标目录。
+4. **UIRemove_ColorTex fallback（捕获时序太晚）**
+   `reshade_begin_effects` 在 Present 之后触发，此时所有 UI 已经画完。该路径只能获得含 UI 的帧，
+   只用作 pre_ui_mode=false 的降级路径。
 
-5. **每帧 create/destroy staging buffer**：GPU 内存分配开销高。已改为预分配，按分辨率变化时才重建。
+5. **`decode_to_rgba8` default 分支 memcpy HDR RT**
+   中间 RT 格式是 `r16g16b16a16_float`（DXGI=10），逐像素 8 字节；
+   memcpy 只拷 w×4 字节，等于拷了 R/G 两个 F16 通道，
+   结果是极暗的噪点图案（暗红/蓝色）。已添加 half_to_float 解码 + tone map。
 
-6. **EXR PIZ 压缩在 render 线程**：PIZ CPU 密集，100-500ms/帧，阻塞游戏。已改为 async worker + ZIP。
-
-7. **`capture_screenshot()` + 6.7.3 DLL**：R10G10B10A2 swap chain 下返回 ExportTex 数据（psychedelic 色）。改用 UIRemove_ColorTex。
-
-8. **`runtime_manager.cpp` config_name = "ReShade"**：runtime config 与 global config 不一致，PresetPath 读不到，UIRemove 不加载，无 BMP。已改为 `"unicap"`。
-
-9. **build.ps1 -Rebuild 用 cmake -DRESHADE_ALWAYS_REBUILD=ON**：build/ 已存在时跳过 configure，flag 无效。改为删除整个 build/ 目录。
-
-10. **`_make_video` `proc.wait()` 在 `stderr.read()` 之前**：ffmpeg stderr pipe buffer 满时死锁（ffmpeg 等 Python 读，Python 等 ffmpeg 退出）。已修复：先 `proc.stderr.read()` 再 `proc.wait()`。
-
-11. **`_thread_capture` 发 F10**：按键会干扰游戏操作，且 F10 在游戏中可能有其他绑定。改为 addon 内部 `steady_clock` 定时触发。
-
-12. **`KeyOverlay` 未在 `_ensure_addon_enabled` 中覆盖**：ReShade 默认写入 `KeyOverlay=36,0,0,0`（Home），导致 Home 仍可打开 overlay。已在 `_ensure_addon_enabled` 显式设置所有 INPUT 快捷键为 `0,0,0,0`。
+6. **Forward 逐帧 binary search skip（之前旧方案）**
+   之前的 skip 是正向的（跳过前 N 次 BB bind）；换成 reverse-skip 后，
+   skip=N 捕捉第 `(total-1-N)` 个 pass（0-indexed）。两者方向相反，不要混淆。
 
 ## Key Decisions
 
 | Decision | Rationale |
 |----------|-----------|
-| staging texture（非 buffer） | DX11/DX12 均支持 copy_texture_region；buffer 方案在 DX11 静默失败 |
-| map_texture_region 的 row_pitch | API 直接返回正确对齐值，无需手动计算 |
-| steady_clock 定时触发（非 F10） | 不干扰游戏，不依赖 Python 发键，精度更高 |
-| FC_TargetFPS 在 unicap.ini | Python --fps 写 ini，addon 读 ini；两侧解耦 |
-| 分辨率缩放在 save worker | 不阻塞 render thread；stbir 质量够用于 ML 训练 |
-| 默认 1600×1200 | 平衡文件大小与图像质量；BMP 约 7.7MB/帧（原始 13MB） |
-| FC_CaptureWidth=0 = 原始分辨率 | 0 值跳过 resize，保持灵活性 |
-| `--mode custom` = `dist/dxgi.dll` (6.7.3) | 唯一零 splash 方案 |
-| BMP via UIRemove_ColorTex | 6.7.3 capture_screenshot 在 R10G10B10A2 损坏 |
-| UNICAP_TEMP = `%TEMP%\unicap` | 配置/日志集中管理，游戏目录保持干净 |
-| runtime_manager.cpp config_name = "unicap" | per-runtime config = global config = unicap.ini |
-| Technique 顺序：DepthToAddon → UIRemove | DepthToAddon 写自定义 RT；UIRemove 最后 snapshot BackBuffer |
-| 所有 INPUT 快捷键 = 0,0,0,0 | 防止 ReShade 响应任何键盘输入，游戏控制不受干扰 |
+| 在 on_bind_rts_dsv BB bind 时拷贝 RT | RT 仍活跃，状态已知（shader_resource，刚被 final blit 读取）；reshade_present 时 UE4 可能已 alias 释放 |
+| barrier: shader_resource → copy_source | Final composite pass 将 scene RT 作为 SRV 读取后转到 BB；此时 RT 处于 SR 状态 |
+| Reverse-skip 用 s_prev_non_bb_total | 当帧总数稳定（FF7 Remake 每帧固定 73 个非 BB pass）时，用上一帧总数计算目标 pass 序号 |
+| Reinhard + sRGB gamma 用于 HDR decode | 简单、无外部依赖；对 ML 训练的视觉质量足够；若需精确 HDR 可替换为 ACES 或游戏自带 tonemapper |
+| official592 模式用 dist/frame_capture.addon | vendor/addon_official 是旧二进制，不含本次修复；official592 DLL 与 v5 addon API 兼容 |
+| use_scene_rt 条件改为 s_pre_ui_captured | 拷贝已发生在 on_bind_rts_dsv，present 时只需 map；用 s_pre_ui_captured 作标志 |
 
 ## Current State
 
-**完全实现，timer 机制未实机验证**：
-- `dist/dxgi.dll` — 6.7.3，零 splash，unicap 重命名
-- `dist/frame_capture.addon` — 定时触发（steady_clock），DX11/DX12 兼容，分辨率缩放
-- `main.py launch --mode custom` — 部署 + 启动 + 采集 + 自动打包
-- unicap.ini 所有 INPUT 快捷键清零
+**Working**:
+- 场景几何/颜色/光照正确（HDR 解码修复后）
+- 无 GPU TDR 崩溃
+- F9 之前不采集（sidecar gate 正常工作）
+- BMP 文件正常写出，帧率正确
+
+**Broken / Pending**:
+- UI 仍可见（skip=5，pass 67/73）—— 需调大 skip 继续搜索
+- EXR 深度：代码已加，未实机验证
+- Tone map 可能与游戏色调有偏差（Reinhard vs 游戏内部 tonemapper）
 
 ## Files to Know
 
 | File | Why It Matters |
 |------|----------------|
-| `reshade-addons/99-frame_capture/frame_capture.cpp` | 整个 addon：定时触发、staging texture、async worker、resize |
-| `reshade/source/runtime_manager.cpp` | `config_name = "unicap"` — 关键，使 runtime config = unicap.ini |
-| `reshade/source/ini_file.cpp` | `global_config()` = `unicap.ini` |
-| `shaders/UIRemove.fx` | ExportColor pass → UIRemove_ColorTex (RGBA8) |
-| `shaders/DepthToAddon.fx` | 暴露 DepthToAddon_ExportTex (RGBA32F，depth 在 alpha channel) |
-| `main.py` | CLI：`_ensure_addon_enabled` 写 unicap.ini（含所有 INPUT 键清零） |
-| `tools/capture/capture_all.py` | 采集主循环：写 fc_output_dir.txt sidecar，监控帧数进度 |
+| `reshade-addons/99-frame_capture/frame_capture.cpp` | 全部采集逻辑：reverse-skip、barrier 拷贝、HDR decode、depth EXR |
+| `main.py` | CLI：`_sources()`（mode→addon 路径映射）、`_ensure_addon_enabled`（写 unicap.ini） |
+| `tools/capture/capture_all.py` | 写/删 fc_output_dir.txt sidecar；进度打印 |
 | `tools/capture/config.py` | 机器相关路径：GAME_PATH、DATASET_ROOT |
-| `scripts/build.ps1` | `-Rebuild` 删除 build\ 整个目录 |
+| `shaders/UIRemove.fx` | UIRemove_ColorTex fallback（pre_ui=false 时使用） |
+| `shaders/DepthToAddon.fx` | 暴露 DepthToAddon_ExportTex（RGBA32F，depth 在 alpha channel）|
+| `scripts/build.ps1` | `-Rebuild` 删除 build/ 目录；编译 dist/frame_capture.addon |
 
 ## Code Context
 
-**on_reshade_present 定时触发（替换原 F10）：**
+**Reverse-skip 逻辑（on_bind_rts_dsv 非 BB 路径）：**
 ```cpp
-static std::chrono::steady_clock::time_point s_last_capture;
-static float g_target_fps = 30.0f;  // read from FC_TargetFPS in unicap.ini
+// s_prev_non_bb_total = 上一帧的非 BB pass 总数（FF7 Remake 固定 73）
+// g_pre_ui_skip       = FC_PreUISkipCount（CLI --pre-ui-skip N）
+uint32_t target = (s_prev_non_bb_total > g_pre_ui_skip)
+                  ? (s_prev_non_bb_total - 1 - g_pre_ui_skip)
+                  : 0;
+should_record = (s_no_dsv_non_bb == target);
+// skip=0: target=72 (最后一个)；skip=5: target=67；skip=20: target=52
+```
 
-static void on_reshade_present(effect_runtime* runtime)
-{
-    if (!enableCapturing) return;
+**RT 拷贝时机（on_bind_rts_dsv BB bind 路径）：**
+```cpp
+// BB bind 时：所有非 BB pass 已完，目标 RT 在 shader_resource 状态
+cmd_list->barrier(s_last_non_bb_rt, resource_usage::shader_resource, resource_usage::copy_source);
+cmd_list->copy_texture_region(s_last_non_bb_rt, 0, nullptr, g_pre_ui_staging, 0, nullptr);
+cmd_list->barrier(s_last_non_bb_rt, resource_usage::copy_source, resource_usage::shader_resource);
+s_pre_ui_captured = true;
+```
 
-    auto tick = std::chrono::steady_clock::now();
-    float fps = (g_target_fps > 0.0f) ? g_target_fps : 30.0f;
-    if (std::chrono::duration<float>(tick - s_last_capture).count() < 1.0f / fps)
-        return;
-    s_last_capture = tick;
-    // ... capture code continues
+**use_scene_rt 判定（on_reshade_present）：**
+```cpp
+// 颜色已在 on_bind_rts_dsv 拷好，只需 map；深度在这里拷
+bool use_scene_rt = g_pre_ui_mode && s_pre_ui_captured && g_pre_ui_staging.handle != 0;
+```
+
+**HDR 解码（decode_to_rgba8）：**
+```cpp
+case format::r16g16b16a16_float: {  // DXGI value = 10
+    const uint16_t* p16 = reinterpret_cast<const uint16_t*>(row);
+    for (uint32_t x = 0; x < w; x++) {
+        out[x*4+0] = hdr_to_u8(half_to_float(p16[x*4+0]));
+        // hdr_to_u8: Reinhard(v/(1+v)) + sRGB gamma
+    }
 }
+case format::r11g11b10_float: {  // DXGI value = 26
+    // 32-bit packed: R[10:0] G[21:11] B[31:22]
+}
+// 未知格式：打印 "FC: decode fmt=N not handled" 到日志，然后 raw copy
 ```
 
-**staged texture 创建：**
+**重置帧状态（每帧末尾）：**
 ```cpp
-resource_desc sd(width, height, 1, 1,
-                 src_format, 1,
-                 memory_heap::gpu_to_cpu, resource_usage::copy_dest);
-dev->create_resource(sd, nullptr, resource_usage::copy_dest, &sbi.color_staging);
+s_prev_non_bb_total = s_no_dsv_non_bb;  // 保存本帧总数供下帧 reverse-skip 用
+s_had_depth_pass  = false;
+s_pre_ui_captured = false;
+s_no_dsv_non_bb   = 0;
+s_last_non_bb_rt  = { 0 };  // 必须清零，防止旧句柄跨帧污染
 ```
 
-**map_texture_region 使用：**
-```cpp
-subresource_data color_data = {};
-dev->map_texture_region(sbi.color_staging, 0, nullptr, map_access::read_only, &color_data);
-for (uint32_t y = 0; y < height; y++)
-    memcpy(dst + y * width * 4, src + y * color_data.row_pitch, width * 4);
-dev->unmap_texture_region(sbi.color_staging, 0);
+**诊断日志（前 30 个采集帧）：**
+```
+FC: capfN bb_handles=3 had_depth=1 no_dsv_bb=1 no_dsv_non_bb=73 captured=1
+FC: scene RT staging allocated WxHxfmt=10   ← fmt=10 = r16g16b16a16_float
+FC: decode fmt=N not handled, raw copy      ← 遇到未知格式时出现
 ```
 
-**_ensure_addon_enabled 写入 unicap.ini 的关键 keys：**
+**部署命令：**
+```powershell
+uv run main.py deploy --mode official592 --pre-ui --pre-ui-skip 15
+# 或启动游戏
+uv run main.py launch --mode official592 --pre-ui --pre-ui-skip 15 --fps 30 --duration 10
+```
+
+**unicap.ini 关键配置：**
 ```ini
 [ADDON]
-FC_EnableCapture  = 1
-FC_ExportDepth    = 1
-FC_TargetFPS      = 30
-FC_CaptureWidth   = 1600
-FC_CaptureHeight  = 1200
-
+AddonPath          = D:\dev\unicap.git\dist
+FC_PreUICapture    = 1
+FC_PreUISkipCount  = 15        ← 调整这个值（当前测试用 5，需要更大）
+FC_TargetFPS       = 30
+FC_ExportDepth     = 1
 [INPUT]
-KeyOverlay        = 0,0,0,0   ← 必须显式设置，否则 ReShade 默认写 36,0,0,0 (Home)
-KeyScreenshot     = 0,0,0,0
-KeyEffects        = 0,0,0,0
-KeyReload         = 0,0,0,0
-KeyNextPreset     = 0,0,0,0
-KeyPreviousPreset = 0,0,0,0
-
-[OVERLAY]
-TutorialProgress  = 4         ← 必须在 [OVERLAY]，不是 [GENERAL]
-```
-
-**capture_all.py — 无 F10，进度靠计文件数：**
-```python
-def run(fps, duration, frames_dir, inputs_out, watch_dir):
-    sidecar = watch_dir / "fc_output_dir.txt"
-    sidecar.write_text(str(frames_dir))   # addon 读取输出目录
-    # 只启动 input 线程，无 capture 线程
-    # 主循环计 *BackBuffer.bmp 文件数打印进度
-    # 结束时删除 sidecar
-```
-
-**CLI：**
-```
-uv run main.py launch --mode custom --game-path "E:\...\BatmanAK.exe"
-uv run main.py launch --mode custom --fps 15 --width 1280 --height 720 ...
-uv run main.py launch --mode custom --width 0 --height 0 ...  # 原始分辨率
+KeyOverlay         = 0,0,0,0   ← 必须显式设置
 ```
 
 ## Resume Instructions
 
-1. **确认 dist/frame_capture.addon 已包含定时触发代码**（commit d22b9d8，2026-04-30）：
+**目标：找到 UI 消失的 skip 临界值**
+
+1. 关闭游戏（确保 `dist/frame_capture.addon` 未被锁定）
+
+2. 用更大的 skip 部署：
    ```powershell
-   git log --oneline dist/frame_capture.addon | head -3
-   # 应看到 d22b9d8
+   uv run main.py deploy --mode official592 --pre-ui --pre-ui-skip 15
    ```
 
-2. **清理游戏目录残留**（旧版本可能遗留 ReShade.ini）：
+3. 启动游戏（通过 `main.py launch` 或手动启动，需设置 env var）：
    ```powershell
-   Remove-Item "E:\SteamLibrary\steamapps\common\Batman Arkham Knight\Binaries\Win64\ReShade.ini" -ea SilentlyContinue
+   $env:RESHADE_BASE_PATH_OVERRIDE = "$env:TEMP\unicap"
+   Start-Process "E:\games\ff7remake\End\Binaries\Win64\ff7remake_.exe"
    ```
 
-3. **Deploy + 启动**：
-   ```powershell
-   uv run main.py launch --mode custom --game-path "E:\SteamLibrary\steamapps\common\Batman Arkham Knight\Binaries\Win64\BatmanAK.exe"
-   # 游戏内按 F9 开始采集，Ctrl+C 停止
+4. 采集一批帧，检查 BMP：
+   - 期望：场景正确，UI 消失（无 waypoint 箭头、无 Commands Menu 等）
+   - 如果还有 UI：增大 skip（30、50、60）
+   - 如果图像变黑/变成完全不同的内容：skip 太大，往小调
+
+5. Binary search 参考（73 个 pass）：
+   | skip | target pass (0-indexed) | 说明 |
+   |------|------------------------|------|
+   | 5    | 67                     | 已确认有 UI |
+   | 15   | 57                     | 试这个 |
+   | 30   | 42                     | 若 15 还有 UI |
+   | 50   | 22                     | 深度 3D pass 区域 |
+
+6. 找到临界值后，固定在部署命令中；也可写死到 `tools/capture/config.py` 里。
+
+7. **验证 EXR 深度**（本次新加，未验证）：
+   ```python
+   import glob
+   exrs = glob.glob(r"D:\ff7_dataset\*\frames\*.exr")
+   print(f"{len(exrs)} EXR files found")
+   # 期望：每个 BMP 对应一个 EXR
    ```
-
-4. **验证**：
-   - `%TEMP%\unicap\unicap.log` 中有 `FC: listing all effect texture variables` → `UIRemove_ColorTex` 出现
-   - `frames/` 目录中出现 `*BackBuffer.bmp`，每 ~33ms 一个（30fps）
-   - 用 Python 验证非全黑：
-     ```python
-     import cv2; img = cv2.imread(r"path\to\frame.bmp", cv2.IMREAD_UNCHANGED)
-     print(img.shape, img.max())  # 期望 shape=(1200,1600,4), max > 0
-     ```
-   - Home/F10 键在游戏内不触发任何 ReShade 行为
-   - 无 `FC: save queue full` 连续 warning
-
-5. **若 BMP 仍全黑**：
-   - 检查 log 中 `FC: UIRemove_ColorTex not ready, skipped`（texture 未就绪）
-   - 检查 `config/unicapPreset.ini` 是否包含 `UIRemove@UIRemove.fx`
-   - 确认 unicap.ini `[INPUT] KeyOverlay = 0,0,0,0`（不是 `36,0,0,0`）
-
-6. **若 save queue 持续满**：
-   ```powershell
-   uv run main.py launch --fps 15 --width 1280 --height 720 ...
-   ```
+   如果 0 EXR：检查日志中是否有 `FC: failed to create depth staging (scene_rt)` 或
+   `DepthToAddon_ExportTex` 是否出现在 `FC: listing all effect texture variables`。
 
 ## Setup Required
 
-- VS 2022 Build Tools（重编译时需要）
+- VS 2022 Build Tools（重编 addon 时需要）
 - `uv sync`（Python 依赖）
-- Batman AK 路径：`E:\SteamLibrary\steamapps\common\Batman Arkham Knight\Binaries\Win64\BatmanAK.exe`
-- FF7 Remake 路径：`E:\games\ff7remake\End\Binaries\Win64\ff7remake_.exe`
+- FF7 Remake: `E:\games\ff7remake\End\Binaries\Win64\ff7remake_.exe`
+- 日志位置: `%TEMP%\unicap\unicap.log`（关键诊断信息都在这里）
 
 ## Warnings
 
-- **DX11 游戏不能用 `copy_texture_to_buffer`**：静默失败，BMP 全黑。当前代码已用 `copy_texture_region` + staging texture 修复。不要回退。
-- **不要用 `capture_screenshot()` + `dist/dxgi.dll`（6.7.3）**：R10G10B10A2 返回 psychedelic 色。
-- **`KeyOverlay` 必须显式写 `0,0,0,0`**：不写则 ReShade 运行时自动写入 `36,0,0,0`（Home），导致 Home 键打开 overlay。
-- **`TutorialProgress` 必须在 `[OVERLAY]`**：写到 `[GENERAL]` 静默忽略。
-- **UIRemove 必须排在 DepthToAddon 之后**（Techniques= 顺序）。
-- **`steady_clock` 的 `s_last_capture` 初始为 epoch**：首次进入 `on_reshade_present` 时差巨大，必然触发一帧。这是正常的。
-- **ff7remake_.exe 是两进程启动器**：第一个进程 ~2s 退出，第二个做真正的 DX12 渲染。
-- **Batman AK 原始分辨率 2423×1363**（奇数），`_make_video` 已处理（偶数强制）。
-- **`reshade/deps/glad/target/`** 内有 force-add 的预生成 C headers，不要删除。
-- **BMP 格式是 32-bit BITMAPV4HEADER**（stbi_write_bmp comp=4），OpenCV `IMREAD_UNCHANGED` 可正确读取。
+- **不要在 reshade_present 时拷贝游戏 RT**：UE4 transient resources 在 Present 后 alias 释放，barrier 会触发 GPU TDR。当前代码的拷贝在 `on_bind_rts_dsv` BB bind 事件，不要改回去。
+- **barrier 状态必须用 `shader_resource`**：目标 RT 在最后一个使用它的 pass 之后处于 SR 状态（被 final composite pass 读取）。如果改成 `render_target` 会状态不匹配。
+- **on_begin_render_pass 和 on_bind_rts_dsv 都会触发**：DX12 游戏可能同时用两个 API。`s_pre_ui_captured` gate 防止重复拷贝（先到先得，第二个直接 return）。
+- **s_last_non_bb_rt 每帧必须清零**：在 `reset_frame_state` 末尾已有 `s_last_non_bb_rt = {0}`。若漏掉会导致旧句柄跨帧使用，造成状态不匹配崩溃。
+- **s_prev_non_bb_total 第一帧为 0**：第一帧 skip 逻辑走 always-overwrite（最后一个 RT），第二帧起才生效 reverse-skip。这是正常行为。
+- **FF7 Remake 是双进程启动**：第一进程约 2s 退出，第二进程做实际 DX12 渲染。`on_begin_render_effects` 的 backbuffer handle 刷新逻辑依赖这个（每帧重新枚举）。
+- **fmt=10 = r16g16b16a16_float** 是当前 FF7 Remake 中间 RT 格式，decode_to_rgba8 已处理。如果遇到其他 fmt 值，看日志 `FC: decode fmt=N not handled`，再加 case。
+- **不要改 `reshade-addons/deps/reshade/include` 包含路径**：addon 用 v5 wrapper API，与 official592 dxgi.dll 二进制兼容；改路径会破坏兼容性。
