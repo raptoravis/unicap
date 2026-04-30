@@ -78,14 +78,8 @@ namespace DepthToAddon {
 		return normalize(cross(vertCenter - vertNorth, vertCenter - vertEast)) * 0.5 + 0.5;
 	}
 
-	void PS_DepthToAddon(in float4 position : SV_Position, in float2 texcoord : TEXCOORD,
-		out float4 backbuf    : SV_Target0,  // → backbuffer (pass-through, prevents backbuffer contamination)
-		out float4 exportTex  : SV_Target1,  // → DepthToAddon_ExportTex
-		out float4 depthTex   : SV_Target2,  // → DepthToAddon_DepthTex
-		out float4 normalTex  : SV_Target3)  // → DepthToAddon_NormalTex
+	void PS_DepthToAddon(in float4 position : SV_Position, in float2 texcoord : TEXCOORD, out float4 exportTex : SV_Target0, out float4 depthTex : SV_Target1, out float4 normalTex : SV_Target2)
 	{
-		backbuf = tex2D(ReShade::BackBuffer, texcoord);
-
 		if (EXPORT_NON_LINEARIZED){
 			exportTex = float4(GetScreenSpaceNormal(texcoord).xyz, GetRawDepth(texcoord).x);
 		} else {
@@ -105,10 +99,9 @@ namespace DepthToAddon {
 		{
 			VertexShader = PostProcessVS;
 			PixelShader = PS_DepthToAddon;
-			// SV_Target0 → backbuffer (no RenderTarget0)
-			RenderTarget1 = DepthToAddon_ExportTex;
-			RenderTarget2 = DepthToAddon_DepthTex;
-			RenderTarget3 = DepthToAddon_NormalTex;
+			RenderTarget0 = DepthToAddon_ExportTex;
+			RenderTarget1 = DepthToAddon_DepthTex;
+			RenderTarget2 = DepthToAddon_NormalTex;
 		}
 	}
 }

@@ -13,12 +13,18 @@ Usage:
 import argparse
 import configparser
 import ctypes
-from datetime import datetime
 import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
+
+import tools.capture.capture_all as capture_all
+import tools.capture.pack_hdf5 as pack_hdf5
+from tools.capture.config import DATASET_ROOT, FRAMES_DIR, GAME_PATH, HDF5_OUT, INPUTS_OUT
+
+ROOT = Path(__file__).parent
 
 _user32 = ctypes.WinDLL("user32")
 
@@ -41,18 +47,19 @@ def _wait_for_hotkey(key_name: str):
             return
         time.sleep(0.05)
 
-ROOT = Path(__file__).parent
-
-from tools.capture.config import GAME_PATH, GAME_WIN64, FRAMES_DIR, INPUTS_OUT, HDF5_OUT, DATASET_ROOT
-import tools.capture.capture_all as capture_all
-import tools.capture.pack_hdf5 as pack_hdf5
-
 
 _SKIP_EXE = {
-    "crashreportclient.exe", "ue4prereqsetup_x64.exe", "ueprereqsetup_x64.exe",
-    "dxsetup.exe", "uninstall.exe", "uninst.exe", "vcredist_x64.exe",
-    "vc_redist.x64.exe", "dotnetfx.exe",
+    "crashreportclient.exe",
+    "ue4prereqsetup_x64.exe",
+    "ueprereqsetup_x64.exe",
+    "dxsetup.exe",
+    "uninstall.exe",
+    "uninst.exe",
+    "vcredist_x64.exe",
+    "vc_redist.x64.exe",
+    "dotnetfx.exe",
 }
+
 
 def _resolve_game_path(path_str: str):
     p = Path(path_str)
@@ -72,14 +79,19 @@ def _resolve_game_path(path_str: str):
 
 
 def _sources(mode: str):
-    """Returns (src_dll, src_addon, shader_src_or_None, deploy_shaders)."""
+    """Returns (src_dll, src_addon, shader_src, deploy_shaders).
+
+    Shaders always need to be deployed: the addon enumerates `DepthToAddon_ExportTex`
+    by name and depends on DepthToAddon.fx + ReShade.fxh + UIRemove.fx being present.
+    """
+    shader_src = ROOT / "shaders"
     if mode == "custom":
         dist = ROOT / "dist"
-        return dist / "dxgi.dll", dist / "frame_capture.addon", dist / "reshade-shaders" / "Shaders", True
+        return dist / "dxgi.dll", dist / "frame_capture.addon", shader_src, True
     addon = ROOT / "vendor" / "addon_official" / "frame_capture.addon"
     if mode == "official592":
-        return ROOT / "vendor" / "reshade592" / "dxgi.dll", addon, None, False
-    return ROOT / "vendor" / "reshade673" / "dxgi.dll", addon, None, False
+        return ROOT / "vendor" / "reshade592" / "dxgi.dll", addon, shader_src, True
+    return ROOT / "vendor" / "reshade673" / "dxgi.dll", addon, shader_src, True
 
 
 def _ensure_addon_enabled(game_dir: Path):
@@ -89,17 +101,30 @@ def _ensure_addon_enabled(game_dir: Path):
     if ini.exists():
         cfg.read(ini, encoding="utf-8")
     for section, key, value in [
-        ("ADDON",   "FC_EnableCapture",      "1"),
-        ("ADDON",   "FC_ExportDepth",        "1"),
-        ("ADDON",   "FC_ExportNormal",       "1"),
+        ("ADDON", "FC_EnableCapture", "1"),
+        ("ADDON", "FC_ExportDepth", "1"),
+        ("ADDON", "FC_ExportNormal", "0"),
         ("OVERLAY", "ShowScreenshotMessage", "0"),  # 不在画面里显示截图通知
-        ("INPUT",   "KeyScreenshot",         "0,0,0,0"),  # 清空截图快捷键，避免与 F10 冲突
+        ("INPUT", "KeyScreenshot", "0,0,0,0"),  # 清空截图快捷键，避免与 F10 冲突
+        ("GENERAL", "EffectSearchPaths", ".\\reshade-shaders\\Shaders\\"),
+        ("GENERAL", "TextureSearchPaths", ".\\reshade-shaders\\Textures\\"),
     ]:
         if not cfg.has_section(section):
             cfg.add_section(section)
         cfg.set(section, key, value)
     with open(ini, "w", encoding="utf-8") as f:
         cfg.write(f)
+
+
+def _ensure_preset(game_dir: Path):
+    # ReShade 不会因为 technique 上的 `enabled = 1` annotation 自动激活技术，
+    # 必须在 preset 里显式列出。顺序也要锁定：DepthToAddon 在前写自定义 RT，
+    # UIRemove 在后把原始 BackBuffer 写回真实后备缓冲，capture_screenshot 才能拿到正确画面。
+    preset = game_dir / "ReShadePreset.ini"
+    techniques = "DepthToAddon@DepthToAddon.fx,UIRemove@UIRemove.fx"
+    content = f"Techniques={techniques}\nTechniqueSorting={techniques}\n"
+    if not preset.exists() or "DepthToAddon@DepthToAddon.fx" not in preset.read_text(encoding="utf-8"):
+        preset.write_text(content, encoding="utf-8")
 
 
 def cmd_deploy(args):
@@ -114,21 +139,23 @@ def cmd_deploy(args):
     if dst_dll.exists() and not (game_dir / "dxgi.dll.bak").exists():
         shutil.copy2(dst_dll, game_dir / "dxgi.dll.bak")
 
-    shutil.copy2(src_dll,   dst_dll)
+    shutil.copy2(src_dll, dst_dll)
     shutil.copy2(src_addon, game_dir / "frame_capture.addon")
     _ensure_addon_enabled(game_dir)
+    _ensure_preset(game_dir)
 
     if deploy_shaders:
         shader_dst = game_dir / "reshade-shaders" / "Shaders"
         shader_dst.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(shader_src / "ReShade.fxh", shader_dst)
         shutil.copy2(shader_src / "DepthToAddon.fx", shader_dst)
-        shutil.copy2(shader_src / "UIRemove.fx",     shader_dst)
+        shutil.copy2(shader_src / "UIRemove.fx", shader_dst)
 
 
 def cmd_capture(args):
-    tag       = datetime.now().strftime("%Y%m%d_%H%M%S")
+    tag = datetime.now().strftime("%Y%m%d_%H%M%S")
     game_name = getattr(args, "game_name", "") or ""
-    watch_dir = getattr(args, "watch_dir",  None)
+    watch_dir = getattr(args, "watch_dir", None)
     if watch_dir is None:
         game_dir, game_exe = _resolve_game_path(args.game_path)
         watch_dir = game_dir
@@ -136,10 +163,10 @@ def cmd_capture(args):
             game_name = game_exe.stem
     game_name = game_name or "capture"
     session_dir = DATASET_ROOT / f"{game_name}_{tag}"
-    frames_dir  = session_dir / "frames"
-    inputs_out  = session_dir / "inputs.jsonl"
-    hdf5_out    = session_dir / "dataset.h5"
-    video_out   = session_dir / "video.mp4"
+    frames_dir = session_dir / "frames"
+    inputs_out = session_dir / "inputs.jsonl"
+    hdf5_out = session_dir / "dataset.h5"
+    video_out = session_dir / "video.mp4"
     session_dir.mkdir(parents=True, exist_ok=True)
     capture_all.run(
         fps=args.fps,
@@ -171,28 +198,65 @@ def cmd_launch(args):
 
 def _make_video(frames_dir: Path, output: Path, fps: int):
     import cv2
+
     bmps = sorted(frames_dir.glob("*BackBuffer.bmp"))
     if not bmps:
         bmps = sorted(frames_dir.glob("*.bmp"))
     if not bmps:
-        print(f"[VIDEO] 未找到 BMP 文件，跳过")
+        print("[VIDEO] 未找到 BMP 文件，跳过")
         return
 
     first = cv2.imread(str(bmps[0]))
     if first is None:
-        print(f"[VIDEO] 无法读取第一帧，跳过")
+        print("[VIDEO] 无法读取第一帧，跳过")
         return
     h, w = first.shape[:2]
-
     output.parent.mkdir(parents=True, exist_ok=True)
-    writer = cv2.VideoWriter(str(output), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-    for i, bmp in enumerate(bmps):
-        img = cv2.imread(str(bmp))
-        if img is not None:
-            writer.write(img)
-        if (i + 1) % fps == 0:
-            print(f"[VIDEO] {i+1}/{len(bmps)} 帧", flush=True)
-    writer.release()
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-f",
+            "rawvideo",
+            "-vcodec",
+            "rawvideo",
+            "-s",
+            f"{w}x{h}",
+            "-pix_fmt",
+            "bgr24",
+            "-r",
+            str(fps),
+            "-i",
+            "pipe:",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-crf",
+            "18",
+            str(output),
+        ]
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        for i, bmp in enumerate(bmps):
+            img = cv2.imread(str(bmp))
+            if img is not None:
+                proc.stdin.write(img.tobytes())
+            if (i + 1) % fps == 0:
+                print(f"[VIDEO] {i + 1}/{len(bmps)} 帧", flush=True)
+        proc.stdin.close()
+        proc.wait()
+    else:
+        writer = cv2.VideoWriter(str(output), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        for i, bmp in enumerate(bmps):
+            img = cv2.imread(str(bmp))
+            if img is not None:
+                writer.write(img)
+            if (i + 1) % fps == 0:
+                print(f"[VIDEO] {i + 1}/{len(bmps)} 帧", flush=True)
+        writer.release()
+
     print(f"[VIDEO] 完成：{len(bmps)} 帧 @ {fps}fps → {output}")
 
 
@@ -217,40 +281,41 @@ def main():
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("deploy", help="部署 ReShade DLL + addon 到游戏目录")
-    p.add_argument("--mode",      choices=["custom", "official592", "official673"], default="custom")
+    p.add_argument("--mode", choices=["custom", "official592", "official673"], default="custom")
     p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录（目录时自动寻找最大 exe）")
 
     p = sub.add_parser("capture", help="启动采集（不部署）")
     p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录，用于确定帧文件监视目录")
     p.add_argument("--game-name", default="", help="输出目录前缀（默认从 --game-path 推导）")
-    p.add_argument("--fps",       type=int,   default=30)
-    p.add_argument("--duration",  type=float, default=0, metavar="SEC", help="录制秒数，0=无限")
+    p.add_argument("--fps", type=int, default=30)
+    p.add_argument("--duration", type=float, default=0, metavar="SEC", help="录制秒数，0=无限")
 
     p = sub.add_parser("launch", help="部署 + 启动游戏 + 采集")
-    p.add_argument("--mode",       choices=["custom", "official592", "official673"], default="custom")
-    p.add_argument("--game-path",  default=str(GAME_PATH), help="游戏 exe 路径或目录")
-    p.add_argument("--game-name",  default="", help="输出目录前缀（默认从 exe 文件名推导）")
-    p.add_argument("--start-key",  default="F9",
-                   help="游戏内按此键触发采集，支持 F1-F12 / ScrollLock（默认 F9）")
-    p.add_argument("--fps",        type=int,   default=30)
-    p.add_argument("--duration",   type=float, default=10, metavar="SEC")
+    p.add_argument("--mode", choices=["custom", "official592", "official673"], default="custom")
+    p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录")
+    p.add_argument("--game-name", default="", help="输出目录前缀（默认从 exe 文件名推导）")
+    p.add_argument("--start-key", default="F9", help="游戏内按此键触发采集，支持 F1-F12 / ScrollLock（默认 F9）")
+    p.add_argument("--fps", type=int, default=30)
+    p.add_argument("--duration", type=float, default=10, metavar="SEC")
     p.add_argument("--deploy-only", action="store_true")
 
     p = sub.add_parser("video", help="从 frames 目录生成 MP4 视频")
     p.add_argument("--frames-dir", default=str(FRAMES_DIR))
-    p.add_argument("--output",     default=str(DATASET_ROOT / "video.mp4"))
-    p.add_argument("--fps",        type=int, default=30)
+    p.add_argument("--output", default=str(DATASET_ROOT / "video.mp4"))
+    p.add_argument("--fps", type=int, default=30)
 
     p = sub.add_parser("pack", help="pack frame data into HDF5")
-    p.add_argument("--frames-dir",   default=str(FRAMES_DIR))
-    p.add_argument("--inputs",       default=str(INPUTS_OUT))
-    p.add_argument("--output",       default=str(HDF5_OUT))
-    p.add_argument("--spot-check",   metavar="H5_PATH")
+    p.add_argument("--frames-dir", default=str(FRAMES_DIR))
+    p.add_argument("--inputs", default=str(INPUTS_OUT))
+    p.add_argument("--output", default=str(HDF5_OUT))
+    p.add_argument("--spot-check", metavar="H5_PATH")
     p.add_argument("--check-frames", default="0,99,499")
-    p.add_argument("--check-out",    default=str(DATASET_ROOT / "spot_checks"))
+    p.add_argument("--check-out", default=str(DATASET_ROOT / "spot_checks"))
 
     args = parser.parse_args()
-    {"deploy": cmd_deploy, "capture": cmd_capture, "launch": cmd_launch, "video": cmd_video, "pack": cmd_pack}[args.cmd](args)
+    {"deploy": cmd_deploy, "capture": cmd_capture, "launch": cmd_launch, "video": cmd_video, "pack": cmd_pack}[
+        args.cmd
+    ](args)
 
 
 if __name__ == "__main__":

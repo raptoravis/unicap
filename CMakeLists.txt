@@ -83,7 +83,10 @@ set(SHADER_DST "${CMAKE_SOURCE_DIR}/dist/reshade-shaders/Shaders")
 add_custom_target(shaders ALL
     COMMAND ${CMAKE_COMMAND} -E make_directory "${SHADER_DST}"
     COMMAND ${CMAKE_COMMAND} -E copy
-        "${CMAKE_SOURCE_DIR}/murchFX/Shaders/DepthToAddon.fx"
+        "${CMAKE_SOURCE_DIR}/shaders/ReShade.fxh"
+        "${SHADER_DST}/ReShade.fxh"
+    COMMAND ${CMAKE_COMMAND} -E copy
+        "${CMAKE_SOURCE_DIR}/shaders/DepthToAddon.fx"
         "${SHADER_DST}/DepthToAddon.fx"
     COMMAND ${CMAKE_COMMAND} -E copy
         "${CMAKE_SOURCE_DIR}/shaders/UIRemove.fx"

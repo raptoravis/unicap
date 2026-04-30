@@ -22,12 +22,15 @@
 #include "tinyexr.h"
 #include "miniz.c"
 #include "miniz.h"
+#include <chrono>
+#include <ctime>
 
 static bool enableCapturing = true;
 static bool enableDepthExp = true;
-static bool enableNormalExp = true;
+static bool enableNormalExp = false;
 
 static bool doOnce = false;
+static bool g_logged_textures = false;
 static int windowSize[2] = { 320, 560 };
 
 using namespace reshade::api;
@@ -142,26 +145,42 @@ static void on_destroy_effect_runtime(effect_runtime* runtime)
 	runtime->destroy_private_data<stored_buffers_inst>();
 }
 
-static void on_begin_render_effects(effect_runtime* runtime, command_list* cmd_list, resource_view, resource_view)
+static void fc_find_export_tex(effect_runtime* runtime, stored_buffers_inst& sbi)
 {
-	stored_buffers_inst& sbi = runtime->get_private_data<stored_buffers_inst>();
 	device* const device = runtime->get_device();
-
-	runtime->enumerate_texture_variables(nullptr, [&sbi, &device](effect_runtime* runtime, auto variable) {
-		char source[32] = "";
-		runtime->get_texture_variable_name(variable, source);
-		if (std::strcmp(source, "DepthToAddon_ExportTex") == 0) {
+	runtime->enumerate_texture_variables(nullptr, [&sbi, &device](effect_runtime* rt, auto variable) {
+		char name[256] = {};
+		rt->get_texture_variable_name(variable, name);
+		if (std::strcmp(name, "DepthToAddon_ExportTex") == 0) {
 			resource_view srv = { 0 };
-			runtime->get_texture_binding(variable, &srv);
+			rt->get_texture_binding(variable, &srv);
 			if (srv != 0) {
-				sbi.update(device->get_resource_from_view(srv), device->get_resource_desc(device->get_resource_from_view(srv)), srv);
-			}
-			else
-			{
+				resource r = device->get_resource_from_view(srv);
+				sbi.update(r, device->get_resource_desc(r), srv);
+			} else {
 				sbi.reset();
 			}
 		}
 	});
+}
+
+static void on_begin_render_effects(effect_runtime* runtime, command_list* cmd_list, resource_view, resource_view)
+{
+	stored_buffers_inst& sbi = runtime->get_private_data<stored_buffers_inst>();
+
+	if (!g_logged_textures) {
+		reshade::log_message(3, "FC: listing all effect texture variables:");
+		runtime->enumerate_texture_variables(nullptr, [](effect_runtime* rt, auto variable) {
+			char name[256] = {};
+			rt->get_texture_variable_name(variable, name);
+			char msg[320];
+			sprintf_s(msg, "FC:   '%s'", name);
+			reshade::log_message(3, msg);
+		});
+		g_logged_textures = true;
+	}
+
+	fc_find_export_tex(runtime, sbi);
 }
 
 bool SaveEXR(const float* rgb, int width, int height, const char* outfilename, bool single_channel) {
@@ -307,7 +326,10 @@ static bool saveImage(effect_runtime* runtime, std::filesystem::path save_path, 
 		{
 			if ((resource_desc.usage & resource_usage::copy_source) != resource_usage::copy_source)
 			{
-				return false;
+				char msg[256];
+				sprintf_s(msg, "FC: ExportTex missing copy_source flag (usage = %u), attempting copy anyway",
+					static_cast<uint32_t>(resource_desc.usage));
+				reshade::log_message(2, msg);
 			}
 
 			if (!device->create_resource(reshade::api::resource_desc(slice_pitch, memory_heap::gpu_to_cpu, resource_usage::copy_dest), nullptr, resource_usage::copy_dest, &intermediate))
@@ -324,7 +346,12 @@ static bool saveImage(effect_runtime* runtime, std::filesystem::path save_path, 
 		else
 		{
 			if ((resource_desc.usage & resource_usage::copy_source) != resource_usage::copy_source)
-				return false;
+			{
+				char msg[256];
+				sprintf_s(msg, "FC: ExportTex missing copy_source flag (usage = %u), attempting copy anyway",
+					static_cast<uint32_t>(resource_desc.usage));
+				reshade::log_message(2, msg);
+			}
 
 			if (!device->create_resource(reshade::api::resource_desc(resource_desc.texture.width, resource_desc.texture.height, 1, 1, format_to_default_typed(resource_desc.texture.format), 1, memory_heap::gpu_to_cpu, resource_usage::copy_dest), nullptr, resource_usage::copy_dest, &intermediate))
 			{
@@ -391,79 +418,83 @@ static bool saveImage(effect_runtime* runtime, std::filesystem::path save_path, 
 
 static void on_reshade_present(effect_runtime* runtime)
 {
-	if (runtime->is_key_pressed(0x79) && enableCapturing)
+	if (!runtime->is_key_pressed(0x79) || !enableCapturing)
+		return;
+
+	WCHAR file_prefix[MAX_PATH] = L"";
+	GetModuleFileNameW(nullptr, file_prefix, ARRAYSIZE(file_prefix));
+	std::filesystem::path save_path = file_prefix;
+	save_path += L' ';
+	const auto now = std::chrono::system_clock::now();
+	const auto now_seconds = std::chrono::time_point_cast<std::chrono::seconds>(now);
+	char timestamp[21];
+	const std::time_t t = std::chrono::system_clock::to_time_t(now_seconds);
+	tm tm_val; localtime_s(&tm_val, &t);
+	sprintf_s(timestamp, "%.4d-%.2d-%.2d", tm_val.tm_year + 1900, tm_val.tm_mon + 1, tm_val.tm_mday);
+	save_path += timestamp;
+	save_path += L' ';
+	sprintf_s(timestamp, "%.2d-%.2d-%.2d", tm_val.tm_hour, tm_val.tm_min, tm_val.tm_sec);
+	save_path += timestamp;
+	save_path += L' ';
+	sprintf_s(timestamp, "%.3lld", std::chrono::duration_cast<std::chrono::milliseconds>(now - now_seconds).count());
+	save_path += timestamp;
+	save_path += L' ';
+
+	uint32_t width = 0, height = 0;
+	runtime->get_screenshot_width_and_height(&width, &height);
+	std::vector<uint8_t> pixels(width * height * 4);
+	runtime->capture_screenshot(pixels.data());
+
+	resource backBuffer = runtime->get_current_back_buffer();
+	resource_desc rd = runtime->get_device()->get_resource_desc(backBuffer);
+	switch (rd.texture.format)
 	{
-		uint32_t width, height;
-		device* const device = runtime->get_device();
-		resource backBuffer = runtime->get_current_back_buffer();
-		resource_desc resource_desc = device->get_resource_desc(backBuffer);
+	case format::b8g8r8a8_unorm:
+	case format::b8g8r8a8_unorm_srgb:
+	case format::b8g8r8x8_unorm:
+	case format::b8g8r8x8_unorm_srgb:
+		for (uint32_t i = 0; i < width * height * 4; i += 4)
+			std::swap(pixels[i], pixels[i + 2]);
+		break;
+	default:
+		break;
+	}
 
-		runtime->get_screenshot_width_and_height(&width, &height);
-		std::vector<uint8_t> pixels(width * height * 4);
+	std::filesystem::path bmp_path = save_path;
+	bmp_path += L"BackBuffer.bmp";
+	stbi_write_bmp(bmp_path.u8string().c_str(), width, height, 4, pixels.data());
 
-		runtime->capture_screenshot(pixels.data());
+	stored_buffers_inst& sbi = runtime->get_private_data<stored_buffers_inst>();
 
-		// capture_screenshot returns BGRA (not RGBA) when the swapchain uses BGRA format (common on DX12/Windows).
-		// stbi_write_bmp expects RGBA, so swap R↔B channels.
-		switch (resource_desc.texture.format)
-		{
-		case format::b8g8r8a8_unorm:
-		case format::b8g8r8a8_unorm_srgb:
-		case format::b8g8r8x8_unorm:
-		case format::b8g8r8x8_unorm_srgb:
-			for (uint32_t i = 0; i < width * height * 4; i += 4)
-				std::swap(pixels[i], pixels[i + 2]);
-			break;
-		default:
-			break;
-		}
+	// Fallback: enumerate ExportTex now (in case on_begin_render_effects missed it)
+	if (sbi.export_texture_r == 0) {
+		fc_find_export_tex(runtime, sbi);
+		char msg[256];
+		sprintf_s(msg, "FC: fallback ExportTex lookup → handle = %llu", sbi.export_texture_r.handle);
+		reshade::log_message(3, msg);
+	} else {
+		char msg[256];
+		sprintf_s(msg, "FC: ExportTex cached → handle = %llu, format = %u, usage = %u",
+			sbi.export_texture_r.handle,
+			static_cast<uint32_t>(sbi.export_texture_rd.texture.format),
+			static_cast<uint32_t>(sbi.export_texture_rd.usage));
+		reshade::log_message(3, msg);
+	}
 
-		WCHAR file_prefix[MAX_PATH] = L"";
-		GetModuleFileNameW(nullptr, file_prefix, ARRAYSIZE(file_prefix));
+	type tex_type;
 
-		std::filesystem::path save_path = file_prefix;
-		save_path += L' ';
+	if (enableDepthExp) {
+		std::filesystem::path depth_path = save_path;
+		depth_path += L"DepthBuffer.exr";
+		tex_type = depth;
+		saveImage(runtime, depth_path, sbi.export_texture_r, sbi.export_texture_rd, sbi.export_texture_rd.texture.format, tex_type);
+	}
 
-		const auto now = std::chrono::system_clock::now();
-		const auto now_seconds = std::chrono::time_point_cast<std::chrono::seconds>(now);
-
-		char timestamp[21];
-		const std::time_t t = std::chrono::system_clock::to_time_t(now_seconds);
-		tm tm; localtime_s(&tm, &t);
-		sprintf_s(timestamp, "%.4d-%.2d-%.2d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
-		save_path += timestamp;
-		save_path += L' ';
-		sprintf_s(timestamp, "%.2d-%.2d-%.2d", tm.tm_hour, tm.tm_min, tm.tm_sec);
-		save_path += timestamp;
-		save_path += L' ';
-		sprintf_s(timestamp, "%.3lld", std::chrono::duration_cast<std::chrono::milliseconds>(now - now_seconds).count());
-		save_path += timestamp;
-		save_path += L' ';
-
-		std::filesystem::path save_path_o = save_path;
-		std::filesystem::path save_path_c = save_path_o;
-
-		save_path += L"BackBuffer.bmp";
-
-		stbi_write_bmp(save_path.u8string().c_str(), width, height, 4, pixels.data());
-
-		type tex_type;
-
-		if (enableDepthExp) {
-			save_path_c = save_path_o;
-			save_path_c += L"DepthBuffer.exr";
-			stored_buffers_inst& sbi = runtime->get_private_data<stored_buffers_inst>();
-			tex_type = depth;
-			saveImage(runtime, save_path_c, sbi.export_texture_r, sbi.export_texture_rd, sbi.export_texture_rd.texture.format, tex_type);
-		}
-
-		if (enableNormalExp) {
-			save_path_c = save_path_o;
-			save_path_c += L"NormalMap.exr";
-			stored_buffers_inst& sbi = runtime->get_private_data<stored_buffers_inst>();
-			tex_type = normal;
-			saveImage(runtime, save_path_c, sbi.export_texture_r, sbi.export_texture_rd, sbi.export_texture_rd.texture.format, tex_type);
-		}
+	if (enableNormalExp) {
+		std::filesystem::path normal_path = save_path;
+		normal_path += L"NormalMap.exr";
+		tex_type = normal;
+		saveImage(runtime, normal_path, sbi.export_texture_r, sbi.export_texture_rd, sbi.export_texture_rd.texture.format, tex_type);
 	}
 }
 
