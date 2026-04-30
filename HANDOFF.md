@@ -1,202 +1,146 @@
-# Handoff: Restore correct BMP capture in unicap pipeline (FF7 Remake)
+# Handoff: unicap pipeline — fully working, ready for customization
 
-**Generated**: 2026-04-30 (after session ending ~08:51)
-**Branch**: master
-**Status**: Likely Resolved — awaiting user confirmation that `--mode official592` produces correct BMP
+**Generated**: 2026-04-30
+**Branch**: master (2 commits ahead of origin)
+**Status**: Working — pipeline confirmed correct, ready for next development phase
 
 ## Goal
 
-Frame capture (`unicap`) on FF7 Remake should produce, on each F10 press:
-- `*BackBuffer.bmp` showing the actual game image (3840×2160)
-- `*DepthBuffer.exr` containing linear depth from DepthToAddon.fx
-
-The user's last working commit was `f19a9d4` (vendored official 5.9.2 binaries). After commits converted submodules to vendored files and `--mode custom` (CMake-built ReShade) became default, BMP started showing normal-map / psychedelic patterns and EXR stopped writing.
+Game capture pipeline for FF7 Remake (DX12, R10G10B10A2_UNORM swap chain): each F10 press produces a correct `*BackBuffer.bmp` (game image) + `*DepthBuffer.exr` (linear depth). User wants `--mode custom` as the default so they can customize the addon (`frame_capture.cpp`) and shaders freely.
 
 ## Completed
 
-- [x] Identified root cause #1: my custom `shaders/ReShade.fxh` had unconditional `#define BUFFER_RCP_WIDTH/HEIGHT`, but ReShade runtime predefines them. Both shaders failed to compile silently. **Fixed** with `#ifndef` guards (this got EXR working).
-- [x] Identified root cause #2: with no `ReShadePreset.ini`, ReShade does NOT auto-enable techniques even when shaders carry `enabled = 1` annotations. **Fixed** by adding `_ensure_preset()` in `main.py` that writes `Techniques=` and `TechniqueSorting=`.
-- [x] Identified root cause #3 (the real one for the BMP issue): the `reshade/` directory is NOT actual 5.9.2 source — its `res/version.h` reads `VERSION_FULL 0.0.0.1` and our build reports `'0.0.0.1' (64-bit)` in the log. It's a development snapshot, not the 5.9.2 release. Behavior of `render_effects` / `capture_screenshot` differs from real 5.9.2 on R10G10B10A2 swap chains, producing wrong BMP.
-- [x] Made `--mode official592` deploy shaders too (previously `deploy_shaders=False` for non-custom modes, which is why nobody noticed — the official addon needs DepthToAddon.fx to find ExportTex).
-- [x] Deployed real 5.9.2 official binaries to FF7R Win64 (`vendor/reshade592/dxgi.dll` 4.16 MB + `vendor/addon_official/frame_capture.addon` 100 KB) along with shaders + ReShadePreset.ini. **User has not yet tested this configuration.**
-- [x] Restored UIRemove.fx to deploy (I had wrongly removed it earlier this session).
-- [x] Removed the stray 4-output MRT version of DepthToAddon.fx, reverting `shaders/DepthToAddon.fx` to murchFX 3-output original (writes only to custom textures: ExportTex/DepthTex/NormalTex).
-- [x] Added diagnostic logging in `frame_capture.cpp` (`FC: listing all effect texture variables`, `FC: ExportTex cached → handle = …`, etc.).
-- [x] Removed the silent-fail `copy_source` usage check in `saveImage` (the texture turned out to have it — usage = 7364 = 0x1CC4 includes 0x800/copy_source — so the check was harmless but the early-return was a hazard).
-- [x] Added `FC_ExportNormal=0` default; only depth + BMP are captured by default.
+- [x] Identified root cause of wrong BMP: `reshade/` source is **6.7.3.16/17 UNOFFICIAL** (not 5.9.2 as CMakeLists.txt claimed). Its `capture_screenshot` reads the wrong internal buffer on R10G10B10A2 swap chains, producing ExportTex-like (psychedelic/normal-map) colors in the BMP.
+- [x] Fixed `--mode custom`: now deploys `vendor/reshade592/dxgi.dll` (official 5.9.2) + `dist/frame_capture.addon` (custom-compiled). BMP and EXR both correct — **confirmed by user**.
+- [x] Fixed `ReShade.fxh` redefinition issue: `#ifndef` guards on `BUFFER_RCP_WIDTH/HEIGHT` — without this, both shaders fail to compile silently.
+- [x] Fixed technique activation: ReShade ignores `enabled = 1` annotations without a preset file. `_ensure_preset()` in `main.py` always writes `ReShadePreset.ini` with both techniques.
+- [x] Restored UIRemove.fx to deploy for all modes — it is the required final-pass passthrough that writes `tex2D(ReShade::BackBuffer, uv)` back to the swap chain so `capture_screenshot` sees the game image.
+- [x] Removed `add_dependencies(frame_capture reshade_core)` from CMakeLists.txt — addon now builds independently without triggering the slow 6.7.3 MSBuild.
+- [x] Reverted `feb4c39` default-mode change — `--mode custom` stays default.
 
 ## Not Yet Done
 
-- [ ] **User must verify `--mode official592` actually produces correct BMP + EXR.** Expected log line on next run: `Initializing crosire's ReShade version '5.9.2'` (NOT `0.0.0.1`).
-- [ ] Decide what to do with `--mode custom`:
-  - Option A: delete it entirely; rely on vendored `vendor/reshade592/dxgi.dll`.
-  - Option B: replace `reshade/` source with the actual 5.9.2 release tag (https://github.com/crosire/reshade tag `v5.9.2`) so `--mode custom` produces a correct binary.
-  - Option C: leave it broken but mark it experimental.
-- [ ] Commit the changes once user confirms working.
+- [ ] Push 2 local commits to origin (`git push`)
+- [ ] Decide what to do with `reshade/` source directory (6.7.3.16 UNOFFICIAL, unused): delete it to save space, or replace with actual 5.9.2 tag if DLL customization is ever needed.
+- [ ] Whatever addon/shader customizations the user plans to make (not yet specified).
 
 ## Failed Approaches (Don't Repeat These)
 
-1. **Removed UIRemove.fx from deploy thinking it caused "psychedelic" colors** (mid-session). Wrong. UIRemove is the *fix*, not the bug — it's a pure passthrough that writes the original `ReShade::BackBuffer` content to the swap chain backbuffer at the end of the technique chain, restoring the game image for `capture_screenshot`. Without it, ReShade's effect pipeline can leave garbage in the backbuffer. *Re-added it.*
+1. **Switching default mode to `official592`** — reverted. User wants `--mode custom` as default because addon customization is the whole point.
 
-2. **Wrote `shaders/ReShade.fxh` with unconditional `#define BUFFER_RCP_WIDTH (1.0/BUFFER_WIDTH)`**. ReShade runtime predefines this macro. Both DepthToAddon.fx and UIRemove.fx failed to compile with `preprocessor error: redefinition of 'BUFFER_RCP_WIDTH'`. *Fixed* with `#ifndef` guards. This was the smoking gun for "no EXR" — shaders silently weren't compiling.
+2. **Using `dist/dxgi.dll` (built from `reshade/` source) for BMP capture** — `reshade/` is 6.7.3.16 UNOFFICIAL. Its `capture_screenshot` on R10G10B10A2 swap chains returns contents of an internal staging buffer that ends up holding DepthToAddon's ExportTex data (not the game image). Official 5.9.2 handles this correctly. **Do not attempt to use `dist/dxgi.dll` for capture** — the reshade/ source version problem would need to be fixed first.
 
-3. **Tried 4-output MRT in DepthToAddon.fx (commit `424589e`)** with explicit backbuffer passthrough (SV_Target0 → backbuffer, SV_Target1/2/3 → custom). Worked structurally but was abandoned in favor of having UIRemove handle the passthrough as a separate technique (cleaner separation; commit `a69d083`). The 4-output version was leftover at one point in this session and got re-staged — **do not bring it back**, it conflicts with murchFX original.
+3. **Removing UIRemove.fx** — wrong. UIRemove is the fix, not a bug. Without it, ReShade's effect pipeline can leave DepthToAddon render targets in the backbuffer, and `capture_screenshot` captures those. UIRemove must run last and writes the pre-effect copy back to the swap chain.
 
-4. **Assumed `technique X < enabled = 1; >` annotation alone enables a technique.** It does not. ReShade only activates techniques listed in the preset file's `Techniques=` line. Without a preset, *no* techniques run, even if every annotation says `enabled = 1`. This was source of the "BMP still wrong after EXR was working" symptom — UIRemove compiled but never ran. *Fixed* by writing `ReShadePreset.ini` in deploy.
+4. **Relying on `technique X < enabled = 1; >` annotation alone** — doesn't work. ReShade only activates techniques listed in the preset file's `Techniques=` line. Always write `ReShadePreset.ini` via `_ensure_preset()`.
 
-5. **Added fallback ExportTex enumeration in `on_reshade_present`** when `sbi.export_texture_r == 0`. Useful diagnostic but not a real fix — once ReShade.fxh was fixed, the texture is always found in `on_begin_render_effects` and the fallback never fires productively. Kept anyway as a safety net.
+5. **`shaders/ReShade.fxh` with unconditional `#define BUFFER_RCP_WIDTH (1.0/BUFFER_WIDTH)`** — ReShade runtime predefines this. Both shaders fail to compile with `preprocessor error: redefinition`. Always use `#ifndef` guards.
 
 ## Key Decisions
 
 | Decision | Rationale |
 |----------|-----------|
-| Deploy shaders for ALL modes (not just custom) | The addon enumerates `DepthToAddon_ExportTex` by name; no shader = no EXR regardless of which DLL is used. |
-| Always write `ReShadePreset.ini` in deploy | `enabled = 1` annotations are inert without a preset; we have to enumerate techniques explicitly. |
-| Lock technique order: DepthToAddon → UIRemove | DepthToAddon writes to custom RTs only; UIRemove must run last to write `tex2D(ReShade::BackBuffer, uv)` back into the swap-chain backbuffer so `capture_screenshot` sees the game image. Reversed order also works (UIRemove is no-op-equivalent if backbuffer wasn't dirty), but locked-order avoids surprises. |
-| Default `FC_ExportNormal=0` | User asked for it explicitly. EXR depth is enough for current pipeline; normal export is opt-in via `Frame Capture` overlay panel. |
-| Use real 5.9.2 vendor binaries instead of fixing `reshade/` source | Faster path to a known-good baseline. The user's `f19a9d4` already proved this works. Re-syncing `reshade/` to actual 5.9.2 tag is a lot more invasive. |
+| `--mode custom` = vendor 5.9.2 DLL + custom-compiled addon | reshade/ source is 6.7.3 (wrong version); DLL doesn't need rebuilding for addon/shader customization |
+| Always deploy shaders for all modes | Addon finds `DepthToAddon_ExportTex` by name; no shader = no EXR regardless of DLL |
+| Always write `ReShadePreset.ini` | `enabled = 1` annotations are inert without a preset |
+| Technique order locked: DepthToAddon → UIRemove | DepthToAddon writes to custom RTs; UIRemove must run last to restore backbuffer for capture |
+| Default `FC_ExportNormal=0` | User-specified; only depth + BMP needed by default |
 
 ## Current State
 
-**Working** (after my fixes, with `--mode custom` aka our wrong-version build):
-- DepthToAddon.fx + UIRemove.fx compile successfully (no more `BUFFER_RCP_WIDTH redefinition`).
-- ExportTex is found and EXR depth files are written correctly (`*DepthBuffer.exr`, ~296 KB each, format = RGBA32F).
-- BMP file size is correct (32,401 KB for 3840×2160 RGBA), but **content is wrong** — shows colorful normal-map-like patterns, not the game.
+**Working** (confirmed by user):
+- `uv run main.py launch --mode custom --game-path E:\games\ff7remake\End\Binaries\Win64\ff7remake_.exe`
+- Produces correct `*BackBuffer.bmp` (game image) + `*DepthBuffer.exr` (~20 MB, linear depth)
+- `--mode official592` also works identically (same DLL, different addon)
 
-**Broken until user tests `--mode official592`**:
-- BMP content under `--mode custom` (our `0.0.0.1 UNOFFICIAL` build of ReShade). The wrong `reshade/` source produces a binary that handles R10G10B10A2_UNORM swap chains differently than 5.9.2 does, and the swap chain backbuffer ends up with ExportTex-like content even though no shader explicitly writes there.
+**Unstaged** (binary diffs, not meaningful — dist files were re-deployed to game dir and back):
+- `dist/dxgi.dll` — modified (binary diff, same effective content)
+- `dist/frame_capture.addon` — modified (binary diff, same effective content)
+- `HANDOFF.md` — deleted (previous handoff removed after resolution)
 
-**Currently deployed to `E:\games\ff7remake\3DMGAME_Final_Fantasy_VII_Remake.CHS.Green.part001\Final Fantasy VII Remake Intergrade\End\Binaries\Win64\`**:
-- `dxgi.dll` ← `vendor/reshade592/dxgi.dll` (4.16 MB, real 5.9.2)
-- `frame_capture.addon` ← `vendor/addon_official/frame_capture.addon` (100 KB)
+**Deployed to** `E:\games\ff7remake\End\Binaries\Win64\`:
+- `dxgi.dll` ← `vendor/reshade592/dxgi.dll` (5.9.2.1760, 4.06 MB)
+- `frame_capture.addon` ← `dist/frame_capture.addon` (custom-compiled, ~116 KB)
 - `reshade-shaders/Shaders/{DepthToAddon.fx, UIRemove.fx, ReShade.fxh}`
-- `ReShade.ini` with `EffectSearchPaths=.\reshade-shaders\Shaders\` etc.
-- `ReShadePreset.ini` with `Techniques=DepthToAddon@DepthToAddon.fx,UIRemove@UIRemove.fx` (and same `TechniqueSorting=`)
-
-**Uncommitted Changes**:
-- `main.py`: added `_ensure_preset()`, made all modes deploy shaders, made shader source `ROOT/shaders` for all modes, default `FC_ExportNormal=0`, ensured `EffectSearchPaths` set.
-- `reshade-addons/99-frame_capture/frame_capture.cpp`: added `FC:` log lines, extracted `fc_find_export_tex()` helper, increased name buffer 32→256, removed silent-fail on missing `copy_source` flag, default `enableNormalExp=false`.
-- `shaders/DepthToAddon.fx`: reverted from local 4-output MRT version back to murchFX 3-output original.
-- `shaders/ReShade.fxh`: NEW file (untracked). Minimal version with `#ifndef` guards, namespace `ReShade { texture BackBufferTex : COLOR; … }`, `PostProcessVS`, `RESHADE_DEPTH_*` defaults.
-- `CMakeLists.txt`: shader staging now copies `shaders/ReShade.fxh`, `shaders/DepthToAddon.fx`, `shaders/UIRemove.fx` to `dist/reshade-shaders/Shaders/` (previously copied DepthToAddon from `murchFX/Shaders/` submodule).
-- `dist/dxgi.dll`, `dist/frame_capture.addon`: rebuilt during session (still `0.0.0.1`).
-- `dist/reshade-shaders/Shaders/ReShade.fxh`: new staged shader (untracked).
+- `ReShade.ini` with `FC_EnableCapture=1`, `FC_ExportDepth=1`, `FC_ExportNormal=0`
+- `ReShadePreset.ini` with `Techniques=DepthToAddon@DepthToAddon.fx,UIRemove@UIRemove.fx`
 
 ## Files to Know
 
 | File | Why It Matters |
 |------|----------------|
-| `main.py` | Single CLI entry: `deploy`, `launch`, `capture`, `pack`. `_sources()` decides which DLL/addon to use; `_ensure_addon_enabled()` writes ReShade.ini; `_ensure_preset()` writes ReShadePreset.ini. |
-| `reshade-addons/99-frame_capture/frame_capture.cpp` | The whole addon. `on_begin_render_effects` caches the `DepthToAddon_ExportTex` SRV. `on_reshade_present` checks F10 (VK 0x79), calls `capture_screenshot()`, writes BMP, calls `saveImage()` for EXR. |
-| `shaders/DepthToAddon.fx` | murchFX 3-output, all RTs custom. Generates ExportTex (RGBA32F: normal.xyz, depth.w), DepthTex, NormalTex. |
-| `shaders/UIRemove.fx` | Pure passthrough: `return tex2D(ReShade::BackBuffer, uv);`. MUST be enabled and MUST run last. |
-| `shaders/ReShade.fxh` | Minimal local version; deployed as fallback because ReShade doesn't auto-bundle this on raw installs. Use `#ifndef` guards on all defines. |
-| `CMakeLists.txt` | Builds reshade core (MSBuild) + frame_capture (CMake) + stages shaders to `dist/`. **The reshade core build target uses `reshade/` source which is the wrong version (0.0.0.1, not 5.9.2)** — see warning below. |
-| `vendor/reshade592/dxgi.dll` | Real 5.9.2 official binary. Used by `--mode official592`. |
-| `vendor/addon_official/frame_capture.addon` | Real 5.9.2-era official addon binary. |
-| `tools/capture/config.py` | Machine-specific paths. Edit `GAME_PATH`, `DATASET_ROOT` for new machines. |
+| `main.py` | CLI entry. `_sources()` decides which DLL/addon to deploy per mode. `_ensure_preset()` writes ReShadePreset.ini. |
+| `reshade-addons/99-frame_capture/frame_capture.cpp` | Entire addon (single file). Edit here for capture customization. |
+| `shaders/DepthToAddon.fx` | murchFX 3-output: writes ExportTex (RGBA32F: normals+depth), DepthTex, NormalTex to custom RTs only. |
+| `shaders/UIRemove.fx` | Pure passthrough — MUST run last. Writes `tex2D(ReShade::BackBuffer, uv)` to swap chain. |
+| `shaders/ReShade.fxh` | Minimal local version. All `#define`s must have `#ifndef` guards. |
+| `vendor/reshade592/dxgi.dll` | Official 5.9.2 binary. Used by both `--mode custom` and `--mode official592`. |
+| `tools/capture/config.py` | Machine-specific paths — `GAME_PATH`, `DATASET_ROOT`. |
+| `CMakeLists.txt` | Builds `frame_capture.addon` only (reshade_core target exists but output unused). |
 
 ## Code Context
 
-**Working flow (techniques in order):**
-
-```hlsl
-// shaders/DepthToAddon.fx — writes ExportTex (RGBA32F: normals + depth)
-namespace DepthToAddon {
-    texture DepthToAddon_ExportTex { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = RGBA32F; };
-    texture DepthToAddon_DepthTex  { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = RGBA8; };
-    texture DepthToAddon_NormalTex { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = RGBA8; };
-    void PS_DepthToAddon(..., out float4 exportTex : SV_Target0,
-                              out float4 depthTex : SV_Target1,
-                              out float4 normalTex : SV_Target2) { ... }
-    technique DepthToAddon < enabled = 1; > {
-        pass {
-            VertexShader = PostProcessVS;
-            PixelShader  = PS_DepthToAddon;
-            RenderTarget0 = DepthToAddon_ExportTex;  // custom — backbuffer NOT touched
-            RenderTarget1 = DepthToAddon_DepthTex;
-            RenderTarget2 = DepthToAddon_NormalTex;
-        }
-    }
-}
+**`_sources()` — which files get deployed per mode:**
+```python
+def _sources(mode: str):
+    shader_src = ROOT / "shaders"
+    dist = ROOT / "dist"
+    # custom: official 5.9.2 DLL + our compiled addon
+    if mode == "custom":
+        return ROOT / "vendor" / "reshade592" / "dxgi.dll", dist / "frame_capture.addon", shader_src, True
+    addon = ROOT / "vendor" / "addon_official" / "frame_capture.addon"
+    if mode == "official592":
+        return ROOT / "vendor" / "reshade592" / "dxgi.dll", addon, shader_src, True
+    return ROOT / "vendor" / "reshade673" / "dxgi.dll", addon, shader_src, True
 ```
 
-```hlsl
-// shaders/UIRemove.fx — restores backbuffer
-float4 PS_RemoveUI(float4 vpos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
-    return tex2D(ReShade::BackBuffer, uv);  // start-of-frame copy
-}
-technique UIRemove < enabled = 1; > {
-    pass { VertexShader = PostProcessVS; PixelShader = PS_RemoveUI; }
-    // no explicit RenderTargetN → defaults to swap chain backbuffer
-}
-```
-
-**Addon hot path:**
-
+**Addon hot path (frame_capture.cpp):**
 ```cpp
-// frame_capture.cpp — fires every frame after effects render
 static void on_reshade_present(effect_runtime* runtime) {
     if (!runtime->is_key_pressed(0x79) || !enableCapturing) return;  // 0x79 = F10
-    // ... build save_path with timestamp ...
-    runtime->capture_screenshot(pixels.data());          // reads swap chain backbuffer
-    // BGRA→RGBA swap only for b8g8r8a8 formats; r10g10b10a2 returns RGBA already
+    runtime->capture_screenshot(pixels.data());  // reads swap chain backbuffer (correct with 5.9.2 DLL)
+    // BGRA→RGBA swap only for b8g8r8a8; r10g10b10a2 returns RGBA already
     stbi_write_bmp(bmp_path, width, height, 4, pixels);
     if (enableDepthExp) saveImage(runtime, depth_path, sbi.export_texture_r, ...);
 }
 ```
 
-**Generated `ReShadePreset.ini`** (must be in game dir alongside ReShade.ini):
+**ExportTex lookup (fires once per frame in on_begin_render_effects):**
+```cpp
+static void on_begin_render_effects(effect_runtime* runtime, ...) {
+    if (sbi.export_texture_r != 0) return;
+    runtime->enumerate_texture_variables(nullptr, [](effect_runtime* rt, effect_texture_variable var, void*) {
+        char name[256]; rt->get_texture_variable_name(var, name);
+        if (strcmp(name, "DepthToAddon_ExportTex") == 0)
+            rt->get_texture_variable_value(var, &sbi.export_texture_r);
+    }, nullptr);
+}
+```
+
+**Generated ReShadePreset.ini** (must be present alongside ReShade.ini):
 ```ini
 Techniques=DepthToAddon@DepthToAddon.fx,UIRemove@UIRemove.fx
 TechniqueSorting=DepthToAddon@DepthToAddon.fx,UIRemove@UIRemove.fx
 ```
 
-**Generated `ReShade.ini`** (relevant lines):
-```ini
-[ADDON]
-FC_EnableCapture=1
-FC_ExportDepth=1
-FC_ExportNormal=0
-
-[GENERAL]
-EffectSearchPaths=.\reshade-shaders\Shaders\
-PresetPath=.\ReShadePreset.ini
-```
-
 ## Resume Instructions
 
-1. **Ask the user to test the current deployment** (already done by previous agent — vendor 5.9.2 binaries are deployed). Have them launch FF7R, press F10 a few times in-game, then share `Win64/ReShade.log` and one of the `*BackBuffer.bmp` files.
-2. **Verify in the log** that the line reads `Initializing crosire's ReShade version '5.9.2' (64-bit)` — NOT `0.0.0.1`.
-   - Expected BMP: actual game image at 3840×2160.
-   - Expected EXR: `*DepthBuffer.exr` ~300 KB per frame.
-   - If BMP wrong: check `Win64/ReShadePreset.ini` exists and contains both technique names. Check log for `Successfully compiled` lines for both .fx files. Look for `FC: ExportTex cached` log line confirming addon is happy.
-3. **Once confirmed working**, commit the changes. Suggested message:
-   ```
-   capture: fix BMP/EXR pipeline — deploy real 5.9.2 binaries with shaders + preset
-   ```
-4. **Decide on `--mode custom`** with the user (see "Not Yet Done"). My recommendation: replace `reshade/` source with actual 5.9.2 tag from upstream, since the project's intent (per CMakeLists comment) was always to build 5.9.2.
+1. **Push** pending commits: `git push`
+2. **Rebuild addon** after any `frame_capture.cpp` change: `scripts\build.ps1` (fast — only compiles the addon, not reshade core)
+3. **Deploy + test**: `uv run main.py launch --game-path E:\games\ff7remake\End\Binaries\Win64\ff7remake_.exe`
+   - Press F9 in-game to start capture, F10 to capture frames
+   - Expected: `*BackBuffer.bmp` shows game image, `*DepthBuffer.exr` ~15–25 MB
 
 ## Setup Required
 
-- Game path is hard-coded for FF7R: `E:/games/ff7remake/3DMGAME_Final_Fantasy_VII_Remake.CHS.Green.part001/Final Fantasy VII Remake Intergrade/End/Binaries/Win64`. Override via `--game-path` if testing on a different install.
-- Python deps via `uv sync`.
-- For `--mode custom` (NOT recommended right now): VS 2022 Build Tools + CMake ≥ 3.20.
-
-## Edge Cases & Error Handling
-
-- **Game already running when deploy runs**: `dxgi.dll` will be locked, `shutil.copy2` fails. Current behavior: Python exception with EACCES. Not handled — user must close the game first.
-- **Game uses HDR10 swap chain**: untested. R10G10B10A2_UNORM SDR works. If a future game presents HDR-encoded values, BMP would look washed out / wrong but in a *different* way than the current bug (mostly black with bright highlights, not "normal-map look").
-- **Multiple `.exe` in game dir**: `_resolve_game_path()` picks the largest non-blacklisted exe. Blacklist in `_SKIP_EXE` covers UE4 prereq installers, vcredist, crashreporter.
-- **F10 already bound by game**: ReShade.ini sets `KeyScreenshot=0,0,0,0` to prevent ReShade's own screenshot grabbing the same key, but the GAME might still bind F10. User can pass `--start-key F9` to `launch` for a different start trigger (the game-internal F10 capture trigger inside the addon is hard-coded to VK 0x79).
+- VS 2022 Build Tools (for addon rebuild only)
+- `uv sync` for Python deps
+- Game path: `E:\games\ff7remake\End\Binaries\Win64\ff7remake_.exe`
 
 ## Warnings
 
-- **`reshade/` source directory is NOT v5.9.2.** Its `res/version.h` says `VERSION_FULL 0.0.0.1` and our build reports the same in the log. CMakeLists.txt comment claiming it's 5.9.2 is currently a lie. Either fix the source or delete `--mode custom`.
-- **Don't trust shader `enabled = 1` annotations alone.** They only set the *default* state in a *new* preset. With no preset file, no technique runs at all. Always write `ReShadePreset.ini` explicitly.
-- **Don't reinstate the removal of `shutil.copy2(shader_src / "UIRemove.fx", ...)`**. UIRemove is required, not optional.
-- **Don't add `texture BackBufferTex : COLOR` declarations outside the `ReShade` namespace.** Multiple textures with `: COLOR` semantic in different namespaces are fine; outside-namespace globals collide with ReShade's bundled bindings.
-- **`reshade-addons/deps/reshade/include/`** holds an OLDER reshade header set (uses `reshade::log_message`, `reshade::config_get_value` wrapper names). The addon source in `99-frame_capture/frame_capture.cpp` calls those wrappers, so we must keep that include path. Don't switch to `reshade/include/` — the wrapper names changed in newer reshade.
-- **Removing the `copy_source` usage check in `saveImage` is intentional.** With our texture (usage = 7364 = 0x1CC4 includes 0x800/copy_source) the check passes anyway; on textures where it would fail, modern ReShade abstracts the resource state correctly and `barrier(... shader_resource → copy_source ...)` works for any DEFAULT-heap texture in DX12.
-- **`get_texture_variable_name` returns the unqualified name** even when the texture is declared inside a namespace (we logged `'DepthToAddon_ExportTex'` not `'DepthToAddon::DepthToAddon_ExportTex'`). Don't change the strcmp target.
-- The session's earlier "fix for psychedelic colors" by removing UIRemove was wrong. Earlier psychedelic colors were likely just the same root cause (no UIRemove + wrong reshade build) misdiagnosed as a UIRemove side-effect.
+- **Do not use `dist/dxgi.dll` for capture** — built from 6.7.3.16 UNOFFICIAL source; `capture_screenshot` returns wrong data on R10G10B10A2 swap chains.
+- **`reshade-addons/deps/reshade/include/`** uses old v5 wrapper names (`reshade::log_message`, `reshade::config_get_value`). Do not switch to `reshade/include/` — the wrapper names changed in v6.
+- **`get_texture_variable_name` returns unqualified name** even for namespace-scoped textures: compare against `"DepthToAddon_ExportTex"`, not `"DepthToAddon::DepthToAddon_ExportTex"`.
+- **UIRemove is mandatory** — removing it causes `capture_screenshot` to capture DepthToAddon render target content.
+- **Always write ReShadePreset.ini** — `enabled = 1` annotations in shaders are inert without it.
