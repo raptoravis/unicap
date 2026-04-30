@@ -43,9 +43,12 @@ static bool     enableDepthExp    = true;
 static bool     enableNormalExp   = false;
 static uint32_t g_cap_width       = 1600;
 static uint32_t g_cap_height      = 1200;
+static float    g_target_fps      = 30.0f;
 static bool     doOnce            = false;
 static bool     g_logged_textures = false;
 static int      windowSize[2]     = { 320, 560 };
+
+static std::chrono::steady_clock::time_point s_last_capture;
 
 using namespace reshade::api;
 
@@ -234,6 +237,7 @@ static void on_init_device(device*)
     reshade::get_config_value(nullptr, "ADDON", "FC_ExportNormal",  enableNormalExp);
     reshade::get_config_value(nullptr, "ADDON", "FC_CaptureWidth",  g_cap_width);
     reshade::get_config_value(nullptr, "ADDON", "FC_CaptureHeight", g_cap_height);
+    reshade::get_config_value(nullptr, "ADDON", "FC_TargetFPS",     g_target_fps);
 }
 
 static void on_init_effect_runtime(effect_runtime* runtime)
@@ -297,8 +301,13 @@ static void on_begin_render_effects(effect_runtime* runtime, command_list*, reso
 
 static void on_reshade_present(effect_runtime* runtime)
 {
-    if (!runtime->is_key_pressed(0x79) || !enableCapturing)
+    if (!enableCapturing) return;
+
+    auto tick = std::chrono::steady_clock::now();
+    float fps = (g_target_fps > 0.0f) ? g_target_fps : 30.0f;
+    if (std::chrono::duration<float>(tick - s_last_capture).count() < 1.0f / fps)
         return;
+    s_last_capture = tick;
 
     stored_buffers_inst& sbi = *runtime->get_private_data<stored_buffers_inst>();
     if (sbi.color_texture_r.handle == 0)
@@ -506,7 +515,7 @@ static void draw_settings_overlay(effect_runtime* runtime)
     }
     if (ImGui::CollapsingHeader("Settings")) {
         ImGui::Spacing();
-        modified |= ImGui::Checkbox("Enable capturing with F10 key", &enableCapturing);
+        modified |= ImGui::Checkbox("Enable capturing", &enableCapturing);
         modified |= ImGui::Checkbox("Export Depth",   &enableDepthExp);
         modified |= ImGui::Checkbox("Export Normals", &enableNormalExp);
         ImGui::Spacing(); ImGui::Separator();
@@ -546,7 +555,7 @@ void unregister_addon_FC()
 // ── DLL entry ─────────────────────────────────────────────────────────────────
 
 extern "C" __declspec(dllexport) const char* NAME        = "Frame Capture";
-extern "C" __declspec(dllexport) const char* DESCRIPTION = "Captures depth and color textures via ReShade. Press F10 to capture.";
+extern "C" __declspec(dllexport) const char* DESCRIPTION = "Captures depth and color textures via ReShade. Timer-driven, no key required.";
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 {

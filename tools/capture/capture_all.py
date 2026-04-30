@@ -1,7 +1,7 @@
 """
 FF7 Remake 采集管线 — 一键启动
-同时运行：输入录制（120Hz）+ 自动帧捕获（F10）
-addon 通过 fc_output_dir.txt 直接将帧写入目标 frames_dir。
+同时运行：输入录制（120Hz）+ 进度监控
+addon 通过 FC_TargetFPS 自动定时采集，通过 fc_output_dir.txt 直接将帧写入目标 frames_dir。
 
 用法：
   python capture_all.py              # 30fps，Ctrl+C 停止
@@ -22,10 +22,6 @@ from pathlib import Path
 from .config import GAME_WIN64, FRAMES_DIR, INPUTS_OUT
 
 # ── Windows API ───────────────────────────────────────────────────────────────
-VK_F10            = 0x79
-KEYEVENTF_KEYDOWN = 0x0000
-KEYEVENTF_KEYUP   = 0x0002
-
 user32 = ctypes.WinDLL("user32")
 
 xinput = None
@@ -95,34 +91,6 @@ def _thread_input(stop: threading.Event, inputs_out: Path):
     count = len(log)
     print(f"[INPUT ] 完成：{count} 条，{elapsed:.1f}s，{count/elapsed:.1f} Hz → {inputs_out}")
 
-# ── 线程：自动帧捕获 ───────────────────────────────────────────────────────────
-def _thread_capture(stop: threading.Event, fps: int, duration):
-    interval = 1.0 / fps
-    count = 0
-    t_start = time.perf_counter()
-
-    while not stop.is_set():
-        t0 = time.perf_counter()
-        user32.keybd_event(VK_F10, 0, KEYEVENTF_KEYDOWN, 0)
-        time.sleep(0.02)
-        user32.keybd_event(VK_F10, 0, KEYEVENTF_KEYUP, 0)
-        count += 1
-
-        elapsed = time.perf_counter() - t_start
-        if count % max(fps, 1) == 0:
-            print(f"[CAPTURE] {elapsed:6.1f}s / {count} 帧", flush=True)
-
-        if duration and elapsed >= duration:
-            stop.set()
-            break
-
-        sleep_time = interval - (time.perf_counter() - t0)
-        if sleep_time > 0:
-            stop.wait(sleep_time)
-
-    elapsed = time.perf_counter() - t_start
-    print(f"[CAPTURE] 完成：{count} 帧，{elapsed:.1f}s，{count/elapsed:.1f} fps")
-
 # ── 主入口 ────────────────────────────────────────────────────────────────────
 def run(fps: int = 30, duration=None, frames_dir: Path = None, inputs_out: Path = None, watch_dir: Path = None):
     frames_dir = frames_dir or FRAMES_DIR
@@ -141,22 +109,37 @@ def run(fps: int = 30, duration=None, frames_dir: Path = None, inputs_out: Path 
     print("       Ctrl+C 随时停止\n")
 
     stop = threading.Event()
-    threads = [
-        threading.Thread(target=_thread_input,   args=(stop, inputs_out), name="input",   daemon=True),
-        threading.Thread(target=_thread_capture, args=(stop, fps, duration), name="capture", daemon=True),
-    ]
-    for t in threads:
-        t.start()
+    t_input = threading.Thread(target=_thread_input, args=(stop, inputs_out), name="input", daemon=True)
+    t_input.start()
+
+    t_start = time.perf_counter()
+    last_count = 0
+    last_print = t_start
 
     try:
         while not stop.is_set():
             stop.wait(1)
+            elapsed = time.perf_counter() - t_start
+            if duration and elapsed >= duration:
+                stop.set()
+                break
+            now = time.perf_counter()
+            if now - last_print >= 1.4:
+                count = sum(1 for _ in frames_dir.glob("*BackBuffer.bmp"))
+                if count != last_count:
+                    print(f"[CAPTURE] {elapsed:6.1f}s / {count} 帧", flush=True)
+                    last_count = count
+                    last_print = now
     except KeyboardInterrupt:
         print("\n[STOP] Ctrl+C，正在停止...")
         stop.set()
 
-    for t in threads:
-        t.join(timeout=10)
+    elapsed = time.perf_counter() - t_start
+    frame_count = sum(1 for _ in frames_dir.glob("*BackBuffer.bmp"))
+    fps_actual = frame_count / elapsed if elapsed > 0 else 0
+    print(f"[CAPTURE] 完成：{frame_count} 帧，{elapsed:.1f}s，{fps_actual:.1f} fps")
+
+    t_input.join(timeout=10)
 
     sidecar.unlink(missing_ok=True)
     print("[DONE]")

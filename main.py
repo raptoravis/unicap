@@ -100,7 +100,7 @@ def _sources(mode: str):
     return ROOT / "vendor" / "reshade673" / "dxgi.dll", addon, shader_src, True
 
 
-def _ensure_addon_enabled(addon_dir: Path, cap_width: int = 1600, cap_height: int = 1200):
+def _ensure_addon_enabled(addon_dir: Path, cap_width: int = 1600, cap_height: int = 1200, cap_fps: int = 30):
     UNICAP_TEMP.mkdir(parents=True, exist_ok=True)
     ini = UNICAP_TEMP / "unicap.ini"
     cfg = configparser.RawConfigParser()
@@ -114,6 +114,7 @@ def _ensure_addon_enabled(addon_dir: Path, cap_width: int = 1600, cap_height: in
         ("ADDON", "FC_ExportNormal", "0"),
         ("ADDON", "FC_CaptureWidth", str(cap_width)),
         ("ADDON", "FC_CaptureHeight", str(cap_height)),
+        ("ADDON", "FC_TargetFPS", str(cap_fps)),
         ("GENERAL", "EffectSearchPaths", str(ROOT / "shaders")),
         ("GENERAL", "IntermediateCachePath", str(UNICAP_TEMP)),
         ("GENERAL", "TextureSearchPaths", str(ROOT / "shaders")),
@@ -175,7 +176,8 @@ def cmd_deploy(args):
     # RESHADE_BASE_PATH_OVERRIDE env var redirects ReShade's base path at launch time.
     cap_width  = getattr(args, "width",  1600) or 1600
     cap_height = getattr(args, "height", 1200) or 1200
-    _ensure_addon_enabled(src_addon.parent, cap_width, cap_height)
+    cap_fps    = getattr(args, "fps",    30)   or 30
+    _ensure_addon_enabled(src_addon.parent, cap_width, cap_height, cap_fps)
     _ensure_preset()
 
 
