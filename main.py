@@ -293,10 +293,10 @@ def _make_video(frames_dir: Path, output: Path, fps: int):
             if (i + 1) % fps == 0:
                 print(f"[VIDEO] {i + 1}/{len(bmps)} 帧", flush=True)
         proc.stdin.close()
+        stderr_out = proc.stderr.read()  # drain before wait() to prevent pipe deadlock
         proc.wait()
         if not ok or proc.returncode != 0:
-            stderr_out = proc.stderr.read().decode(errors="replace")
-            print(f"[VIDEO] ffmpeg 失败 (code {proc.returncode}):\n{stderr_out}")
+            print(f"[VIDEO] ffmpeg 失败 (code {proc.returncode}):\n{stderr_out.decode(errors='replace')}")
             return
     else:
         writer = cv2.VideoWriter(str(output), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
