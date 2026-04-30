@@ -1,6 +1,7 @@
 """
 FF7 Remake 采集管线 — 一键启动
-同时运行：输入录制（120Hz）+ 自动帧捕获（F10）+ 文件搬运（Win64 → frames/）
+同时运行：输入录制（120Hz）+ 自动帧捕获（F10）
+addon 通过 fc_output_dir.txt 直接将帧写入目标 frames_dir。
 
 用法：
   python capture_all.py              # 30fps，Ctrl+C 停止
@@ -19,9 +20,6 @@ import threading
 import time
 from pathlib import Path
 from .config import GAME_WIN64, FRAMES_DIR, INPUTS_OUT
-
-# ── 路径配置 ──────────────────────────────────────────────────────────────────
-EXTS   = {".bmp", ".exr"}
 
 # ── Windows API ───────────────────────────────────────────────────────────────
 VK_F10            = 0x79
