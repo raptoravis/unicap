@@ -1,11 +1,16 @@
 /*
- * Frame Capture Add-on for Reshade 5.0: https://github.com/crosire/reshade
+ * Frame Capture Add-on for Reshade 6.x (API v20)
+ *
+ * Performance design:
+ *  - Staging buffers are pre-allocated per runtime; reused every frame.
+ *  - Both color + depth GPU copies are issued before a single wait_idle().
+ *  - CPU work (de-pitch memcpy, BMP write, EXR compression) runs on a
+ *    dedicated save-worker thread so the render loop returns immediately.
+ *  - EXR uses ZIP compression (vs original PIZ) for ~4x faster encode.
  */
 
 #define ImTextureID unsigned long long
-
 #define STB_IMAGE_WRITE_IMPLEMENTATION
-
 #define TINYEXR_IMPLEMENTATION
 
 #include <imgui.h>
@@ -18,7 +23,6 @@
 #include <filesystem>
 #include <stb_image_write.h>
 #include "stb_image.h"
-
 #include "tinyexr.h"
 #include "miniz.c"
 #include "miniz.h"
@@ -26,705 +30,507 @@
 #include <ctime>
 #include <fstream>
 #include <string>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
+#include <atomic>
 
-static bool enableCapturing = true;
-static bool enableDepthExp = true;
-static bool enableNormalExp = false;
-
-static bool doOnce = false;
+static bool enableCapturing  = true;
+static bool enableDepthExp   = true;
+static bool enableNormalExp  = false;
+static bool doOnce           = false;
 static bool g_logged_textures = false;
-static int windowSize[2] = { 320, 560 };
+static int  windowSize[2]    = { 320, 560 };
 
 using namespace reshade::api;
 
-struct imgui_content
-{
-	float total_width = ImGui::GetContentRegionAvail().x;
-	int num_columns = 1;
-	float single_image_max_size = total_width;
-	void change_values(int col)
-	{
-		num_columns = col;
-		single_image_max_size = num_columns > 1 ? (total_width / num_columns) - (4.0 * static_cast<float>(num_columns - 1)) : total_width;
-	}
+// ── Async save queue ──────────────────────────────────────────────────────────
+
+struct SaveTask {
+    std::filesystem::path bmp_path;
+    std::vector<uint8_t>  color_pixels;   // RGBA8, width*height*4, no pitch padding
+    uint32_t              width = 0, height = 0;
+
+    std::filesystem::path depth_path;     // empty → skip depth
+    std::vector<float>    depth_pixels;   // RGBA32F, depth_w*depth_h*4, no padding
+    uint32_t              depth_w = 0, depth_h = 0;
 };
 
-struct draw_stats
+static constexpr size_t         MAX_QUEUE   = 4;
+static std::thread              g_save_thread;
+static std::mutex               g_queue_mutex;
+static std::condition_variable  g_queue_cv;
+static std::queue<SaveTask>     g_save_queue;
+static std::atomic<bool>        g_worker_stop { false };
+
+static bool SaveEXR(const float* rgb, int width, int height, const char* outfilename)
 {
-	uint32_t vertices = 0;
-	uint32_t drawcalls = 0;
-	uint32_t drawcalls_indirect = 0;
-	viewport last_viewport = {};
+    EXRHeader header; InitEXRHeader(&header);
+    EXRImage  image;  InitEXRImage(&image);
+    image.num_channels = 3;
+
+    std::vector<float> ch[3];
+    for (int c = 0; c < 3; c++) ch[c].resize(width * height);
+    for (int i = 0; i < width * height; i++) {
+        ch[0][i] = rgb[3 * i + 0];
+        ch[1][i] = rgb[3 * i + 1];
+        ch[2][i] = rgb[3 * i + 2];
+    }
+    float* ptrs[3] = { ch[0].data(), ch[1].data(), ch[2].data() };
+    image.images = (unsigned char**)ptrs;
+    image.width  = width;
+    image.height = height;
+
+    header.compression_type = TINYEXR_COMPRESSIONTYPE_ZIP;  // ZIP ~4x faster than PIZ
+    header.num_channels = 3;
+    header.channels = (EXRChannelInfo*)malloc(sizeof(EXRChannelInfo) * 3);
+    strncpy(header.channels[0].name, "B", 255);
+    strncpy(header.channels[1].name, "G", 255);
+    strncpy(header.channels[2].name, "R", 255);
+    header.pixel_types           = (int*)malloc(sizeof(int) * 3);
+    header.requested_pixel_types = (int*)malloc(sizeof(int) * 3);
+    for (int i = 0; i < 3; i++)
+        header.pixel_types[i] = header.requested_pixel_types[i] = TINYEXR_PIXELTYPE_FLOAT;
+
+    const char* err = nullptr;
+    int ret = SaveEXRImageToFile(&image, &header, outfilename, &err);
+    free(header.channels);
+    free(header.pixel_types);
+    free(header.requested_pixel_types);
+    return ret == TINYEXR_SUCCESS;
+}
+
+static void save_worker_fn()
+{
+    while (true) {
+        SaveTask task;
+        {
+            std::unique_lock<std::mutex> lk(g_queue_mutex);
+            g_queue_cv.wait(lk, [] { return !g_save_queue.empty() || g_worker_stop.load(); });
+            if (g_save_queue.empty()) break;
+            task = std::move(g_save_queue.front());
+            g_save_queue.pop();
+        }
+
+        // Write BMP (RGBA8, 4 channels)
+        stbi_write_bmp(task.bmp_path.u8string().c_str(),
+                       task.width, task.height, 4, task.color_pixels.data());
+
+        // Write depth EXR
+        if (!task.depth_path.empty() && !task.depth_pixels.empty()) {
+            // depth_pixels: RGBA32F packed; depth is in alpha (component 3)
+            uint32_t n = task.depth_w * task.depth_h;
+            std::vector<float> rgb(n * 3);
+            for (uint32_t i = 0; i < n; i++) {
+                float d = task.depth_pixels[i * 4 + 3];
+                rgb[i * 3] = rgb[i * 3 + 1] = rgb[i * 3 + 2] = d;
+            }
+            SaveEXR(rgb.data(), task.depth_w, task.depth_h,
+                    task.depth_path.u8string().c_str());
+        }
+    }
+}
+
+// ── Per-runtime state ─────────────────────────────────────────────────────────
+
+struct imgui_content {
+    float total_width         = ImGui::GetContentRegionAvail().x;
+    int   num_columns         = 1;
+    float single_image_max_size = total_width;
+    void change_values(int col) {
+        num_columns = col;
+        single_image_max_size = num_columns > 1
+            ? (total_width / num_columns) - 4.0f * (num_columns - 1)
+            : total_width;
+    }
 };
 
-struct clear_stats : public draw_stats
-{
-	bool rect = false;
+struct draw_stats {
+    uint32_t vertices = 0, drawcalls = 0, drawcalls_indirect = 0;
+    viewport last_viewport = {};
+};
+struct clear_stats : public draw_stats { bool rect = false; };
+struct depth_stencil_info {
+    draw_stats total_stats, current_stats;
+    std::vector<clear_stats> clears;
+    bool copied_during_frame = false;
+};
+struct depth_stencil_hash {
+    inline size_t operator()(resource v) const { return static_cast<size_t>(v.handle >> 4); }
 };
 
-struct depth_stencil_info
-{
-	draw_stats total_stats;
-	draw_stats current_stats; // Stats since last clear operation
-	std::vector<clear_stats> clears;
-	bool copied_during_frame = false;
+struct __declspec(uuid("7c6363c7-f94e-437a-9160-141782c44a98")) state_tracking_inst {
+    resource selected_depth_stencil  = { 0 };
+    resource override_depth_stencil  = { 0 };
+    resource_view selected_shader_resource = { 0 };
+    bool using_backup_texture = false;
+    std::unordered_map<resource, unsigned int, depth_stencil_hash> display_count_per_depth_stencil;
 };
 
-struct depth_stencil_hash
-{
-	inline size_t operator()(resource value) const
-	{
-		// Simply use the handle (which is usually a pointer) as hash value (with some bits shaved off due to pointer alignment)
-		return static_cast<size_t>(value.handle >> 4);
-	}
+struct __declspec(uuid("eadae23a-4009-4d32-8557-0af07e45f409")) stored_buffers_inst {
+    // Shader export textures (found by name each frame)
+    resource      export_texture_r  = { 0 };
+    resource_desc export_texture_rd;
+    resource_view export_texture_rv = { 0 };
+    resource      color_texture_r   = { 0 };
+    resource_desc color_texture_rd;
+
+    // Pre-allocated staging buffers (created once, reused every capture)
+    resource color_staging      = { 0 };
+    uint32_t color_staging_size = 0;
+    resource depth_staging      = { 0 };
+    uint32_t depth_staging_size = 0;
+
+    void update(resource sr, resource_desc srd, resource_view srv) {
+        export_texture_r = sr; export_texture_rd = srd; export_texture_rv = srv;
+    }
+    void reset() { export_texture_r = { 0 }; export_texture_rv = { 0 }; }
 };
 
-struct __declspec(uuid("7c6363c7-f94e-437a-9160-141782c44a98")) state_tracking_inst
+// ── Addon event callbacks ─────────────────────────────────────────────────────
+
+static void on_init_device(device*)
 {
-	// The depth-stencil that is currently selected as being the main depth target
-	resource selected_depth_stencil = { 0 };
-
-	// Resource used to override automatic depth-stencil selection
-	resource override_depth_stencil = { 0 };
-
-	// The current shader resource view bound to shaders
-	// This can be created from either the original depth-stencil of the application (if it supports shader access) or from a backup resource
-	resource_view selected_shader_resource = { 0 };
-
-	// True when the shader resource view was created from the backup resource, false when it was created from the original depth-stencil
-	bool using_backup_texture = false;
-
-	std::unordered_map<resource, unsigned int, depth_stencil_hash> display_count_per_depth_stencil;
-};
-
-struct __declspec(uuid("eadae23a-4009-4d32-8557-0af07e45f409")) stored_buffers_inst
-{
-	resource export_texture_r = { 0 };
-	resource_desc export_texture_rd;
-	resource_view export_texture_rv = { 0 };
-	resource color_texture_r = { 0 };   // UIRemove_ColorTex — RGBA8 game image
-	resource_desc color_texture_rd;
-	void update(resource sr, resource_desc srd, resource_view srv)
-	{
-		export_texture_r = sr;
-		export_texture_rd = srd;
-		export_texture_rv = srv;
-	}
-	void reset()
-	{
-		export_texture_r = { 0 };
-		export_texture_rv = { 0 };
-	}
-};
-
-
-enum type
-{
-	depth,
-	normal
-};
-
-
-static void on_init_device(device* device)
-{
-	reshade::get_config_value(nullptr, "ADDON", "FC_EnableCapture", enableCapturing);
-	reshade::get_config_value(nullptr, "ADDON", "FC_ExportDepth", enableDepthExp);
-	reshade::get_config_value(nullptr, "ADDON", "FC_ExportNormal", enableNormalExp);
+    reshade::get_config_value(nullptr, "ADDON", "FC_EnableCapture", enableCapturing);
+    reshade::get_config_value(nullptr, "ADDON", "FC_ExportDepth",   enableDepthExp);
+    reshade::get_config_value(nullptr, "ADDON", "FC_ExportNormal",  enableNormalExp);
 }
 
 static void on_init_effect_runtime(effect_runtime* runtime)
 {
-	runtime->create_private_data<stored_buffers_inst>();
+    runtime->create_private_data<stored_buffers_inst>();
 }
 
 static void on_destroy_effect_runtime(effect_runtime* runtime)
 {
-	device* const device = runtime->get_device();
-
-	stored_buffers_inst& sbi = *runtime->get_private_data<stored_buffers_inst>();
-
-	if (sbi.export_texture_rv != 0)
-		device->destroy_resource_view(sbi.export_texture_rv);
-
-	runtime->destroy_private_data<stored_buffers_inst>();
+    device* dev = runtime->get_device();
+    stored_buffers_inst& sbi = *runtime->get_private_data<stored_buffers_inst>();
+    if (sbi.export_texture_rv.handle != 0)
+        dev->destroy_resource_view(sbi.export_texture_rv);
+    if (sbi.color_staging.handle != 0)
+        dev->destroy_resource(sbi.color_staging);
+    if (sbi.depth_staging.handle != 0)
+        dev->destroy_resource(sbi.depth_staging);
+    runtime->destroy_private_data<stored_buffers_inst>();
 }
 
 static void fc_find_export_tex(effect_runtime* runtime, stored_buffers_inst& sbi)
 {
-	device* const device = runtime->get_device();
-	runtime->enumerate_texture_variables(nullptr, [&sbi, &device](effect_runtime* rt, auto variable) {
-		char name[256] = {};
-		rt->get_texture_variable_name(variable, name);
-		resource_view srv = { 0 }, srv_srgb = { 0 };
-		if (std::strcmp(name, "DepthToAddon_ExportTex") == 0) {
-			rt->get_texture_binding(variable, &srv, &srv_srgb);
-			if (srv != 0) {
-				resource r = device->get_resource_from_view(srv);
-				sbi.update(r, device->get_resource_desc(r), srv);
-			} else {
-				sbi.reset();
-			}
-		} else if (std::strcmp(name, "UIRemove_ColorTex") == 0) {
-			rt->get_texture_binding(variable, &srv, &srv_srgb);
-			if (srv != 0) {
-				resource r = device->get_resource_from_view(srv);
-				sbi.color_texture_r = r;
-				sbi.color_texture_rd = device->get_resource_desc(r);
-			} else {
-				sbi.color_texture_r = { 0 };
-			}
-		}
-	});
+    device* dev = runtime->get_device();
+    runtime->enumerate_texture_variables(nullptr, [&sbi, dev](effect_runtime* rt, auto variable) {
+        char name[256] = {};
+        rt->get_texture_variable_name(variable, name);
+        resource_view srv = { 0 }, srv_srgb = { 0 };
+        if (std::strcmp(name, "DepthToAddon_ExportTex") == 0) {
+            rt->get_texture_binding(variable, &srv, &srv_srgb);
+            if (srv.handle != 0) {
+                resource r = dev->get_resource_from_view(srv);
+                sbi.update(r, dev->get_resource_desc(r), srv);
+            } else sbi.reset();
+        } else if (std::strcmp(name, "UIRemove_ColorTex") == 0) {
+            rt->get_texture_binding(variable, &srv, &srv_srgb);
+            if (srv.handle != 0) {
+                resource r = dev->get_resource_from_view(srv);
+                sbi.color_texture_r  = r;
+                sbi.color_texture_rd = dev->get_resource_desc(r);
+            } else sbi.color_texture_r = { 0 };
+        }
+    });
 }
 
-static void on_begin_render_effects(effect_runtime* runtime, command_list* cmd_list, resource_view, resource_view)
+static void on_begin_render_effects(effect_runtime* runtime, command_list*, resource_view, resource_view)
 {
-	stored_buffers_inst& sbi = *runtime->get_private_data<stored_buffers_inst>();
-
-	if (!g_logged_textures) {
-		reshade::log::message(reshade::log::level::info, "FC: listing all effect texture variables:");
-		runtime->enumerate_texture_variables(nullptr, [](effect_runtime* rt, auto variable) {
-			char name[256] = {};
-			rt->get_texture_variable_name(variable, name);
-			char msg[320];
-			sprintf_s(msg, "FC:   '%s'", name);
-			reshade::log::message(reshade::log::level::info, msg);
-		});
-		g_logged_textures = true;
-	}
-
-	fc_find_export_tex(runtime, sbi);
+    stored_buffers_inst& sbi = *runtime->get_private_data<stored_buffers_inst>();
+    if (!g_logged_textures) {
+        reshade::log::message(reshade::log::level::info, "FC: listing all effect texture variables:");
+        runtime->enumerate_texture_variables(nullptr, [](effect_runtime* rt, auto variable) {
+            char name[256] = {}; rt->get_texture_variable_name(variable, name);
+            char msg[320]; sprintf_s(msg, "FC:   '%s'", name);
+            reshade::log::message(reshade::log::level::info, msg);
+        });
+        g_logged_textures = true;
+    }
+    fc_find_export_tex(runtime, sbi);
 }
 
-static bool saveColorBMP(effect_runtime* runtime, std::filesystem::path save_path,
-                          resource r, resource_desc rd)
-{
-	if (r.handle == 0) return false;
-
-	device* const device = runtime->get_device();
-	command_queue* const queue = runtime->get_command_queue();
-
-	uint32_t row_pitch = format_row_pitch(rd.texture.format, rd.texture.width);
-	if (device->get_api() == device_api::d3d12)
-		row_pitch = (row_pitch + 255) & ~255;
-	const uint32_t slice_pitch = format_slice_pitch(rd.texture.format, row_pitch, rd.texture.height);
-
-	resource intermediate;
-	const bool use_buffer = device->check_capability(device_caps::copy_buffer_to_texture);
-	if (use_buffer) {
-		if (!device->create_resource(resource_desc(slice_pitch, memory_heap::gpu_to_cpu, resource_usage::copy_dest),
-		                             nullptr, resource_usage::copy_dest, &intermediate)) {
-			reshade::log::message(reshade::log::level::error, "FC: failed to create staging buffer for color BMP");
-			return false;
-		}
-		command_list* cmd_list = queue->get_immediate_command_list();
-		cmd_list->barrier(r, resource_usage::shader_resource, resource_usage::copy_source);
-		cmd_list->copy_texture_to_buffer(r, 0, nullptr, intermediate, 0, rd.texture.width, rd.texture.height);
-		cmd_list->barrier(r, resource_usage::copy_source, resource_usage::shader_resource);
-	} else {
-		if (!device->create_resource(resource_desc(rd.texture.width, rd.texture.height, 1, 1,
-		                                            format_to_default_typed(rd.texture.format), 1,
-		                                            memory_heap::gpu_to_cpu, resource_usage::copy_dest),
-		                             nullptr, resource_usage::copy_dest, &intermediate)) {
-			reshade::log::message(reshade::log::level::error, "FC: failed to create staging texture for color BMP");
-			return false;
-		}
-		command_list* cmd_list = queue->get_immediate_command_list();
-		cmd_list->barrier(r, resource_usage::shader_resource, resource_usage::copy_source);
-		cmd_list->copy_texture_region(r, 0, nullptr, intermediate, 0, nullptr);
-		cmd_list->barrier(r, resource_usage::copy_source, resource_usage::shader_resource);
-	}
-
-	queue->wait_idle();
-
-	subresource_data mapped_data = {};
-	if (use_buffer) {
-		device->map_buffer_region(intermediate, 0, std::numeric_limits<uint64_t>::max(), map_access::read_only, &mapped_data.data);
-		mapped_data.row_pitch = row_pitch;
-		mapped_data.slice_pitch = slice_pitch;
-	} else {
-		device->map_texture_region(intermediate, 0, nullptr, map_access::read_only, &mapped_data);
-	}
-
-	bool ok = false;
-	if (mapped_data.data) {
-		std::vector<uint8_t> pixels(rd.texture.width * rd.texture.height * 4);
-		const uint8_t* src = static_cast<const uint8_t*>(mapped_data.data);
-		for (uint32_t y = 0; y < rd.texture.height; y++)
-			memcpy(pixels.data() + y * rd.texture.width * 4,
-			       src + y * mapped_data.row_pitch,
-			       rd.texture.width * 4);
-		ok = stbi_write_bmp(save_path.u8string().c_str(),
-		                    rd.texture.width, rd.texture.height, 4, pixels.data()) != 0;
-		if (use_buffer)
-			device->unmap_buffer_region(intermediate);
-		else
-			device->unmap_texture_region(intermediate, 0);
-	}
-
-	device->destroy_resource(intermediate);
-	return ok;
-}
-
-bool SaveEXR(const float* rgb, int width, int height, const char* outfilename, bool single_channel) {
-
-	EXRHeader header;
-	InitEXRHeader(&header);
-
-	EXRImage image;
-	InitEXRImage(&image);
-
-	image.num_channels = 3;
-
-	// Must be BGR(A) order, since most of EXR viewers expect this channel order.
-
-	std::vector<float> images[3];
-	images[0].resize(width * height);
-	images[1].resize(width * height);
-	images[2].resize(width * height);
-
-	for (int i = 0; i < width * height; i++) {
-		images[0][i] = rgb[3 * i + 0];
-		images[1][i] = rgb[3 * i + 1];
-		images[2][i] = rgb[3 * i + 2];
-	}
-
-	float* image_ptr[3];
-	image_ptr[0] = &(images[0].at(0)); // B
-	image_ptr[1] = &(images[1].at(0)); // G
-	image_ptr[2] = &(images[2].at(0)); // R
-
-	image.images = (unsigned char**)image_ptr;
-	image.width = width;
-	image.height = height;
-
-	header.compression_type = TINYEXR_COMPRESSIONTYPE_PIZ; //TINYEXR_COMPRESSIONTYPE_NONE
-
-	header.num_channels = 3;
-	header.channels = (EXRChannelInfo*)malloc(sizeof(EXRChannelInfo) * header.num_channels);
-	// Must be BGR(A) order, since most of EXR viewers expect this channel order.
-	strncpy(header.channels[0].name, "B", 255); header.channels[0].name[strlen("B")] = '\0';
-	strncpy(header.channels[1].name, "G", 255); header.channels[1].name[strlen("G")] = '\0';
-	strncpy(header.channels[2].name, "R", 255); header.channels[2].name[strlen("R")] = '\0';
-
-	header.pixel_types = (int*)malloc(sizeof(int) * header.num_channels);
-	header.requested_pixel_types = (int*)malloc(sizeof(int) * header.num_channels);
-	for (int i = 0; i < header.num_channels; i++) {
-		header.pixel_types[i] = TINYEXR_PIXELTYPE_FLOAT; // pixel type of input image
-		header.requested_pixel_types[i] = TINYEXR_PIXELTYPE_FLOAT; // pixel type of output image to be stored in .EXR
-	}
-
-	const char* err;
-	int ret = SaveEXRImageToFile(&image, &header, outfilename, &err);
-	if (ret != TINYEXR_SUCCESS) {
-		return false;
-	}
-
-	//free(&rgb);
-
-	free(header.channels);
-	free(header.pixel_types);
-	free(header.requested_pixel_types);
-
-	//reshade::log_message(3, "EXR export done!");
-
-	return true;
-}
-
-bool capture_image(const resource_desc& desc, const subresource_data& data, std::filesystem::path save_path, uint32_t channels, type tex_type)
-{
-	float* data_p = static_cast<float*>(data.data);
-
-	std::vector<float> rgba_pixel_data(desc.texture.width * desc.texture.height * 3); //(desc.texture.width * desc.texture.height * 3)
-
-	uint32_t row_div = data.row_pitch / desc.texture.width;
-	uint32_t true_row = data.row_pitch / row_div;
-	uint32_t slice_div = data.slice_pitch / desc.texture.width;
-	uint32_t true_slice = data.slice_pitch / slice_div;
-
-	/*std::stringstream ss;
-	std::string str;
-	const char* message;
-	ss << data.row_pitch;
-	ss >> str;
-	ss.clear();
-	message = str.c_str();
-	reshade::log_message(3, message);*/
-
-	if (tex_type == depth)
-	{
-		for (uint32_t y = 0; y < desc.texture.height; ++y, data_p += data.row_pitch / channels) //data.row_pitch
-		{
-			for (uint32_t x = 0; x < desc.texture.width; ++x)
-			{
-				const float* const src = data_p + x * channels; // data_p + x * channels // data_p + true_slice
-				float* const dst = rgba_pixel_data.data() + (y * desc.texture.width + x) * 3;
-
-				dst[2] = src[3];
-				dst[1] = src[3];
-				dst[0] = src[3];
-			}
-		}
-	}
-	else if (tex_type == normal)
-	{
-		for (uint32_t y = 0; y < desc.texture.height; ++y, data_p += data.row_pitch / channels) //data.row_pitch
-		{
-			for (uint32_t x = 0; x < desc.texture.width; ++x)
-			{
-				const float* const src = data_p + x * channels; // data_p + x * channels // data_p + true_slice
-				float* const dst = rgba_pixel_data.data() + (y * desc.texture.width + x) * 3;
-
-				dst[2] = src[0];
-				dst[1] = src[1];
-				dst[0] = src[2];
-			}
-		}
-	}
-
-	return SaveEXR(rgba_pixel_data.data(), desc.texture.width, desc.texture.height, save_path.u8string().c_str(), false);
-}
-
-static bool saveImage(effect_runtime* runtime, std::filesystem::path save_path, resource sbr, resource_desc sbrd, format format, type tex_type)
-{
-	if (sbr != 0)
-	{
-		device* const device = runtime->get_device();
-		command_queue* const queue = runtime->get_command_queue();
-		resource_desc resource_desc = sbrd;
-
-		uint32_t row_pitch = format_row_pitch(resource_desc.texture.format, resource_desc.texture.width);
-		if (device->get_api() == device_api::d3d12) // Align row pitch to D3D12_TEXTURE_DATA_PITCH_ALIGNMENT (256)
-			row_pitch = (row_pitch + 255) & ~255;
-		const uint32_t slice_pitch = format_slice_pitch(resource_desc.texture.format, row_pitch, resource_desc.texture.height);
-
-		resource intermediate;
-		if (resource_desc.heap != memory_heap::gpu_only)
-		{
-			// Avoid copying to temporary system memory resource if texture is accessible directly
-			intermediate = sbr;
-
-		}
-		else if (device->check_capability(device_caps::copy_buffer_to_texture))
-		{
-			if ((resource_desc.usage & resource_usage::copy_source) != resource_usage::copy_source)
-			{
-				char msg[256];
-				sprintf_s(msg, "FC: ExportTex missing copy_source flag (usage = %u), attempting copy anyway",
-					static_cast<uint32_t>(resource_desc.usage));
-				reshade::log::message(reshade::log::level::warning,msg);
-			}
-
-			if (!device->create_resource(reshade::api::resource_desc(slice_pitch, memory_heap::gpu_to_cpu, resource_usage::copy_dest), nullptr, resource_usage::copy_dest, &intermediate))
-			{
-				reshade::log::message(reshade::log::level::error,"Failed to create system memory buffer for texture dumping!");
-				return false;
-			}
-
-			command_list* const cmd_list = queue->get_immediate_command_list();
-			cmd_list->barrier(sbr, resource_usage::shader_resource, resource_usage::copy_source);
-			cmd_list->copy_texture_to_buffer(sbr, 0, nullptr, intermediate, 0, resource_desc.texture.width, resource_desc.texture.height);
-			cmd_list->barrier(sbr, resource_usage::copy_source, resource_usage::shader_resource);
-		}
-		else
-		{
-			if ((resource_desc.usage & resource_usage::copy_source) != resource_usage::copy_source)
-			{
-				char msg[256];
-				sprintf_s(msg, "FC: ExportTex missing copy_source flag (usage = %u), attempting copy anyway",
-					static_cast<uint32_t>(resource_desc.usage));
-				reshade::log::message(reshade::log::level::warning,msg);
-			}
-
-			if (!device->create_resource(reshade::api::resource_desc(resource_desc.texture.width, resource_desc.texture.height, 1, 1, format_to_default_typed(resource_desc.texture.format), 1, memory_heap::gpu_to_cpu, resource_usage::copy_dest), nullptr, resource_usage::copy_dest, &intermediate))
-			{
-				reshade::log::message(reshade::log::level::error,"Failed to create system memory texture for texture dumping!");
-				return false;
-			}
-
-			command_list* const cmd_list = queue->get_immediate_command_list();
-			cmd_list->barrier(sbr, resource_usage::shader_resource, resource_usage::copy_source);
-			cmd_list->copy_texture_region(sbr, 0, nullptr, intermediate, 0, nullptr);
-			cmd_list->barrier(sbr, resource_usage::copy_source, resource_usage::shader_resource);
-		}
-
-		queue->wait_idle();
-
-		subresource_data mapped_data = {};
-		if (resource_desc.heap == memory_heap::gpu_only &&
-			device->check_capability(device_caps::copy_buffer_to_texture))
-		{
-			device->map_buffer_region(intermediate, 0, std::numeric_limits<uint64_t>::max(), map_access::read_only, &mapped_data.data);
-
-			mapped_data.row_pitch = row_pitch;
-			mapped_data.slice_pitch = slice_pitch;
-		}
-		else
-		{
-			device->map_texture_region(intermediate, 0, nullptr, map_access::read_only, &mapped_data);
-		}
-
-		if (mapped_data.data != nullptr)
-		{
-			uint32_t channels = 0;
-			switch (format)
-			{
-				case format::r32_float:
-					channels = static_cast<uint32_t>(1);
-				break;
-				case format::r32g32b32a32_float:
-					channels = static_cast <uint32_t>(4);
-				break;
-			}
-
-			if (!capture_image(resource_desc, mapped_data, save_path, channels, tex_type))
-				return false;
-
-			if (resource_desc.heap == memory_heap::gpu_only &&
-				device->check_capability(device_caps::copy_buffer_to_texture))
-				device->unmap_buffer_region(intermediate);
-			else
-				device->unmap_texture_region(intermediate, 0);
-		}
-
-		if (intermediate != sbr) {
-			device->destroy_resource(intermediate);
-		}
-
-		return true;
-	}
-	else
-	{
-		return false;
-	}
-}
+// ── Capture hot path ──────────────────────────────────────────────────────────
 
 static void on_reshade_present(effect_runtime* runtime)
 {
-	if (!runtime->is_key_pressed(0x79) || !enableCapturing)
-		return;
+    if (!runtime->is_key_pressed(0x79) || !enableCapturing)
+        return;
 
-	WCHAR exe_buf[MAX_PATH] = L"";
-	GetModuleFileNameW(nullptr, exe_buf, ARRAYSIZE(exe_buf));
-	std::filesystem::path exe_fs(exe_buf);
-	std::filesystem::path out_dir = exe_fs.parent_path();
-	{
-		std::ifstream cfg(out_dir / L"fc_output_dir.txt");
-		std::string line;
-		if (std::getline(cfg, line)) {
-			while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
-				line.pop_back();
-			if (!line.empty())
-				out_dir = std::filesystem::u8path(line);
-		}
-	}
-	std::filesystem::path save_path = out_dir / exe_fs.filename();
-	save_path += L' ';
-	const auto now = std::chrono::system_clock::now();
-	const auto now_seconds = std::chrono::time_point_cast<std::chrono::seconds>(now);
-	char timestamp[21];
-	const std::time_t t = std::chrono::system_clock::to_time_t(now_seconds);
-	tm tm_val; localtime_s(&tm_val, &t);
-	sprintf_s(timestamp, "%.4d-%.2d-%.2d", tm_val.tm_year + 1900, tm_val.tm_mon + 1, tm_val.tm_mday);
-	save_path += timestamp;
-	save_path += L' ';
-	sprintf_s(timestamp, "%.2d-%.2d-%.2d", tm_val.tm_hour, tm_val.tm_min, tm_val.tm_sec);
-	save_path += timestamp;
-	save_path += L' ';
-	sprintf_s(timestamp, "%.3lld", std::chrono::duration_cast<std::chrono::milliseconds>(now - now_seconds).count());
-	save_path += timestamp;
-	save_path += L' ';
+    stored_buffers_inst& sbi = *runtime->get_private_data<stored_buffers_inst>();
+    if (sbi.color_texture_r.handle == 0)
+        fc_find_export_tex(runtime, sbi);
+    if (sbi.color_texture_r.handle == 0) {
+        reshade::log::message(reshade::log::level::warning, "FC: UIRemove_ColorTex not ready, skipped");
+        return;
+    }
 
-	stored_buffers_inst& sbi = *runtime->get_private_data<stored_buffers_inst>();
-	if (sbi.color_texture_r.handle == 0)
-		fc_find_export_tex(runtime, sbi);
+    // Drop frame if worker is behind
+    {
+        std::lock_guard<std::mutex> lk(g_queue_mutex);
+        if (g_save_queue.size() >= MAX_QUEUE) {
+            reshade::log::message(reshade::log::level::warning, "FC: save queue full, dropping frame");
+            return;
+        }
+    }
 
-	std::filesystem::path bmp_path = save_path;
-	bmp_path += L"BackBuffer.bmp";
-	if (!saveColorBMP(runtime, bmp_path, sbi.color_texture_r, sbi.color_texture_rd))
-		reshade::log::message(reshade::log::level::warning, "FC: UIRemove_ColorTex not ready, BMP skipped");
+    // ── Resolve output directory ───────────────────────────────────────────────
+    WCHAR exe_buf[MAX_PATH] = L"";
+    GetModuleFileNameW(nullptr, exe_buf, ARRAYSIZE(exe_buf));
+    std::filesystem::path exe_fs(exe_buf);
+    std::filesystem::path out_dir = exe_fs.parent_path();
+    {
+        std::ifstream cfg(out_dir / L"fc_output_dir.txt");
+        std::string line;
+        if (std::getline(cfg, line)) {
+            while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+                line.pop_back();
+            if (!line.empty())
+                out_dir = std::filesystem::u8path(line);
+        }
+    }
 
-	type tex_type;
+    // ── Build filename prefix ─────────────────────────────────────────────────
+    const auto now         = std::chrono::system_clock::now();
+    const auto now_seconds = std::chrono::time_point_cast<std::chrono::seconds>(now);
+    const std::time_t t    = std::chrono::system_clock::to_time_t(now_seconds);
+    tm tm_val; localtime_s(&tm_val, &t);
+    char ts[32];
+    sprintf_s(ts, "%.4d-%.2d-%.2d %.2d-%.2d-%.2d %.3lld ",
+              tm_val.tm_year + 1900, tm_val.tm_mon + 1, tm_val.tm_mday,
+              tm_val.tm_hour, tm_val.tm_min, tm_val.tm_sec,
+              std::chrono::duration_cast<std::chrono::milliseconds>(now - now_seconds).count());
 
-	if (enableDepthExp) {
-		std::filesystem::path depth_path = save_path;
-		depth_path += L"DepthBuffer.exr";
-		tex_type = depth;
-		saveImage(runtime, depth_path, sbi.export_texture_r, sbi.export_texture_rd, sbi.export_texture_rd.texture.format, tex_type);
-	}
+    std::filesystem::path save_prefix = out_dir / exe_fs.filename();
+    save_prefix += L' ';
+    save_prefix += ts;
 
-	if (enableNormalExp) {
-		std::filesystem::path normal_path = save_path;
-		normal_path += L"NormalMap.exr";
-		tex_type = normal;
-		saveImage(runtime, normal_path, sbi.export_texture_r, sbi.export_texture_rd, sbi.export_texture_rd.texture.format, tex_type);
-	}
+    // ── GPU: ensure pre-allocated staging buffers ─────────────────────────────
+    device*        dev   = runtime->get_device();
+    command_queue* queue = runtime->get_command_queue();
+    command_list*  cmd   = queue->get_immediate_command_list();
+
+    const resource_desc& crd = sbi.color_texture_rd;
+    uint32_t color_row_pitch = (format_row_pitch(crd.texture.format, crd.texture.width) + 255) & ~255;
+    uint32_t color_slice     = format_slice_pitch(crd.texture.format, color_row_pitch, crd.texture.height);
+
+    if (sbi.color_staging.handle == 0 || sbi.color_staging_size < color_slice) {
+        if (sbi.color_staging.handle != 0) dev->destroy_resource(sbi.color_staging);
+        if (!dev->create_resource(resource_desc(color_slice, memory_heap::gpu_to_cpu, resource_usage::copy_dest),
+                                  nullptr, resource_usage::copy_dest, &sbi.color_staging)) {
+            reshade::log::message(reshade::log::level::error, "FC: failed to create color staging buffer");
+            return;
+        }
+        sbi.color_staging_size = color_slice;
+    }
+
+    // ── GPU: color copy ───────────────────────────────────────────────────────
+    cmd->barrier(sbi.color_texture_r, resource_usage::shader_resource, resource_usage::copy_source);
+    cmd->copy_texture_to_buffer(sbi.color_texture_r, 0, nullptr,
+                                sbi.color_staging, 0, crd.texture.width, crd.texture.height);
+    cmd->barrier(sbi.color_texture_r, resource_usage::copy_source, resource_usage::shader_resource);
+
+    // ── GPU: depth copy (if enabled) ──────────────────────────────────────────
+    bool do_depth = enableDepthExp && sbi.export_texture_r.handle != 0;
+    uint32_t depth_row_pitch = 0;
+    if (do_depth) {
+        const resource_desc& drd = sbi.export_texture_rd;
+        depth_row_pitch = (format_row_pitch(drd.texture.format, drd.texture.width) + 255) & ~255;
+        uint32_t depth_slice = format_slice_pitch(drd.texture.format, depth_row_pitch, drd.texture.height);
+
+        if (sbi.depth_staging.handle == 0 || sbi.depth_staging_size < depth_slice) {
+            if (sbi.depth_staging.handle != 0) dev->destroy_resource(sbi.depth_staging);
+            if (!dev->create_resource(resource_desc(depth_slice, memory_heap::gpu_to_cpu, resource_usage::copy_dest),
+                                      nullptr, resource_usage::copy_dest, &sbi.depth_staging)) {
+                reshade::log::message(reshade::log::level::error, "FC: failed to create depth staging buffer");
+                do_depth = false;
+            } else sbi.depth_staging_size = depth_slice;
+        }
+
+        if (do_depth) {
+            cmd->barrier(sbi.export_texture_r, resource_usage::shader_resource, resource_usage::copy_source);
+            cmd->copy_texture_to_buffer(sbi.export_texture_r, 0, nullptr,
+                                        sbi.depth_staging, 0, drd.texture.width, drd.texture.height);
+            cmd->barrier(sbi.export_texture_r, resource_usage::copy_source, resource_usage::shader_resource);
+        }
+    }
+
+    // ── Single GPU sync for both copies ──────────────────────────────────────
+    queue->wait_idle();
+
+    // ── CPU: de-pitch memcpy → task buffers, then return render thread ────────
+    SaveTask task;
+    task.bmp_path = save_prefix; task.bmp_path += L"BackBuffer.bmp";
+    task.width    = crd.texture.width;
+    task.height   = crd.texture.height;
+    task.color_pixels.resize(task.width * task.height * 4);
+
+    void* color_ptr = nullptr;
+    dev->map_buffer_region(sbi.color_staging, 0, UINT64_MAX, map_access::read_only, &color_ptr);
+    if (color_ptr) {
+        const uint8_t* src = static_cast<const uint8_t*>(color_ptr);
+        for (uint32_t y = 0; y < task.height; y++)
+            std::memcpy(task.color_pixels.data() + y * task.width * 4,
+                        src + y * color_row_pitch,
+                        task.width * 4);
+        dev->unmap_buffer_region(sbi.color_staging);
+    }
+
+    if (do_depth) {
+        const resource_desc& drd = sbi.export_texture_rd;
+        task.depth_path = save_prefix; task.depth_path += L"DepthBuffer.exr";
+        task.depth_w = drd.texture.width;
+        task.depth_h = drd.texture.height;
+        task.depth_pixels.resize(task.depth_w * task.depth_h * 4);
+
+        void* depth_ptr = nullptr;
+        dev->map_buffer_region(sbi.depth_staging, 0, UINT64_MAX, map_access::read_only, &depth_ptr);
+        if (depth_ptr) {
+            const float* src      = static_cast<const float*>(depth_ptr);
+            uint32_t floats_per_row = depth_row_pitch / sizeof(float);
+            for (uint32_t y = 0; y < task.depth_h; y++)
+                std::memcpy(task.depth_pixels.data() + y * task.depth_w * 4,
+                            src + y * floats_per_row,
+                            task.depth_w * 4 * sizeof(float));
+            dev->unmap_buffer_region(sbi.depth_staging);
+        }
+    }
+
+    // Enqueue — render thread is now free
+    {
+        std::lock_guard<std::mutex> lk(g_queue_mutex);
+        g_save_queue.push(std::move(task));
+    }
+    g_queue_cv.notify_one();
 }
 
-static void drawItem(effect_runtime* runtime, resource_view srv, resource_desc srd, const char* source, bool firstElem, imgui_content img_cont)
+// ── Overlay UI ────────────────────────────────────────────────────────────────
+
+static void drawItem(effect_runtime* runtime, resource_view srv, resource_desc srd,
+                     const char* source, bool firstElem, imgui_content img_cont)
 {
-	uint32_t frame_width, frame_height;
-
-	frame_width = srd.texture.width;
-	frame_height = srd.texture.height;
-
-	const float aspect_ratio = static_cast<float>(frame_width) / static_cast<float>(frame_height);
-	const ImVec2 size = aspect_ratio > 1 ? ImVec2(img_cont.single_image_max_size, img_cont.single_image_max_size / aspect_ratio) : ImVec2(img_cont.single_image_max_size * aspect_ratio, img_cont.single_image_max_size);
-	
-	int dt_id = static_cast<int>(srd.texture.format);
-
-	ImGui::BeginGroup();
-	ImGui::Image(srv.handle, size);
-	ImGui::Spacing();
-	ImGui::BeginGroup();
-	ImGui::BeginGroup();
-	ImGui::Text(source);
-	ImGui::SameLine();
-	ImGui::Text("|");
-	ImGui::SameLine();
-	ImGui::Text("%ix%i", static_cast<int>(frame_width), static_cast<int>(frame_height));
-	ImGui::SameLine();
-	ImGui::Text("|");
-	ImGui::SameLine();
-	ImGui::Text(texture_format[dt_id]);
-	ImGui::EndGroup();
-	ImGui::EndGroup();
-	ImGui::EndGroup();
-	if (img_cont.num_columns > 1)
-	{
-		if (firstElem) {
-			ImGui::SameLine();
-		}
-	}	
-	else {
-		if (firstElem) {
-			ImGui::Spacing();
-			ImGui::Separator();
-			ImGui::Spacing();
-		}
-	}
+    uint32_t fw = srd.texture.width, fh = srd.texture.height;
+    const float ar = static_cast<float>(fw) / static_cast<float>(fh);
+    const ImVec2 sz = ar > 1
+        ? ImVec2(img_cont.single_image_max_size, img_cont.single_image_max_size / ar)
+        : ImVec2(img_cont.single_image_max_size * ar, img_cont.single_image_max_size);
+    int dt_id = static_cast<int>(srd.texture.format);
+    ImGui::BeginGroup();
+    ImGui::Image(srv.handle, sz);
+    ImGui::Spacing();
+    ImGui::BeginGroup(); ImGui::BeginGroup();
+    ImGui::Text(source); ImGui::SameLine(); ImGui::Text("|"); ImGui::SameLine();
+    ImGui::Text("%ix%i", (int)fw, (int)fh); ImGui::SameLine(); ImGui::Text("|"); ImGui::SameLine();
+    ImGui::Text(texture_format[dt_id]);
+    ImGui::EndGroup(); ImGui::EndGroup(); ImGui::EndGroup();
+    if (img_cont.num_columns > 1) { if (firstElem) ImGui::SameLine(); }
+    else { if (firstElem) { ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing(); } }
 }
 
 static void previewBuffers(effect_runtime* runtime, imgui_content img_cont)
 {
-	state_tracking_inst& instance = *runtime->get_private_data<state_tracking_inst>();
-	stored_buffers_inst& sbi = *runtime->get_private_data<stored_buffers_inst>();
-
-	device* const device = runtime->get_device();
-	command_queue* const queue = runtime->get_command_queue();
-	command_list* const cmd_list = queue->get_immediate_command_list();
-	bool firstElem = true;
-
-	runtime->enumerate_texture_variables(nullptr, [&sbi, &device, &firstElem, &img_cont](effect_runtime* runtime, auto variable) {
-		char source[32] = "";
-		runtime->get_texture_variable_name(variable, source);
-		if (std::strcmp(source, "DepthToAddon_DepthTex") == 0) {
-			
-			resource_view srv = { 0 }, srv_srgb2 = { 0 };
-			runtime->get_texture_binding(variable, &srv, &srv_srgb2);
-			if (srv != 0) {
-				drawItem(runtime, srv, device->get_resource_desc(device->get_resource_from_view(srv)), "DepthTex", firstElem, img_cont);
-				if (firstElem)
-					firstElem = false;
-			}
-			else
-			{
-				ImGui::TextColored(ImVec4(1.0, 0.2, 0.2, 1.0), "DepthTex not found!");
-			}
-		}
-		if (std::strcmp(source, "DepthToAddon_NormalTex") == 0) {
-			resource_view srv = { 0 }, srv_srgb2 = { 0 };
-			runtime->get_texture_binding(variable, &srv, &srv_srgb2);
-			if (srv != 0) {
-				drawItem(runtime, srv, device->get_resource_desc(device->get_resource_from_view(srv)), "NormalTex", firstElem, img_cont);
-				if (firstElem)
-					firstElem = false;
-			}
-			else
-			{
-				ImGui::TextColored(ImVec4(1.0, 0.2, 0.2, 1.0), "NormalTex not found!");
-			}
-		}
-	});
+    stored_buffers_inst& sbi = *runtime->get_private_data<stored_buffers_inst>();
+    device* dev = runtime->get_device();
+    bool firstElem = true;
+    runtime->enumerate_texture_variables(nullptr, [&](effect_runtime* rt, auto variable) {
+        char source[32] = ""; rt->get_texture_variable_name(variable, source);
+        auto show = [&](const char* label) {
+            resource_view srv = { 0 }, srv2 = { 0 };
+            rt->get_texture_binding(variable, &srv, &srv2);
+            if (srv.handle != 0) {
+                drawItem(rt, srv, dev->get_resource_desc(dev->get_resource_from_view(srv)),
+                         label, firstElem, img_cont);
+                firstElem = false;
+            } else {
+                char msg[64]; sprintf_s(msg, "%s not found!", label);
+                ImGui::TextColored(ImVec4(1,0.2f,0.2f,1), msg);
+            }
+        };
+        if (std::strcmp(source, "DepthToAddon_DepthTex")   == 0) show("DepthTex");
+        if (std::strcmp(source, "DepthToAddon_NormalTex")  == 0) show("NormalTex");
+    });
 }
 
 static void draw_settings_overlay(effect_runtime* runtime)
 {
-	imgui_content img_cont;
-	if (ImGui::GetContentRegionAvail().x > 560.0)
-		img_cont.change_values(2);
-
-	bool modified = false;
-	
-	if (!doOnce) {
-		auto& IO = ImGui::GetIO();
-		ImGui::SetWindowSize(ImVec2(windowSize[0], windowSize[1]));
-		ImGui::SetWindowPos(ImVec2((IO.DisplaySize.x - 16.0) / 2.75, 8.0));
-		doOnce = true;
-	}
-
-	if (ImGui::CollapsingHeader("Settings")) //ImGuiTreeNodeFlags_DefaultOpen
-	{
-		ImGui::Spacing();
-		modified |= ImGui::Checkbox("Enable capturing with F10 key", &enableCapturing);
-		modified |= ImGui::Checkbox("Export Depth", &enableDepthExp);
-		modified |= ImGui::Checkbox("Export Normals", &enableNormalExp);
-		ImGui::Spacing();
-		ImGui::Separator();
-	}
-	
-	ImGui::Spacing();
-	previewBuffers(runtime, img_cont);
-	ImGui::Spacing();
-
-	if (modified)
-	{
-		reshade::set_config_value(nullptr, "ADDON","FC_EnableCapture", enableCapturing);
-		reshade::set_config_value(nullptr, "ADDON","FC_ExportDepth", enableDepthExp);
-		reshade::set_config_value(nullptr, "ADDON","FC_ExportNormal", enableNormalExp);
-	}
+    imgui_content img_cont;
+    if (ImGui::GetContentRegionAvail().x > 560.0f) img_cont.change_values(2);
+    bool modified = false;
+    if (!doOnce) {
+        auto& IO = ImGui::GetIO();
+        ImGui::SetWindowSize(ImVec2(windowSize[0], windowSize[1]));
+        ImGui::SetWindowPos(ImVec2((IO.DisplaySize.x - 16.0f) / 2.75f, 8.0f));
+        doOnce = true;
+    }
+    if (ImGui::CollapsingHeader("Settings")) {
+        ImGui::Spacing();
+        modified |= ImGui::Checkbox("Enable capturing with F10 key", &enableCapturing);
+        modified |= ImGui::Checkbox("Export Depth",   &enableDepthExp);
+        modified |= ImGui::Checkbox("Export Normals", &enableNormalExp);
+        ImGui::Spacing(); ImGui::Separator();
+    }
+    ImGui::Spacing();
+    previewBuffers(runtime, img_cont);
+    ImGui::Spacing();
+    if (modified) {
+        reshade::set_config_value(nullptr, "ADDON", "FC_EnableCapture", enableCapturing);
+        reshade::set_config_value(nullptr, "ADDON", "FC_ExportDepth",   enableDepthExp);
+        reshade::set_config_value(nullptr, "ADDON", "FC_ExportNormal",  enableNormalExp);
+    }
 }
+
+// ── Register / unregister ─────────────────────────────────────────────────────
 
 void register_addon_FC()
 {
-	reshade::register_overlay("Frame Capture", draw_settings_overlay);
-
-	reshade::register_event<reshade::addon_event::init_device>(on_init_device);
-	reshade::register_event<reshade::addon_event::init_effect_runtime>(on_init_effect_runtime);
-	reshade::register_event<reshade::addon_event::destroy_effect_runtime>(on_destroy_effect_runtime);
-
-	reshade::register_event<reshade::addon_event::reshade_present>(on_reshade_present);
-	reshade::register_event<reshade::addon_event::reshade_begin_effects>(on_begin_render_effects);
+    reshade::register_overlay("Frame Capture", draw_settings_overlay);
+    reshade::register_event<reshade::addon_event::init_device>(on_init_device);
+    reshade::register_event<reshade::addon_event::init_effect_runtime>(on_init_effect_runtime);
+    reshade::register_event<reshade::addon_event::destroy_effect_runtime>(on_destroy_effect_runtime);
+    reshade::register_event<reshade::addon_event::reshade_present>(on_reshade_present);
+    reshade::register_event<reshade::addon_event::reshade_begin_effects>(on_begin_render_effects);
 }
+
 void unregister_addon_FC()
 {
-	reshade::unregister_overlay("Frame Capture", draw_settings_overlay);
-
-	reshade::unregister_event<reshade::addon_event::init_device>(on_init_device);
-	reshade::unregister_event<reshade::addon_event::init_effect_runtime>(on_init_effect_runtime);
-	reshade::unregister_event<reshade::addon_event::destroy_effect_runtime>(on_destroy_effect_runtime);
-
-	reshade::unregister_event<reshade::addon_event::reshade_present>(on_reshade_present);
-	reshade::unregister_event<reshade::addon_event::reshade_begin_effects>(on_begin_render_effects);
+    reshade::unregister_overlay("Frame Capture", draw_settings_overlay);
+    reshade::unregister_event<reshade::addon_event::init_device>(on_init_device);
+    reshade::unregister_event<reshade::addon_event::init_effect_runtime>(on_init_effect_runtime);
+    reshade::unregister_event<reshade::addon_event::destroy_effect_runtime>(on_destroy_effect_runtime);
+    reshade::unregister_event<reshade::addon_event::reshade_present>(on_reshade_present);
+    reshade::unregister_event<reshade::addon_event::reshade_begin_effects>(on_begin_render_effects);
 }
 
-extern "C" __declspec(dllexport) const char* NAME = "Frame Capture";
-extern "C" __declspec(dllexport) const char* DESCRIPTION = "Add-on that allow to capture depth and normal textures to 32-bit .exr within the screenshot capture. Press F10 to capture.";
+// ── DLL entry ─────────────────────────────────────────────────────────────────
+
+extern "C" __declspec(dllexport) const char* NAME        = "Frame Capture";
+extern "C" __declspec(dllexport) const char* DESCRIPTION = "Captures depth and color textures via ReShade. Press F10 to capture.";
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 {
-	switch (fdwReason)
-	{
-	case DLL_PROCESS_ATTACH:
-		if (!reshade::register_addon(hModule))
-			return FALSE;
-		register_addon_FC();
-		break;
-	case DLL_PROCESS_DETACH:
-		unregister_addon_FC();
-		reshade::unregister_addon(hModule);
-		break;
-	}
-
-	return TRUE;
+    switch (fdwReason) {
+    case DLL_PROCESS_ATTACH:
+        if (!reshade::register_addon(hModule))
+            return FALSE;
+        g_worker_stop = false;
+        g_save_thread = std::thread(save_worker_fn);
+        register_addon_FC();
+        break;
+    case DLL_PROCESS_DETACH:
+        unregister_addon_FC();
+        reshade::unregister_addon(hModule);
+        {
+            std::lock_guard<std::mutex> lk(g_queue_mutex);
+            g_worker_stop = true;
+        }
+        g_queue_cv.notify_one();
+        if (g_save_thread.joinable())
+            g_save_thread.join();
+        break;
+    }
+    return TRUE;
 }
