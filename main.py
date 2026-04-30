@@ -130,9 +130,29 @@ def _ensure_preset(game_dir: Path):
         preset.write_text(content, encoding="utf-8")
 
 
+_DEPLOY_FILES = ["dxgi.dll", "dxgi.dll.bak", "frame_capture.addon", "ReShade.ini", "ReShadePreset.ini"]
+_DEPLOY_DIRS  = ["reshade-shaders"]
+
+
+def _clean_deploy(game_dir: Path):
+    for name in _DEPLOY_FILES:
+        f = game_dir / name
+        if f.exists():
+            f.unlink()
+            print(f"[CLEAN] 删除 {f}")
+    for name in _DEPLOY_DIRS:
+        d = game_dir / name
+        if d.exists():
+            shutil.rmtree(d)
+            print(f"[CLEAN] 删除 {d}")
+
+
 def cmd_deploy(args):
     src_dll, src_addon, shader_src, deploy_shaders = _sources(args.mode)
     game_dir, _ = _resolve_game_path(args.game_path)
+
+    if getattr(args, "clean", False):
+        _clean_deploy(game_dir)
 
     for f in [src_dll, src_addon]:
         if not f.exists():
@@ -180,7 +200,15 @@ def cmd_capture(args):
     )
     _make_video(frames_dir, video_out, args.fps)
     print(f"\n[会话] {session_dir}")
-    print(f"       打包命令: uv run main.py pack --frames-dir {frames_dir} --inputs {inputs_out} --output {hdf5_out}")
+    if getattr(args, "no_pack", False):
+        print(f"       打包命令: uv run main.py pack --frames-dir {frames_dir} --inputs {inputs_out} --output {hdf5_out}")
+    else:
+        print("[PACK] 开始自动打包...")
+        pack_hdf5.pack(
+            frames_dir=frames_dir,
+            inputs_path=inputs_out,
+            output_path=hdf5_out,
+        )
 
 
 def cmd_launch(args):
@@ -286,12 +314,14 @@ def main():
     p = sub.add_parser("deploy", help="部署 ReShade DLL + addon 到游戏目录")
     p.add_argument("--mode", choices=["custom", "official592", "official673"], default="custom")
     p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录（目录时自动寻找最大 exe）")
+    p.add_argument("--clean", action="store_true", help="部署前删除上次 deploy 留下的所有文件")
 
     p = sub.add_parser("capture", help="启动采集（不部署）")
     p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录，用于确定帧文件监视目录")
     p.add_argument("--game-name", default="", help="输出目录前缀（默认从 --game-path 推导）")
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--duration", type=float, default=0, metavar="SEC", help="录制秒数，0=无限")
+    p.add_argument("--no-pack", action="store_true", help="采集结束后跳过自动 HDF5 打包")
 
     p = sub.add_parser("launch", help="部署 + 启动游戏 + 采集")
     p.add_argument("--mode", choices=["custom", "official592", "official673"], default="custom")
@@ -301,6 +331,8 @@ def main():
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--duration", type=float, default=10, metavar="SEC")
     p.add_argument("--deploy-only", action="store_true")
+    p.add_argument("--clean", action="store_true", help="部署前删除上次 deploy 留下的所有文件")
+    p.add_argument("--no-pack", action="store_true", help="采集结束后跳过自动 HDF5 打包")
 
     p = sub.add_parser("video", help="从 frames 目录生成 MP4 视频")
     p.add_argument("--frames-dir", default=str(FRAMES_DIR))
