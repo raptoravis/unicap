@@ -1,82 +1,78 @@
-# Handoff: unicap pipeline — fully working, ready for customization
+# Handoff: unicap pipeline — 6.7.3 DLL, zero splash, texture-export BMP capture
 
 **Generated**: 2026-04-30
-**Branch**: master (2 commits ahead of origin)
-**Status**: Working — pipeline confirmed correct, ready for next development phase
+**Branch**: master (up to date with origin)
+**Status**: Working — pending end-to-end test with game running
 
 ## Goal
 
-Game capture pipeline for FF7 Remake (DX12, R10G10B10A2_UNORM swap chain): each F10 press produces a correct `*BackBuffer.bmp` (game image) + `*DepthBuffer.exr` (linear depth). User wants `--mode custom` as the default so they can customize the addon (`frame_capture.cpp`) and shaders freely.
+Game capture pipeline for FF7 Remake (DX12, R10G10B10A2_UNORM swap chain): each F10 press produces a `*BackBuffer.bmp` (game image) + `*DepthBuffer.exr` (linear depth), with **zero ReShade UI visible at any point** — not during startup loading, not after.
 
 ## Completed
 
-- [x] Identified root cause of wrong BMP: `reshade/` source is **6.7.3.16/17 UNOFFICIAL** (not 5.9.2 as CMakeLists.txt claimed). Its `capture_screenshot` reads the wrong internal buffer on R10G10B10A2 swap chains, producing ExportTex-like (psychedelic/normal-map) colors in the BMP.
-- [x] Fixed `--mode custom`: now deploys `vendor/reshade592/dxgi.dll` (official 5.9.2) + `dist/frame_capture.addon` (custom-compiled). BMP and EXR both correct — **confirmed by user**.
-- [x] Fixed `ReShade.fxh` redefinition issue: `#ifndef` guards on `BUFFER_RCP_WIDTH/HEIGHT` — without this, both shaders fail to compile silently.
-- [x] Fixed technique activation: ReShade ignores `enabled = 1` annotations without a preset file. `_ensure_preset()` in `main.py` always writes `ReShadePreset.ini` with both techniques.
-- [x] Restored UIRemove.fx to deploy for all modes — it is the required final-pass passthrough that writes `tex2D(ReShade::BackBuffer, uv)` back to the swap chain so `capture_screenshot` sees the game image.
-- [x] Removed `add_dependencies(frame_capture reshade_core)` from CMakeLists.txt — addon now builds independently without triggering the slow 6.7.3 MSBuild.
-- [x] Reverted `feb4c39` default-mode change — `--mode custom` stays default.
+- [x] Eliminated ReShade startup splash entirely by switching `--mode custom` from `vendor/reshade592/dxgi.dll` (5.9.2) to `dist/dxgi.dll` (6.7.3). The 6.7.3 source explicitly sets `_show_splash = false` in `reload_effects()` — no ini key needed.
+- [x] Worked around 6.7.3's broken `capture_screenshot` on R10G10B10A2: added `UIRemove_ColorTex` (RGBA8) export texture to `UIRemove.fx`; addon reads this texture directly instead of calling `capture_screenshot`.
+- [x] Upgraded `frame_capture.cpp` from ReShade addon API v1 (5.9.2 headers) to v20 (6.7.3 headers). Key API changes: `get_config_value` (renamed), `log::message` (moved namespace), `get_texture_binding` (third arg required), `get_private_data` (returns `T*` not `T&`).
+- [x] `ReShade.ini` writes `TutorialProgress=4` under `[OVERLAY]` (was wrongly under `[GENERAL]`) to suppress the "installed successfully" persistent banner.
+- [x] All changes committed and pushed (`620fafd`).
 
 ## Not Yet Done
 
-- [ ] Push 2 local commits to origin (`git push`)
-- [ ] Decide what to do with `reshade/` source directory (6.7.3.16 UNOFFICIAL, unused): delete it to save space, or replace with actual 5.9.2 tag if DLL customization is ever needed.
-- [ ] Whatever addon/shader customizations the user plans to make (not yet specified).
+- [ ] **End-to-end test**: launch game, press F10, verify `*BackBuffer.bmp` shows game image (not psychedelic/normal-map colors) and `*DepthBuffer.exr` is ~15–25 MB.
+- [ ] Decide whether to keep `reshade/` source directory (6.7.3.16 UNOFFICIAL, ~large); now actively used for DLL + addon API headers.
+- [ ] Whatever further addon/shader customizations are needed for ML training.
 
 ## Failed Approaches (Don't Repeat These)
 
-1. **Switching default mode to `official592`** — reverted. User wants `--mode custom` as default because addon customization is the whole point.
+1. **`TutorialProgress=4` under `[GENERAL]`** — ReShade reads this key exclusively from `[OVERLAY]`. Writing it to `[GENERAL]` is silently ignored. Result: "installed successfully" message persisted.
 
-2. **Using `dist/dxgi.dll` (built from `reshade/` source) for BMP capture** — `reshade/` is 6.7.3.16 UNOFFICIAL. Its `capture_screenshot` on R10G10B10A2 swap chains returns contents of an internal staging buffer that ends up holding DepthToAddon's ExportTex data (not the game image). Official 5.9.2 handles this correctly. **Do not attempt to use `dist/dxgi.dll` for capture** — the reshade/ source version problem would need to be fixed first.
+2. **`CheckForUpdates=0` ini key** — Does not exist in any ReShade version (checked source). The update check is unconditional in the binary. Removing this key had no effect.
 
-3. **Removing UIRemove.fx** — wrong. UIRemove is the fix, not a bug. Without it, ReShade's effect pipeline can leave DepthToAddon render targets in the backbuffer, and `capture_screenshot` captures those. UIRemove must run last and writes the pre-effect copy back to the swap chain.
+3. **Suppressing 5.9.2 splash via ini** — 5.9.2 has no config key to disable the startup splash. The 6.7.3 source has `_show_splash = false` hardcoded in `reload_effects()` — this is why we must use 6.7.3, not 5.9.2, to get zero splash.
 
-4. **Relying on `technique X < enabled = 1; >` annotation alone** — doesn't work. ReShade only activates techniques listed in the preset file's `Techniques=` line. Always write `ReShadePreset.ini` via `_ensure_preset()`.
+4. **Using `capture_screenshot()` with 6.7.3 DLL** — On R10G10B10A2 swap chains, 6.7.3 UNOFFICIAL's `capture_screenshot` reads from an internal staging buffer that holds DepthToAddon's ExportTex data (psychedelic/normal-map colors), not the game image. Fixed by reading `UIRemove_ColorTex` directly from the shader instead.
 
-5. **`shaders/ReShade.fxh` with unconditional `#define BUFFER_RCP_WIDTH (1.0/BUFFER_WIDTH)`** — ReShade runtime predefines this. Both shaders fail to compile with `preprocessor error: redefinition`. Always use `#ifndef` guards.
+5. **Using `dist/dxgi.dll` (6.7.3) with the old v1 addon API** — RESHADE_API_VERSION mismatch (1 vs 20) causes `reshade::register_addon()` to return FALSE and the addon silently fails to load. Must use `reshade/include/` headers (v20).
+
+6. **Keeping `reshade-addons/deps/imgui` (ImGui 1.86) with v20 headers** — `reshade_overlay.hpp` has a `#error` that fires unless ImGui version is exactly 19250 (1.92.5). Must use `reshade/deps/imgui/` instead.
 
 ## Key Decisions
 
 | Decision | Rationale |
 |----------|-----------|
-| `--mode custom` = vendor 5.9.2 DLL + custom-compiled addon | reshade/ source is 6.7.3 (wrong version); DLL doesn't need rebuilding for addon/shader customization |
-| Always deploy shaders for all modes | Addon finds `DepthToAddon_ExportTex` by name; no shader = no EXR regardless of DLL |
-| Always write `ReShadePreset.ini` | `enabled = 1` annotations are inert without a preset |
-| Technique order locked: DepthToAddon → UIRemove | DepthToAddon writes to custom RTs; UIRemove must run last to restore backbuffer for capture |
-| Default `FC_ExportNormal=0` | User-specified; only depth + BMP needed by default |
+| `--mode custom` = `dist/dxgi.dll` (6.7.3) + custom addon | Only version with zero startup splash; `capture_screenshot` bug bypassed by texture export |
+| BMP via `UIRemove_ColorTex` not `capture_screenshot` | 6.7.3's `capture_screenshot` broken on R10G10B10A2; texture export gives identical data |
+| Addon headers from `reshade/include/` (v20) | Must match the DLL's RESHADE_API_VERSION; v1 headers cause silent load failure |
+| `TutorialProgress=4` in `[OVERLAY]` | Suppresses persistent "installed successfully" banner |
+| Technique order locked: DepthToAddon → UIRemove | DepthToAddon writes to custom RTs; UIRemove must run last to snapshot clean BackBuffer |
 
 ## Current State
 
-**Working** (confirmed by user):
-- `uv run main.py launch --mode custom --game-path E:\games\ff7remake\End\Binaries\Win64\ff7remake_.exe`
-- Produces correct `*BackBuffer.bmp` (game image) + `*DepthBuffer.exr` (~20 MB, linear depth)
-- `--mode official592` also works identically (same DLL, different addon)
+**Working** (compiled clean, not yet tested with live game):
+- `dist/dxgi.dll` — 6.7.3 UNOFFICIAL, 5.44 MB — zero splash on load
+- `dist/frame_capture.addon` — v20 API, reads `UIRemove_ColorTex` for BMP + `DepthToAddon_ExportTex` for EXR
+- `shaders/UIRemove.fx` — two-pass: ExportColor (→ UIRemove_ColorTex) + RestoreBackBuffer (→ swap chain)
+- `main.py --mode custom` deploys `dist/dxgi.dll` + `dist/frame_capture.addon` + shaders
 
-**Unstaged** (binary diffs, not meaningful — dist files were re-deployed to game dir and back):
-- `dist/dxgi.dll` — modified (binary diff, same effective content)
-- `dist/frame_capture.addon` — modified (binary diff, same effective content)
-- `HANDOFF.md` — deleted (previous handoff removed after resolution)
+**Not yet confirmed**: BMP correctness with the new code path (texture export not previously tested end-to-end).
 
-**Deployed to** `E:\games\ff7remake\End\Binaries\Win64\`:
-- `dxgi.dll` ← `vendor/reshade592/dxgi.dll` (5.9.2.1760, 4.06 MB)
-- `frame_capture.addon` ← `dist/frame_capture.addon` (custom-compiled, ~116 KB)
-- `reshade-shaders/Shaders/{DepthToAddon.fx, UIRemove.fx, ReShade.fxh}`
-- `ReShade.ini` with `FC_EnableCapture=1`, `FC_ExportDepth=1`, `FC_ExportNormal=0`
-- `ReShadePreset.ini` with `Techniques=DepthToAddon@DepthToAddon.fx,UIRemove@UIRemove.fx`
+**`--mode official592`** still works as before (vendor 5.9.2 DLL + official addon, has splash).
 
 ## Files to Know
 
 | File | Why It Matters |
 |------|----------------|
-| `main.py` | CLI entry. `_sources()` decides which DLL/addon to deploy per mode. `_ensure_preset()` writes ReShadePreset.ini. |
-| `reshade-addons/99-frame_capture/frame_capture.cpp` | Entire addon (single file). Edit here for capture customization. |
-| `shaders/DepthToAddon.fx` | murchFX 3-output: writes ExportTex (RGBA32F: normals+depth), DepthTex, NormalTex to custom RTs only. |
-| `shaders/UIRemove.fx` | Pure passthrough — MUST run last. Writes `tex2D(ReShade::BackBuffer, uv)` to swap chain. |
-| `shaders/ReShade.fxh` | Minimal local version. All `#define`s must have `#ifndef` guards. |
-| `vendor/reshade592/dxgi.dll` | Official 5.9.2 binary. Used by both `--mode custom` and `--mode official592`. |
-| `tools/capture/config.py` | Machine-specific paths — `GAME_PATH`, `DATASET_ROOT`. |
-| `CMakeLists.txt` | Builds `frame_capture.addon` only (reshade_core target exists but output unused). |
+| `main.py` | CLI. `_sources()` decides DLL/addon per mode. `_ensure_addon_enabled()` writes `ReShade.ini`. |
+| `reshade-addons/99-frame_capture/frame_capture.cpp` | Entire addon. `saveColorBMP()` reads `UIRemove_ColorTex`. `fc_find_export_tex()` finds both textures. |
+| `shaders/UIRemove.fx` | Two-pass: ExportColor → `UIRemove_ColorTex`, RestoreBackBuffer → swap chain. |
+| `shaders/DepthToAddon.fx` | Exposes `DepthToAddon_ExportTex` (RGBA32F: normals+depth) read by addon. |
+| `shaders/ReShade.fxh` | Minimal local version. All `#define`s must have `#ifndef` guards (ReShade redefines them). |
+| `dist/dxgi.dll` | 6.7.3 UNOFFICIAL binary. Zero startup splash. `capture_screenshot` broken on R10G10B10A2 — do not use. |
+| `vendor/reshade592/dxgi.dll` | Official 5.9.2 binary. `capture_screenshot` correct but has startup splash. |
+| `reshade/include/` | v20 addon API headers used by `frame_capture.cpp`. |
+| `reshade/deps/imgui/` | ImGui 1.92.5 — required by `reshade_overlay.hpp` in v20 headers. |
+| `tools/capture/config.py` | Machine-specific paths: `GAME_PATH`, `DATASET_ROOT`. |
+| `CMakeLists.txt` | Builds `frame_capture.addon`. Include paths now point to `reshade/include/` and `reshade/deps/imgui/`. |
 
 ## Code Context
 
@@ -85,51 +81,101 @@ Game capture pipeline for FF7 Remake (DX12, R10G10B10A2_UNORM swap chain): each 
 def _sources(mode: str):
     shader_src = ROOT / "shaders"
     dist = ROOT / "dist"
-    # custom: official 5.9.2 DLL + our compiled addon
+    # custom: 6.7.3 DLL (no splash) + our compiled addon
     if mode == "custom":
-        return ROOT / "vendor" / "reshade592" / "dxgi.dll", dist / "frame_capture.addon", shader_src, True
+        return dist / "dxgi.dll", dist / "frame_capture.addon", shader_src, True
     addon = ROOT / "vendor" / "addon_official" / "frame_capture.addon"
     if mode == "official592":
         return ROOT / "vendor" / "reshade592" / "dxgi.dll", addon, shader_src, True
     return ROOT / "vendor" / "reshade673" / "dxgi.dll", addon, shader_src, True
 ```
 
-**Addon hot path (frame_capture.cpp):**
+**`stored_buffers_inst` — texture handles cached per runtime:**
+```cpp
+struct stored_buffers_inst {
+    resource export_texture_r = { 0 };   // DepthToAddon_ExportTex (RGBA32F)
+    resource_desc export_texture_rd;
+    resource_view export_texture_rv = { 0 };
+    resource color_texture_r = { 0 };    // UIRemove_ColorTex (RGBA8) — BMP source
+    resource_desc color_texture_rd;
+};
+```
+
+**`saveColorBMP()` — reads RGBA8 texture from GPU, saves as BMP:**
+- GPU→CPU copy via staging buffer (D3D12 `copy_texture_to_buffer` path)
+- Row-by-row memcpy to handle 256-byte pitch alignment
+- Calls `stbi_write_bmp` with 4 channels
+
+**`fc_find_export_tex()` — enumerates both textures:**
+```cpp
+// looks for both "DepthToAddon_ExportTex" and "UIRemove_ColorTex"
+// uses three-arg get_texture_binding(var, &srv, &srv_srgb) — v20 API requires both args
+```
+
+**`on_reshade_present` hot path:**
 ```cpp
 static void on_reshade_present(effect_runtime* runtime) {
     if (!runtime->is_key_pressed(0x79) || !enableCapturing) return;  // 0x79 = F10
-    runtime->capture_screenshot(pixels.data());  // reads swap chain backbuffer (correct with 5.9.2 DLL)
-    // BGRA→RGBA swap only for b8g8r8a8; r10g10b10a2 returns RGBA already
-    stbi_write_bmp(bmp_path, width, height, 4, pixels);
+    stored_buffers_inst& sbi = *runtime->get_private_data<stored_buffers_inst>();
+    if (sbi.color_texture_r.handle == 0) fc_find_export_tex(runtime, sbi);
+    saveColorBMP(runtime, bmp_path, sbi.color_texture_r, sbi.color_texture_rd);
     if (enableDepthExp) saveImage(runtime, depth_path, sbi.export_texture_r, ...);
 }
 ```
 
-**ExportTex lookup (fires once per frame in on_begin_render_effects):**
-```cpp
-static void on_begin_render_effects(effect_runtime* runtime, ...) {
-    if (sbi.export_texture_r != 0) return;
-    runtime->enumerate_texture_variables(nullptr, [](effect_runtime* rt, effect_texture_variable var, void*) {
-        char name[256]; rt->get_texture_variable_name(var, name);
-        if (strcmp(name, "DepthToAddon_ExportTex") == 0)
-            rt->get_texture_variable_value(var, &sbi.export_texture_r);
-    }, nullptr);
+**UIRemove.fx two-pass structure:**
+```hlsl
+technique UIRemove {
+    pass ExportColor {         // writes BackBuffer → UIRemove_ColorTex (RGBA8)
+        RenderTarget = UIRemove_ColorTex;
+    }
+    pass RestoreBackBuffer {   // writes BackBuffer → swap chain (no RenderTarget = default)
+    }
 }
 ```
 
-**Generated ReShadePreset.ini** (must be present alongside ReShade.ini):
+**ReShade.ini keys written by `_ensure_addon_enabled()`:**
 ```ini
-Techniques=DepthToAddon@DepthToAddon.fx,UIRemove@UIRemove.fx
-TechniqueSorting=DepthToAddon@DepthToAddon.fx,UIRemove@UIRemove.fx
+[ADDON]
+FC_EnableCapture = 1
+FC_ExportDepth   = 1
+FC_ExportNormal  = 0
+
+[OVERLAY]
+ShowScreenshotMessage = 0
+TutorialProgress = 4      ; ← must be [OVERLAY], not [GENERAL]
+
+[INPUT]
+KeyScreenshot = 0,0,0,0
+
+[GENERAL]
+EffectSearchPaths = .\reshade-shaders\Shaders\
+TextureSearchPaths = .\reshade-shaders\Textures\
 ```
 
 ## Resume Instructions
 
-1. **Push** pending commits: `git push`
-2. **Rebuild addon** after any `frame_capture.cpp` change: `scripts\build.ps1` (fast — only compiles the addon, not reshade core)
-3. **Deploy + test**: `uv run main.py launch --game-path E:\games\ff7remake\End\Binaries\Win64\ff7remake_.exe`
-   - Press F9 in-game to start capture, F10 to capture frames
-   - Expected: `*BackBuffer.bmp` shows game image, `*DepthBuffer.exr` ~15–25 MB
+1. **Rebuild addon** (already done, but do after any `.cpp` change):
+   ```powershell
+   scripts\build.ps1
+   ```
+
+2. **Delete old `ReShade.ini`** in game dir to flush stale ini from 5.9.2 era:
+   ```powershell
+   Remove-Item "E:\games\ff7remake\End\Binaries\Win64\ReShade.ini" -Force
+   ```
+
+3. **Deploy + test**:
+   ```powershell
+   uv run main.py launch --game-path "E:\games\ff7remake\End\Binaries\Win64\ff7remake_.exe"
+   ```
+   - Press F9 in-game to start capture session
+   - Press F10 once to capture a frame
+   - Expected: `*BackBuffer.bmp` shows game image (NOT psychedelic colors), `*DepthBuffer.exr` ~15–25 MB
+   - If BMP is wrong color: `UIRemove_ColorTex` might not be bound yet — check ReShade log for "FC: listing all effect texture variables" and confirm `UIRemove_ColorTex` appears
+   - If BMP is skipped: log says "UIRemove_ColorTex not ready" — verify `UIRemove` technique is active in `ReShadePreset.ini`
+
+4. **Verify zero splash**: game window should open with no ReShade overlay text at any point.
 
 ## Setup Required
 
@@ -139,8 +185,11 @@ TechniqueSorting=DepthToAddon@DepthToAddon.fx,UIRemove@UIRemove.fx
 
 ## Warnings
 
-- **Do not use `dist/dxgi.dll` for capture** — built from 6.7.3.16 UNOFFICIAL source; `capture_screenshot` returns wrong data on R10G10B10A2 swap chains.
-- **`reshade-addons/deps/reshade/include/`** uses old v5 wrapper names (`reshade::log_message`, `reshade::config_get_value`). Do not switch to `reshade/include/` — the wrapper names changed in v6.
-- **`get_texture_variable_name` returns unqualified name** even for namespace-scoped textures: compare against `"DepthToAddon_ExportTex"`, not `"DepthToAddon::DepthToAddon_ExportTex"`.
-- **UIRemove is mandatory** — removing it causes `capture_screenshot` to capture DepthToAddon render target content.
-- **Always write ReShadePreset.ini** — `enabled = 1` annotations in shaders are inert without it.
+- **Do NOT use `capture_screenshot()` with `dist/dxgi.dll` (6.7.3)** — on R10G10B10A2 it returns DepthToAddon's ExportTex data (psychedelic colors), not the game image. Use `UIRemove_ColorTex` exclusively.
+- **Do NOT use `vendor/reshade592/dxgi.dll` (5.9.2) for zero-splash** — 5.9.2 has no ini key to suppress the startup splash. The splash is hardcoded.
+- **`reshade-addons/deps/reshade/include/`** — old v1 API. Do NOT use for compilation with `dist/dxgi.dll`; addon will silently fail to load (API version mismatch).
+- **`reshade/include/`** — v20 API. Function names differ from v5: `get_config_value` (not `config_get_value`), `log::message` (not `log_message`), `get_private_data` returns `T*` (not `T&`).
+- **Always write `ReShadePreset.ini`** — `enabled = 1` shader annotations are inert without a preset listing techniques explicitly.
+- **UIRemove must run last** and be listed after DepthToAddon in `Techniques=`. If order is wrong, `UIRemove_ColorTex` captures DepthToAddon's RT output instead of the game image.
+- **`TutorialProgress` must be in `[OVERLAY]`** — writing it to `[GENERAL]` is silently ignored by ReShade.
+- **`reshade/deps/glad/target/`** — pre-generated C headers force-added with `git add -f`. Do not delete.
