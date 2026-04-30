@@ -194,6 +194,7 @@ def cmd_deploy(args):
 
 def cmd_capture(args):
     tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dataset_root = Path(args.dataset_root) if getattr(args, "dataset_root", None) else DATASET_ROOT
     game_name = getattr(args, "game_name", "") or ""
     watch_dir = getattr(args, "watch_dir", None)
     if watch_dir is None:
@@ -202,7 +203,7 @@ def cmd_capture(args):
         if not game_name:
             game_name = game_exe.stem
     game_name = game_name or "capture"
-    session_dir = DATASET_ROOT / f"{game_name}_{tag}"
+    session_dir = dataset_root / game_name / tag
     frames_dir = session_dir / "frames"
     inputs_out = session_dir / "inputs.jsonl"
     hdf5_out = session_dir / "dataset.h5"
@@ -326,6 +327,8 @@ def _make_video(frames_dir: Path, output: Path, fps: int):
 
 def cmd_survey(args):
     game_dir, game_exe = _resolve_game_path(args.game_path)
+    game_name = getattr(args, "game_name", "") or game_exe.stem
+    dataset_root = Path(args.dataset_root) if getattr(args, "dataset_root", None) else DATASET_ROOT
 
     # Deploy first so the addon is up to date
     args.pre_ui      = True
@@ -338,7 +341,7 @@ def cmd_survey(args):
         subprocess.Popen([str(game_exe)], cwd=str(game_dir), env=env)
         _wait_for_hotkey(args.start_key)
 
-    survey_dir = DATASET_ROOT / "survey" if not args.survey_dir else Path(args.survey_dir)
+    survey_dir = Path(args.survey_dir) if args.survey_dir else dataset_root / game_name / "survey"
     recommended = survey_mod.run(
         game_dir=game_dir,
         survey_dir=survey_dir,
@@ -389,7 +392,9 @@ def main():
 
     p = sub.add_parser("capture", help="启动采集（不部署）")
     p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录，用于确定帧文件监视目录")
-    p.add_argument("--game-name", default="", help="输出目录前缀（默认从 --game-path 推导）")
+    p.add_argument("--game-name", default="", help="游戏名（输出路径第一级，默认从 --game-path 推导）")
+    p.add_argument("--dataset-root", default="", metavar="PATH",
+                   help="数据集根目录（默认使用 config.py 中的 DATASET_ROOT）")
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--duration", type=float, default=0, metavar="SEC", help="录制秒数，0=无限")
     p.add_argument("--no-pack", action="store_true", help="采集结束后跳过自动 HDF5 打包")
@@ -397,7 +402,9 @@ def main():
     p = sub.add_parser("launch", help="部署 + 启动游戏 + 采集")
     p.add_argument("--mode", choices=["custom", "official592", "official673"], default="custom")
     p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录")
-    p.add_argument("--game-name", default="", help="输出目录前缀（默认从 exe 文件名推导）")
+    p.add_argument("--game-name", default="", help="游戏名（输出路径第一级，默认从 exe 文件名推导）")
+    p.add_argument("--dataset-root", default="", metavar="PATH",
+                   help="数据集根目录（默认使用 config.py 中的 DATASET_ROOT）")
     p.add_argument("--start-key", default="F9", help="游戏内按此键触发采集，支持 F1-F12 / ScrollLock（默认 F9）")
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--duration", type=float, default=10, metavar="SEC")
@@ -413,6 +420,9 @@ def main():
     p = sub.add_parser("survey", help="自动扫描 pre_ui_skip 范围，找到 UI 消失的临界值")
     p.add_argument("--mode", choices=["custom", "official592", "official673"], default="official592")
     p.add_argument("--game-path", default=str(GAME_PATH))
+    p.add_argument("--game-name", default="", help="游戏名（输出路径第一级，默认从 exe 文件名推导）")
+    p.add_argument("--dataset-root", default="", metavar="PATH",
+                   help="数据集根目录（默认使用 config.py 中的 DATASET_ROOT）")
     p.add_argument("--start-key", default="F9")
     p.add_argument("--fps", type=float, default=1.0, metavar="FPS",
                    help="扫描时的采集帧率（默认 1fps）")
@@ -421,7 +431,7 @@ def main():
     p.add_argument("--survey-step", type=int, default=5, metavar="STEP",
                    help="skip 步长（默认 5）")
     p.add_argument("--survey-dir", default="", metavar="PATH",
-                   help="扫描帧保存目录（默认 DATASET_ROOT/survey）")
+                   help="扫描帧保存目录（覆盖默认的 DATASET_ROOT/<game>/survey）")
     p.add_argument("--timeout", type=float, default=10.0, metavar="SEC",
                    help="每个 skip 值等待超时（默认 10s）")
     p.add_argument("--no-launch", action="store_true",
