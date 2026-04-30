@@ -27,7 +27,7 @@ Delete `build\` to force CMake reconfigure.
 ```powershell
 uv sync                                    # install Python deps (first time)
 
-uv run main.py launch                      # deploy + launch game + capture (default: official592)
+uv run main.py launch --mode custom        # deploy + launch game + capture
 uv run main.py deploy --game-dir PATH      # deploy files only
 uv run main.py capture                     # capture only (game already running)
 uv run main.py pack                        # pack last session into HDF5
@@ -48,13 +48,13 @@ ReShade addon compiled to `frame_capture.addon`. On each F10 press (`VK 0x79`), 
 
 Settings (`FC_EnableCapture`, `FC_ExportDepth`, `FC_ExportNormal`) default to `true` and are persisted in ReShade's `.ini` config via `config_get_value` / `config_set_value`.
 
-**Important:** `frame_capture.cpp` includes headers from `reshade-addons/deps/reshade/include` (older v5 wrapper API: `reshade::log_message`, `reshade::config_get_value`), not from `reshade/` itself. Do not change this include path — the compiled addon is binary-compatible with the `dxgi.dll` built from `reshade/`.
+**Important:** `frame_capture.cpp` includes headers from `reshade-addons/deps/reshade/include` (older v5 wrapper API: `reshade::log_message`, `reshade::config_get_value`), not from `reshade/` itself. Do not change this include path — the compiled addon is binary-compatible with `vendor/reshade592/dxgi.dll`.
 
-### ReShade core — `reshade/`
+### ReShade core — `reshade/` and `vendor/reshade592/`
 
-Vendored at **v5.9.2**. Do not upgrade to v6.x — the frame_capture addon uses v5 wrapper API names that were removed/renamed in v6.
+**`vendor/reshade592/dxgi.dll`** — official 5.9.2 binary. This is what `--mode custom` and `--mode official592` both deploy. It correctly handles R10G10B10A2 swap chains in `capture_screenshot`.
 
-Built via `CMakeLists.txt` using `ExternalProject_Add` → MSBuild → `reshade/bin/x64/Release/ReShade64.dll` → copied to `dist/dxgi.dll`.
+**`reshade/`** — contains 6.7.3.16 UNOFFICIAL source. `dist/dxgi.dll` built from it produces wrong BMP on R10G10B10A2 swap chains and is **not deployed by any mode**. The CMake `reshade_core` target exists as infrastructure but its output is unused.
 
 `reshade/deps/glad/target/` contains pre-generated C headers that are excluded by glad's own `.gitignore` but are **force-added** to this repo (`git add -f`). Do not delete them.
 
@@ -73,9 +73,9 @@ Three concurrent threads in `capture_all.py`:
 
 ### CMake structure
 
-`CMakeLists.txt` chains three targets:
-1. `reshade_core` (ExternalProject, MSBuild) → `dist/dxgi.dll`
-2. `frame_capture` (shared library, MSVC) → `dist/frame_capture.addon`; depends on `reshade_core`
+`CMakeLists.txt` defines three targets:
+1. `reshade_core` (ExternalProject, MSBuild) → `dist/dxgi.dll` (unused; reshade/ is 6.7.3 UNOFFICIAL)
+2. `frame_capture` (shared library, MSVC) → `dist/frame_capture.addon` — **this is the primary build output**
 3. `shaders` (custom target, always runs) → copies `.fx` files to `dist/reshade-shaders/Shaders/`
 
 ## Key Files

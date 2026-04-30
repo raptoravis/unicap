@@ -3,8 +3,8 @@
 unicap main controller
 
 Usage:
-  python main.py deploy   [--mode official592|custom|official673] [--game-dir PATH]
-  python main.py launch   [--mode official592|custom|official673] [--fps N] [--duration SEC] [--deploy-only]
+  python main.py deploy   [--mode custom|official592|official673] [--game-dir PATH]
+  python main.py launch   [--mode custom|official592|official673] [--fps N] [--duration SEC] [--deploy-only]
   python main.py capture  [--fps N] [--duration SEC]
   python main.py pack     [--frames-dir PATH] [--inputs PATH] [--output PATH]
   python main.py pack     --spot-check PATH [--check-frames 0,99,499] [--check-out PATH]
@@ -85,9 +85,10 @@ def _sources(mode: str):
     by name and depends on DepthToAddon.fx + ReShade.fxh + UIRemove.fx being present.
     """
     shader_src = ROOT / "shaders"
+    dist = ROOT / "dist"
+    # custom: official 5.9.2 DLL (capture_screenshot works on R10G10B10A2) + our compiled addon
     if mode == "custom":
-        dist = ROOT / "dist"
-        return dist / "dxgi.dll", dist / "frame_capture.addon", shader_src, True
+        return ROOT / "vendor" / "reshade592" / "dxgi.dll", dist / "frame_capture.addon", shader_src, True
     addon = ROOT / "vendor" / "addon_official" / "frame_capture.addon"
     if mode == "official592":
         return ROOT / "vendor" / "reshade592" / "dxgi.dll", addon, shader_src, True
@@ -281,7 +282,7 @@ def main():
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("deploy", help="部署 ReShade DLL + addon 到游戏目录")
-    p.add_argument("--mode", choices=["official592", "custom", "official673"], default="official592")
+    p.add_argument("--mode", choices=["custom", "official592", "official673"], default="custom")
     p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录（目录时自动寻找最大 exe）")
 
     p = sub.add_parser("capture", help="启动采集（不部署）")
@@ -291,7 +292,7 @@ def main():
     p.add_argument("--duration", type=float, default=0, metavar="SEC", help="录制秒数，0=无限")
 
     p = sub.add_parser("launch", help="部署 + 启动游戏 + 采集")
-    p.add_argument("--mode", choices=["official592", "custom", "official673"], default="official592")
+    p.add_argument("--mode", choices=["custom", "official592", "official673"], default="custom")
     p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录")
     p.add_argument("--game-name", default="", help="输出目录前缀（默认从 exe 文件名推导）")
     p.add_argument("--start-key", default="F9", help="游戏内按此键触发采集，支持 F1-F12 / ScrollLock（默认 F9）")

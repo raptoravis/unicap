@@ -13,8 +13,9 @@ message(STATUS "MSBuild: ${MSBUILD_EXE}")
 
 # ── ReShade core (dxgi.dll) — built via its native .sln ──────────────────────
 # ReShade has no CMakeLists.txt; we drive its MSBuild solution from here.
-# Source is pinned to v5.9.2 (see .gitmodules); DO NOT upgrade to 6.x —
-# frame_capture.addon's EXR export silently breaks on the 6.x API.
+# WARNING: reshade/ source is currently 6.7.3.16 UNOFFICIAL. The resulting dist/dxgi.dll
+# is NOT used for capture — main.py --mode custom deploys vendor/reshade592/dxgi.dll instead.
+# This target is kept only as a build infrastructure placeholder.
 include(ExternalProject)
 
 set(RESHADE_SLN "${CMAKE_SOURCE_DIR}/reshade/ReShade.sln")
@@ -68,14 +69,14 @@ target_include_directories(frame_capture PRIVATE
 # Note: we use reshade-addons' bundled reshade headers (older wrapper names) because
 # frame_capture.cpp calls reshade::log_message / reshade::config_get_value.
 # The underlying C exports (ReShadeLogMessage etc.) are identical in v5.9.2, so the
-# compiled .addon is fully binary-compatible with dxgi.dll built from reshade v5.9.2.
+# compiled .addon is fully binary-compatible with vendor/reshade592/dxgi.dll.
+# reshade/ source is 6.7.3.16 UNOFFICIAL — DO NOT deploy dist/dxgi.dll for production
+# capture; use vendor/reshade592/dxgi.dll which correctly handles R10G10B10A2 swap chains.
 target_compile_definitions(frame_capture PRIVATE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
     NDEBUG
 )
-# Ensure reshade headers exist before compiling the addon
-add_dependencies(frame_capture reshade_core)
 
 # ── Shaders ───────────────────────────────────────────────────────────────────
 set(SHADER_DST "${CMAKE_SOURCE_DIR}/dist/reshade-shaders/Shaders")
