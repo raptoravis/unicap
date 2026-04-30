@@ -86,9 +86,10 @@ def _sources(mode: str):
     """
     shader_src = ROOT / "shaders"
     dist = ROOT / "dist"
-    # custom: official 5.9.2 DLL (capture_screenshot works on R10G10B10A2) + our compiled addon
+    # custom: 6.7.3 DLL (no startup splash) + our compiled addon.
+    # BMP captured via UIRemove_ColorTex shader export, not capture_screenshot.
     if mode == "custom":
-        return ROOT / "vendor" / "reshade592" / "dxgi.dll", dist / "frame_capture.addon", shader_src, True
+        return dist / "dxgi.dll", dist / "frame_capture.addon", shader_src, True
     addon = ROOT / "vendor" / "addon_official" / "frame_capture.addon"
     if mode == "official592":
         return ROOT / "vendor" / "reshade592" / "dxgi.dll", addon, shader_src, True
@@ -109,6 +110,7 @@ def _ensure_addon_enabled(game_dir: Path):
         ("INPUT", "KeyScreenshot", "0,0,0,0"),  # 清空截图快捷键，避免与 F10 冲突
         ("GENERAL", "EffectSearchPaths", ".\\reshade-shaders\\Shaders\\"),
         ("GENERAL", "TextureSearchPaths", ".\\reshade-shaders\\Textures\\"),
+        ("OVERLAY", "TutorialProgress", "4"),   # 跳过新手教程，隐藏 "installed successfully" 横幅
     ]:
         if not cfg.has_section(section):
             cfg.add_section(section)

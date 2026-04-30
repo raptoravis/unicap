@@ -37,7 +37,7 @@ using namespace reshade::api;
 
 struct imgui_content
 {
-	float total_width = ImGui::GetWindowContentRegionWidth();
+	float total_width = ImGui::GetContentRegionAvail().x;
 	int num_columns = 1;
 	float single_image_max_size = total_width;
 	void change_values(int col)
@@ -100,6 +100,8 @@ struct __declspec(uuid("eadae23a-4009-4d32-8557-0af07e45f409")) stored_buffers_i
 	resource export_texture_r = { 0 };
 	resource_desc export_texture_rd;
 	resource_view export_texture_rv = { 0 };
+	resource color_texture_r = { 0 };   // UIRemove_ColorTex — RGBA8 game image
+	resource_desc color_texture_rd;
 	void update(resource sr, resource_desc srd, resource_view srv)
 	{
 		export_texture_r = sr;
@@ -123,9 +125,9 @@ enum type
 
 static void on_init_device(device* device)
 {
-	reshade::config_get_value(nullptr, "ADDON", "FC_EnableCapture", enableCapturing);
-	reshade::config_get_value(nullptr, "ADDON", "FC_ExportDepth", enableDepthExp);
-	reshade::config_get_value(nullptr, "ADDON", "FC_ExportNormal", enableNormalExp);
+	reshade::get_config_value(nullptr, "ADDON", "FC_EnableCapture", enableCapturing);
+	reshade::get_config_value(nullptr, "ADDON", "FC_ExportDepth", enableDepthExp);
+	reshade::get_config_value(nullptr, "ADDON", "FC_ExportNormal", enableNormalExp);
 }
 
 static void on_init_effect_runtime(effect_runtime* runtime)
@@ -137,7 +139,7 @@ static void on_destroy_effect_runtime(effect_runtime* runtime)
 {
 	device* const device = runtime->get_device();
 
-	stored_buffers_inst& sbi = runtime->get_private_data<stored_buffers_inst>();
+	stored_buffers_inst& sbi = *runtime->get_private_data<stored_buffers_inst>();
 
 	if (sbi.export_texture_rv != 0)
 		device->destroy_resource_view(sbi.export_texture_rv);
@@ -151,14 +153,23 @@ static void fc_find_export_tex(effect_runtime* runtime, stored_buffers_inst& sbi
 	runtime->enumerate_texture_variables(nullptr, [&sbi, &device](effect_runtime* rt, auto variable) {
 		char name[256] = {};
 		rt->get_texture_variable_name(variable, name);
+		resource_view srv = { 0 }, srv_srgb = { 0 };
 		if (std::strcmp(name, "DepthToAddon_ExportTex") == 0) {
-			resource_view srv = { 0 };
-			rt->get_texture_binding(variable, &srv);
+			rt->get_texture_binding(variable, &srv, &srv_srgb);
 			if (srv != 0) {
 				resource r = device->get_resource_from_view(srv);
 				sbi.update(r, device->get_resource_desc(r), srv);
 			} else {
 				sbi.reset();
+			}
+		} else if (std::strcmp(name, "UIRemove_ColorTex") == 0) {
+			rt->get_texture_binding(variable, &srv, &srv_srgb);
+			if (srv != 0) {
+				resource r = device->get_resource_from_view(srv);
+				sbi.color_texture_r = r;
+				sbi.color_texture_rd = device->get_resource_desc(r);
+			} else {
+				sbi.color_texture_r = { 0 };
 			}
 		}
 	});
@@ -166,21 +177,91 @@ static void fc_find_export_tex(effect_runtime* runtime, stored_buffers_inst& sbi
 
 static void on_begin_render_effects(effect_runtime* runtime, command_list* cmd_list, resource_view, resource_view)
 {
-	stored_buffers_inst& sbi = runtime->get_private_data<stored_buffers_inst>();
+	stored_buffers_inst& sbi = *runtime->get_private_data<stored_buffers_inst>();
 
 	if (!g_logged_textures) {
-		reshade::log_message(3, "FC: listing all effect texture variables:");
+		reshade::log::message(reshade::log::level::info, "FC: listing all effect texture variables:");
 		runtime->enumerate_texture_variables(nullptr, [](effect_runtime* rt, auto variable) {
 			char name[256] = {};
 			rt->get_texture_variable_name(variable, name);
 			char msg[320];
 			sprintf_s(msg, "FC:   '%s'", name);
-			reshade::log_message(3, msg);
+			reshade::log::message(reshade::log::level::info, msg);
 		});
 		g_logged_textures = true;
 	}
 
 	fc_find_export_tex(runtime, sbi);
+}
+
+static bool saveColorBMP(effect_runtime* runtime, std::filesystem::path save_path,
+                          resource r, resource_desc rd)
+{
+	if (r.handle == 0) return false;
+
+	device* const device = runtime->get_device();
+	command_queue* const queue = runtime->get_command_queue();
+
+	uint32_t row_pitch = format_row_pitch(rd.texture.format, rd.texture.width);
+	if (device->get_api() == device_api::d3d12)
+		row_pitch = (row_pitch + 255) & ~255;
+	const uint32_t slice_pitch = format_slice_pitch(rd.texture.format, row_pitch, rd.texture.height);
+
+	resource intermediate;
+	const bool use_buffer = device->check_capability(device_caps::copy_buffer_to_texture);
+	if (use_buffer) {
+		if (!device->create_resource(resource_desc(slice_pitch, memory_heap::gpu_to_cpu, resource_usage::copy_dest),
+		                             nullptr, resource_usage::copy_dest, &intermediate)) {
+			reshade::log::message(reshade::log::level::error, "FC: failed to create staging buffer for color BMP");
+			return false;
+		}
+		command_list* cmd_list = queue->get_immediate_command_list();
+		cmd_list->barrier(r, resource_usage::shader_resource, resource_usage::copy_source);
+		cmd_list->copy_texture_to_buffer(r, 0, nullptr, intermediate, 0, rd.texture.width, rd.texture.height);
+		cmd_list->barrier(r, resource_usage::copy_source, resource_usage::shader_resource);
+	} else {
+		if (!device->create_resource(resource_desc(rd.texture.width, rd.texture.height, 1, 1,
+		                                            format_to_default_typed(rd.texture.format), 1,
+		                                            memory_heap::gpu_to_cpu, resource_usage::copy_dest),
+		                             nullptr, resource_usage::copy_dest, &intermediate)) {
+			reshade::log::message(reshade::log::level::error, "FC: failed to create staging texture for color BMP");
+			return false;
+		}
+		command_list* cmd_list = queue->get_immediate_command_list();
+		cmd_list->barrier(r, resource_usage::shader_resource, resource_usage::copy_source);
+		cmd_list->copy_texture_region(r, 0, nullptr, intermediate, 0, nullptr);
+		cmd_list->barrier(r, resource_usage::copy_source, resource_usage::shader_resource);
+	}
+
+	queue->wait_idle();
+
+	subresource_data mapped_data = {};
+	if (use_buffer) {
+		device->map_buffer_region(intermediate, 0, std::numeric_limits<uint64_t>::max(), map_access::read_only, &mapped_data.data);
+		mapped_data.row_pitch = row_pitch;
+		mapped_data.slice_pitch = slice_pitch;
+	} else {
+		device->map_texture_region(intermediate, 0, nullptr, map_access::read_only, &mapped_data);
+	}
+
+	bool ok = false;
+	if (mapped_data.data) {
+		std::vector<uint8_t> pixels(rd.texture.width * rd.texture.height * 4);
+		const uint8_t* src = static_cast<const uint8_t*>(mapped_data.data);
+		for (uint32_t y = 0; y < rd.texture.height; y++)
+			memcpy(pixels.data() + y * rd.texture.width * 4,
+			       src + y * mapped_data.row_pitch,
+			       rd.texture.width * 4);
+		ok = stbi_write_bmp(save_path.u8string().c_str(),
+		                    rd.texture.width, rd.texture.height, 4, pixels.data()) != 0;
+		if (use_buffer)
+			device->unmap_buffer_region(intermediate);
+		else
+			device->unmap_texture_region(intermediate, 0);
+	}
+
+	device->destroy_resource(intermediate);
+	return ok;
 }
 
 bool SaveEXR(const float* rgb, int width, int height, const char* outfilename, bool single_channel) {
@@ -329,12 +410,12 @@ static bool saveImage(effect_runtime* runtime, std::filesystem::path save_path, 
 				char msg[256];
 				sprintf_s(msg, "FC: ExportTex missing copy_source flag (usage = %u), attempting copy anyway",
 					static_cast<uint32_t>(resource_desc.usage));
-				reshade::log_message(2, msg);
+				reshade::log::message(reshade::log::level::warning,msg);
 			}
 
 			if (!device->create_resource(reshade::api::resource_desc(slice_pitch, memory_heap::gpu_to_cpu, resource_usage::copy_dest), nullptr, resource_usage::copy_dest, &intermediate))
 			{
-				reshade::log_message(1, "Failed to create system memory buffer for texture dumping!");
+				reshade::log::message(reshade::log::level::error,"Failed to create system memory buffer for texture dumping!");
 				return false;
 			}
 
@@ -350,12 +431,12 @@ static bool saveImage(effect_runtime* runtime, std::filesystem::path save_path, 
 				char msg[256];
 				sprintf_s(msg, "FC: ExportTex missing copy_source flag (usage = %u), attempting copy anyway",
 					static_cast<uint32_t>(resource_desc.usage));
-				reshade::log_message(2, msg);
+				reshade::log::message(reshade::log::level::warning,msg);
 			}
 
 			if (!device->create_resource(reshade::api::resource_desc(resource_desc.texture.width, resource_desc.texture.height, 1, 1, format_to_default_typed(resource_desc.texture.format), 1, memory_heap::gpu_to_cpu, resource_usage::copy_dest), nullptr, resource_usage::copy_dest, &intermediate))
 			{
-				reshade::log_message(1, "Failed to create system memory texture for texture dumping!");
+				reshade::log::message(reshade::log::level::error,"Failed to create system memory texture for texture dumping!");
 				return false;
 			}
 
@@ -440,46 +521,14 @@ static void on_reshade_present(effect_runtime* runtime)
 	save_path += timestamp;
 	save_path += L' ';
 
-	uint32_t width = 0, height = 0;
-	runtime->get_screenshot_width_and_height(&width, &height);
-	std::vector<uint8_t> pixels(width * height * 4);
-	runtime->capture_screenshot(pixels.data());
-
-	resource backBuffer = runtime->get_current_back_buffer();
-	resource_desc rd = runtime->get_device()->get_resource_desc(backBuffer);
-	switch (rd.texture.format)
-	{
-	case format::b8g8r8a8_unorm:
-	case format::b8g8r8a8_unorm_srgb:
-	case format::b8g8r8x8_unorm:
-	case format::b8g8r8x8_unorm_srgb:
-		for (uint32_t i = 0; i < width * height * 4; i += 4)
-			std::swap(pixels[i], pixels[i + 2]);
-		break;
-	default:
-		break;
-	}
+	stored_buffers_inst& sbi = *runtime->get_private_data<stored_buffers_inst>();
+	if (sbi.color_texture_r.handle == 0)
+		fc_find_export_tex(runtime, sbi);
 
 	std::filesystem::path bmp_path = save_path;
 	bmp_path += L"BackBuffer.bmp";
-	stbi_write_bmp(bmp_path.u8string().c_str(), width, height, 4, pixels.data());
-
-	stored_buffers_inst& sbi = runtime->get_private_data<stored_buffers_inst>();
-
-	// Fallback: enumerate ExportTex now (in case on_begin_render_effects missed it)
-	if (sbi.export_texture_r == 0) {
-		fc_find_export_tex(runtime, sbi);
-		char msg[256];
-		sprintf_s(msg, "FC: fallback ExportTex lookup → handle = %llu", sbi.export_texture_r.handle);
-		reshade::log_message(3, msg);
-	} else {
-		char msg[256];
-		sprintf_s(msg, "FC: ExportTex cached → handle = %llu, format = %u, usage = %u",
-			sbi.export_texture_r.handle,
-			static_cast<uint32_t>(sbi.export_texture_rd.texture.format),
-			static_cast<uint32_t>(sbi.export_texture_rd.usage));
-		reshade::log_message(3, msg);
-	}
+	if (!saveColorBMP(runtime, bmp_path, sbi.color_texture_r, sbi.color_texture_rd))
+		reshade::log::message(reshade::log::level::warning, "FC: UIRemove_ColorTex not ready, BMP skipped");
 
 	type tex_type;
 
@@ -544,8 +593,8 @@ static void drawItem(effect_runtime* runtime, resource_view srv, resource_desc s
 
 static void previewBuffers(effect_runtime* runtime, imgui_content img_cont)
 {
-	state_tracking_inst& instance = runtime->get_private_data<state_tracking_inst>();
-	stored_buffers_inst& sbi = runtime->get_private_data<stored_buffers_inst>();
+	state_tracking_inst& instance = *runtime->get_private_data<state_tracking_inst>();
+	stored_buffers_inst& sbi = *runtime->get_private_data<stored_buffers_inst>();
 
 	device* const device = runtime->get_device();
 	command_queue* const queue = runtime->get_command_queue();
@@ -557,8 +606,8 @@ static void previewBuffers(effect_runtime* runtime, imgui_content img_cont)
 		runtime->get_texture_variable_name(variable, source);
 		if (std::strcmp(source, "DepthToAddon_DepthTex") == 0) {
 			
-			resource_view srv = { 0 };
-			runtime->get_texture_binding(variable, &srv);
+			resource_view srv = { 0 }, srv_srgb2 = { 0 };
+			runtime->get_texture_binding(variable, &srv, &srv_srgb2);
 			if (srv != 0) {
 				drawItem(runtime, srv, device->get_resource_desc(device->get_resource_from_view(srv)), "DepthTex", firstElem, img_cont);
 				if (firstElem)
@@ -570,8 +619,8 @@ static void previewBuffers(effect_runtime* runtime, imgui_content img_cont)
 			}
 		}
 		if (std::strcmp(source, "DepthToAddon_NormalTex") == 0) {
-			resource_view srv = { 0 };
-			runtime->get_texture_binding(variable, &srv);
+			resource_view srv = { 0 }, srv_srgb2 = { 0 };
+			runtime->get_texture_binding(variable, &srv, &srv_srgb2);
 			if (srv != 0) {
 				drawItem(runtime, srv, device->get_resource_desc(device->get_resource_from_view(srv)), "NormalTex", firstElem, img_cont);
 				if (firstElem)
@@ -588,7 +637,7 @@ static void previewBuffers(effect_runtime* runtime, imgui_content img_cont)
 static void draw_settings_overlay(effect_runtime* runtime)
 {
 	imgui_content img_cont;
-	if (ImGui::GetWindowContentRegionWidth() > 560.0)
+	if (ImGui::GetContentRegionAvail().x > 560.0)
 		img_cont.change_values(2);
 
 	bool modified = false;
@@ -616,9 +665,9 @@ static void draw_settings_overlay(effect_runtime* runtime)
 
 	if (modified)
 	{
-		reshade::config_set_value(nullptr, "ADDON", "FC_EnableCapture", enableCapturing);
-		reshade::config_set_value(nullptr, "ADDON", "FC_ExportDepth", enableDepthExp);
-		reshade::config_set_value(nullptr, "ADDON", "FC_ExportNormal", enableNormalExp);
+		reshade::set_config_value(nullptr, "ADDON","FC_EnableCapture", enableCapturing);
+		reshade::set_config_value(nullptr, "ADDON","FC_ExportDepth", enableDepthExp);
+		reshade::set_config_value(nullptr, "ADDON","FC_ExportNormal", enableNormalExp);
 	}
 }
 

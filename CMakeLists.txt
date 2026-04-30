@@ -61,17 +61,11 @@ set_target_properties(frame_capture PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/dist"
 )
 target_include_directories(frame_capture PRIVATE
-    "${ADDON_ROOT}/deps/reshade/include"   # old wrapper API (log_message/config_get_value)
-    "${ADDON_ROOT}/deps/imgui"             # imgui 18600 — matches addon's reshade_overlay.hpp
+    "${CMAKE_SOURCE_DIR}/reshade/include"      # v6 API (get_config_value / log::message)
+    "${CMAKE_SOURCE_DIR}/reshade/deps/imgui"   # ImGui 1.92.5 — required by reshade_overlay.hpp
     "${ADDON_ROOT}/deps/tinyexr"
     "${ADDON_ROOT}/deps/stb"
 )
-# Note: we use reshade-addons' bundled reshade headers (older wrapper names) because
-# frame_capture.cpp calls reshade::log_message / reshade::config_get_value.
-# The underlying C exports (ReShadeLogMessage etc.) are identical in v5.9.2, so the
-# compiled .addon is fully binary-compatible with vendor/reshade592/dxgi.dll.
-# reshade/ source is 6.7.3.16 UNOFFICIAL — DO NOT deploy dist/dxgi.dll for production
-# capture; use vendor/reshade592/dxgi.dll which correctly handles R10G10B10A2 swap chains.
 target_compile_definitions(frame_capture PRIVATE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
