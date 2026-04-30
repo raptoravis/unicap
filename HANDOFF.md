@@ -1,4 +1,4 @@
-# Handoff: unicap pipeline — 6.7.3 DLL, zero splash, texture-export BMP capture
+# Handoff: unicap pipeline — 性能优化完成，待端到端验证
 
 **Generated**: 2026-04-30
 **Branch**: master (up to date with origin)
@@ -6,135 +6,128 @@
 
 ## Goal
 
-Game capture pipeline for FF7 Remake (DX12, R10G10B10A2_UNORM swap chain): each F10 press produces a `*BackBuffer.bmp` (game image) + `*DepthBuffer.exr` (linear depth), with **zero ReShade UI visible at any point** — not during startup loading, not after.
+FF7 Remake (DX12, R10G10B10A2_UNORM) 帧采集管线：F10 → `*BackBuffer.bmp` + `*DepthBuffer.exr`，零 ReShade UI/splash，游戏帧率影响最小，采集结束自动生成 HDF5 dataset。
 
 ## Completed
 
-- [x] Eliminated ReShade startup splash entirely by switching `--mode custom` from `vendor/reshade592/dxgi.dll` (5.9.2) to `dist/dxgi.dll` (6.7.3). The 6.7.3 source explicitly sets `_show_splash = false` in `reload_effects()` — no ini key needed.
-- [x] Worked around 6.7.3's broken `capture_screenshot` on R10G10B10A2: added `UIRemove_ColorTex` (RGBA8) export texture to `UIRemove.fx`; addon reads this texture directly instead of calling `capture_screenshot`.
-- [x] Upgraded `frame_capture.cpp` from ReShade addon API v1 (5.9.2 headers) to v20 (6.7.3 headers). Key API changes: `get_config_value` (renamed), `log::message` (moved namespace), `get_texture_binding` (third arg required), `get_private_data` (returns `T*` not `T&`).
-- [x] `ReShade.ini` writes `TutorialProgress=4` under `[OVERLAY]` (was wrongly under `[GENERAL]`) to suppress the "installed successfully" persistent banner.
-- [x] All changes committed and pushed (`620fafd`).
+- [x] 6.7.3 DLL (`dist/dxgi.dll`) — 零 splash，UIRemove_ColorTex 路径拿 BMP（绕过 capture_screenshot 的 R10G10B10A2 bug）
+- [x] addon 直接写入目标 `frames_dir`（通过 `fc_output_dir.txt` sidecar），无 watcher/move
+- [x] **异步 save worker**：render 线程只做 GPU copy + wait_idle + memcpy，立即返回；worker 线程负责 BMP/EXR 写盘
+- [x] **staging buffer 预分配**：首帧分配，后续每帧复用，消除 per-frame GPU 内存分配
+- [x] **单次 wait_idle()**：color + depth GPU copy 合并后一次性 sync
+- [x] **EXR 压缩 PIZ → ZIP**：约 4x 速度提升
+- [x] `cmd_capture` 采集后自动打包 HDF5（`--no-pack` 跳过）
+- [x] `deploy` / `launch` 新增 `--clean` 开关，部署前删除旧文件
+- [x] 所有改动已编译、commit、push（最新: `ee532e0`）
 
 ## Not Yet Done
 
-- [ ] **End-to-end test**: launch game, press F10, verify `*BackBuffer.bmp` shows game image (not psychedelic/normal-map colors) and `*DepthBuffer.exr` is ~15–25 MB.
-- [ ] Decide whether to keep `reshade/` source directory (6.7.3.16 UNOFFICIAL, ~large); now actively used for DLL + addon API headers.
-- [ ] Whatever further addon/shader customizations are needed for ML training.
+- [ ] **端到端测试**：启动游戏，按 F10，确认 BMP 显示游戏画面（非 psychedelic 色），EXR ~15–25 MB，游戏帧率明显改善
+- [ ] 观察 ReShade log 中 `FC: save queue full, dropping frame` 是否出现（若出现说明 worker 跟不上 30fps，需考虑降 fps 或进一步优化）
+- [ ] 决定是否保留 `reshade/` 源码目录（6.7.3.16 UNOFFICIAL，体积大，现在确实在用）
+- [ ] 后续 ML 训练所需的 addon/shader 定制
 
 ## Failed Approaches (Don't Repeat These)
 
-1. **`TutorialProgress=4` under `[GENERAL]`** — ReShade reads this key exclusively from `[OVERLAY]`. Writing it to `[GENERAL]` is silently ignored. Result: "installed successfully" message persisted.
+1. **watcher 线程监控游戏目录 + shutil.move**：当游戏目录与 dataset 目录跨磁盘时 move = copy+delete，极慢；即使同盘也有 100ms poll + 50ms 稳定性等待。已改为 addon 直接写目标目录。
 
-2. **`CheckForUpdates=0` ini key** — Does not exist in any ReShade version (checked source). The update check is unconditional in the binary. Removing this key had no effect.
+2. **每帧 create_resource/destroy_resource staging buffer**：GPU 内存分配代价高，每帧两次。已改为 stored_buffers_inst 内预分配，按需重建。
 
-3. **Suppressing 5.9.2 splash via ini** — 5.9.2 has no config key to disable the startup splash. The 6.7.3 source has `_show_splash = false` hardcoded in `reload_effects()` — this is why we must use 6.7.3, not 5.9.2, to get zero splash.
+3. **两次 wait_idle()**：saveColorBMP 和 saveImage 各自调用一次，每次清空整条 GPU 流水线。已合并为单次。
 
-4. **Using `capture_screenshot()` with 6.7.3 DLL** — On R10G10B10A2 swap chains, 6.7.3 UNOFFICIAL's `capture_screenshot` reads from an internal staging buffer that holds DepthToAddon's ExportTex data (psychedelic/normal-map colors), not the game image. Fixed by reading `UIRemove_ColorTex` directly from the shader instead.
+4. **EXR PIZ 压缩在 render 线程同步执行**：PIZ 是 CPU 密集型波形压缩，100-500ms/帧，直接阻塞游戏。已移到异步 worker + 改用 ZIP。
 
-5. **Using `dist/dxgi.dll` (6.7.3) with the old v1 addon API** — RESHADE_API_VERSION mismatch (1 vs 20) causes `reshade::register_addon()` to return FALSE and the addon silently fails to load. Must use `reshade/include/` headers (v20).
+5. **`TutorialProgress=4` 写在 `[GENERAL]`**：ReShade 只从 `[OVERLAY]` 读，写到 `[GENERAL]` 静默忽略，横幅持续显示。现在写到 `[OVERLAY]`。
 
-6. **Keeping `reshade-addons/deps/imgui` (ImGui 1.86) with v20 headers** — `reshade_overlay.hpp` has a `#error` that fires unless ImGui version is exactly 19250 (1.92.5). Must use `reshade/deps/imgui/` instead.
+6. **`capture_screenshot()` + 6.7.3 DLL**：R10G10B10A2 swap chain 下返回 ExportTex 数据（psychedelic 色），非游戏画面。改用 UIRemove_ColorTex。
+
+7. **5.9.2 DLL + ini 抑制 splash**：5.9.2 没有任何 ini key 能关 splash，hardcoded。必须用 6.7.3。
+
+8. **旧 v1 addon API headers（reshade-addons/deps/reshade/include/）与 6.7.3 DLL 组合**：RESHADE_API_VERSION 不匹配（1 vs 20），`register_addon()` 返回 FALSE，addon 静默不加载。必须用 `reshade/include/`（v20）。
 
 ## Key Decisions
 
 | Decision | Rationale |
 |----------|-----------|
-| `--mode custom` = `dist/dxgi.dll` (6.7.3) + custom addon | Only version with zero startup splash; `capture_screenshot` bug bypassed by texture export |
-| BMP via `UIRemove_ColorTex` not `capture_screenshot` | 6.7.3's `capture_screenshot` broken on R10G10B10A2; texture export gives identical data |
-| Addon headers from `reshade/include/` (v20) | Must match the DLL's RESHADE_API_VERSION; v1 headers cause silent load failure |
-| `TutorialProgress=4` in `[OVERLAY]` | Suppresses persistent "installed successfully" banner |
-| Technique order locked: DepthToAddon → UIRemove | DepthToAddon writes to custom RTs; UIRemove must run last to snapshot clean BackBuffer |
+| `--mode custom` = `dist/dxgi.dll` (6.7.3) | 唯一零 splash 方案 |
+| BMP via `UIRemove_ColorTex` | 6.7.3 的 capture_screenshot 在 R10G10B10A2 上损坏 |
+| `fc_output_dir.txt` sidecar | addon 运行时（游戏进程）无法接收 Python 参数，用文件传路径 |
+| 异步 save worker，MAX_QUEUE=4 | render 线程返回时间从 200ms+ → memcpy 时间；队列满时 drop+log 而非阻塞 |
+| EXR ZIP vs PIZ | 速度 ~4x，文件略大，对 ML 训练无影响 |
+| staging buffer 预分配在 stored_buffers_inst | 按 runtime 生命周期管理，on_destroy_effect_runtime 时销毁 |
+| `TutorialProgress=4` 在 `[OVERLAY]` | ReShade 源码只在此 section 读这个 key |
+| Technique 顺序锁定：DepthToAddon → UIRemove | DepthToAddon 写自定义 RT；UIRemove 最后运行，snapshot 原始 BackBuffer |
 
 ## Current State
 
-**Working** (compiled clean, not yet tested with live game):
-- `dist/dxgi.dll` — 6.7.3 UNOFFICIAL, 5.44 MB — zero splash on load
-- `dist/frame_capture.addon` — v20 API, reads `UIRemove_ColorTex` for BMP + `DepthToAddon_ExportTex` for EXR
-- `shaders/UIRemove.fx` — two-pass: ExportColor (→ UIRemove_ColorTex) + RestoreBackBuffer (→ swap chain)
-- `main.py --mode custom` deploys `dist/dxgi.dll` + `dist/frame_capture.addon` + shaders
+**Working**（编译干净，未实机验证）：
+- `dist/dxgi.dll` — 6.7.3，5.44 MB，零 splash
+- `dist/frame_capture.addon` — v20 API，async save worker，单次 wait_idle，预分配 staging
+- `shaders/UIRemove.fx` — ExportColor pass → UIRemove_ColorTex，RestoreBackBuffer pass → swap chain
+- `main.py launch --mode custom` 部署 + 启动游戏 + 采集 + 自动打包 HDF5
+- `main.py deploy --clean` 先清理旧部署再重新部署
 
-**Not yet confirmed**: BMP correctness with the new code path (texture export not previously tested end-to-end).
-
-**`--mode official592`** still works as before (vendor 5.9.2 DLL + official addon, has splash).
+**`--mode official592`** 仍可用（5.9.2 DLL，有 splash，`capture_screenshot` 正确）。
 
 ## Files to Know
 
 | File | Why It Matters |
 |------|----------------|
-| `main.py` | CLI. `_sources()` decides DLL/addon per mode. `_ensure_addon_enabled()` writes `ReShade.ini`. |
-| `reshade-addons/99-frame_capture/frame_capture.cpp` | Entire addon. `saveColorBMP()` reads `UIRemove_ColorTex`. `fc_find_export_tex()` finds both textures. |
-| `shaders/UIRemove.fx` | Two-pass: ExportColor → `UIRemove_ColorTex`, RestoreBackBuffer → swap chain. |
-| `shaders/DepthToAddon.fx` | Exposes `DepthToAddon_ExportTex` (RGBA32F: normals+depth) read by addon. |
-| `shaders/ReShade.fxh` | Minimal local version. All `#define`s must have `#ifndef` guards (ReShade redefines them). |
-| `dist/dxgi.dll` | 6.7.3 UNOFFICIAL binary. Zero startup splash. `capture_screenshot` broken on R10G10B10A2 — do not use. |
-| `vendor/reshade592/dxgi.dll` | Official 5.9.2 binary. `capture_screenshot` correct but has startup splash. |
-| `reshade/include/` | v20 addon API headers used by `frame_capture.cpp`. |
-| `reshade/deps/imgui/` | ImGui 1.92.5 — required by `reshade_overlay.hpp` in v20 headers. |
-| `tools/capture/config.py` | Machine-specific paths: `GAME_PATH`, `DATASET_ROOT`. |
-| `CMakeLists.txt` | Builds `frame_capture.addon`. Include paths now point to `reshade/include/` and `reshade/deps/imgui/`. |
+| `reshade-addons/99-frame_capture/frame_capture.cpp` | 整个 addon。async save worker、staged buffer 预分配、on_reshade_present 热路径 |
+| `shaders/UIRemove.fx` | 两 pass：ExportColor → UIRemove_ColorTex，RestoreBackBuffer → swap chain |
+| `shaders/DepthToAddon.fx` | 暴露 DepthToAddon_ExportTex（RGBA32F：depth in alpha channel）|
+| `main.py` | CLI。`_sources()` 按 mode 选 DLL/addon；`_ensure_addon_enabled()` 写 ReShade.ini；`cmd_capture` 自动 pack |
+| `tools/capture/capture_all.py` | 采集主循环。写 fc_output_dir.txt sidecar，两线程：input(120Hz) + capture(F10) |
+| `tools/capture/pack_hdf5.py` | HDF5 打包。文件名格式 A：`*.exe YYYY-MM-DD HH-MM-SS mmm BackBuffer.bmp` |
+| `tools/capture/config.py` | 机器相关路径：GAME_PATH、DATASET_ROOT |
+| `dist/dxgi.dll` | 6.7.3 UNOFFICIAL binary。**不要用 capture_screenshot()** |
+| `vendor/reshade592/dxgi.dll` | 官方 5.9.2。capture_screenshot 正确但有 splash |
+| `reshade/include/` | v20 addon API headers，frame_capture.cpp 用这里的 |
 
 ## Code Context
 
-**`_sources()` — which files get deployed per mode:**
-```python
-def _sources(mode: str):
-    shader_src = ROOT / "shaders"
-    dist = ROOT / "dist"
-    # custom: 6.7.3 DLL (no splash) + our compiled addon
-    if mode == "custom":
-        return dist / "dxgi.dll", dist / "frame_capture.addon", shader_src, True
-    addon = ROOT / "vendor" / "addon_official" / "frame_capture.addon"
-    if mode == "official592":
-        return ROOT / "vendor" / "reshade592" / "dxgi.dll", addon, shader_src, True
-    return ROOT / "vendor" / "reshade673" / "dxgi.dll", addon, shader_src, True
+**on_reshade_present 热路径（简化）：**
+```cpp
+static void on_reshade_present(effect_runtime* runtime) {
+    // 1. 检查队列是否满（MAX_QUEUE=4），满则 drop+log
+    // 2. 读 fc_output_dir.txt → out_dir（回退到游戏目录）
+    // 3. 确保 color_staging/depth_staging 已分配（按需重建）
+    // 4. GPU: copy color texture → color_staging
+    //    GPU: copy depth texture → depth_staging（若 enableDepthExp）
+    // 5. queue->wait_idle()  ← 单次 GPU sync
+    // 6. map + memcpy（去 D3D12 256字节 pitch 对齐）→ SaveTask
+    // 7. enqueue → notify worker，render thread 返回
+}
 ```
 
-**`stored_buffers_inst` — texture handles cached per runtime:**
+**SaveTask 结构：**
 ```cpp
-struct stored_buffers_inst {
-    resource export_texture_r = { 0 };   // DepthToAddon_ExportTex (RGBA32F)
-    resource_desc export_texture_rd;
-    resource_view export_texture_rv = { 0 };
-    resource color_texture_r = { 0 };    // UIRemove_ColorTex (RGBA8) — BMP source
-    resource_desc color_texture_rd;
+struct SaveTask {
+    std::filesystem::path bmp_path;
+    std::vector<uint8_t>  color_pixels;   // RGBA8, W*H*4, 无 pitch padding
+    uint32_t              width, height;
+    std::filesystem::path depth_path;     // 空 = 跳过 depth
+    std::vector<float>    depth_pixels;   // RGBA32F, W*H*4, depth 在 alpha(component 3)
+    uint32_t              depth_w, depth_h;
 };
 ```
 
-**`saveColorBMP()` — reads RGBA8 texture from GPU, saves as BMP:**
-- GPU→CPU copy via staging buffer (D3D12 `copy_texture_to_buffer` path)
-- Row-by-row memcpy to handle 256-byte pitch alignment
-- Calls `stbi_write_bmp` with 4 channels
-
-**`fc_find_export_tex()` — enumerates both textures:**
+**Worker thread（save_worker_fn）：**
 ```cpp
-// looks for both "DepthToAddon_ExportTex" and "UIRemove_ColorTex"
-// uses three-arg get_texture_binding(var, &srv, &srv_srgb) — v20 API requires both args
+// stbi_write_bmp(bmp_path, W, H, 4, color_pixels.data())
+// depth: for each pixel, d = depth_pixels[i*4+3]; rgb[i*3..i*3+2] = d
+// SaveEXR(rgb.data(), W, H, depth_path, false)  // ZIP compression
 ```
 
-**`on_reshade_present` hot path:**
-```cpp
-static void on_reshade_present(effect_runtime* runtime) {
-    if (!runtime->is_key_pressed(0x79) || !enableCapturing) return;  // 0x79 = F10
-    stored_buffers_inst& sbi = *runtime->get_private_data<stored_buffers_inst>();
-    if (sbi.color_texture_r.handle == 0) fc_find_export_tex(runtime, sbi);
-    saveColorBMP(runtime, bmp_path, sbi.color_texture_r, sbi.color_texture_rd);
-    if (enableDepthExp) saveImage(runtime, depth_path, sbi.export_texture_r, ...);
-}
+**capture_all.run() sidecar 机制：**
+```python
+sidecar = watch_dir / "fc_output_dir.txt"
+sidecar.write_text(str(frames_dir), encoding="utf-8")
+# ... 采集 ...
+sidecar.unlink(missing_ok=True)
 ```
 
-**UIRemove.fx two-pass structure:**
-```hlsl
-technique UIRemove {
-    pass ExportColor {         // writes BackBuffer → UIRemove_ColorTex (RGBA8)
-        RenderTarget = UIRemove_ColorTex;
-    }
-    pass RestoreBackBuffer {   // writes BackBuffer → swap chain (no RenderTarget = default)
-    }
-}
-```
-
-**ReShade.ini keys written by `_ensure_addon_enabled()`:**
+**ReShade.ini 关键 keys（_ensure_addon_enabled 写入）：**
 ```ini
 [ADDON]
 FC_EnableCapture = 1
@@ -143,53 +136,57 @@ FC_ExportNormal  = 0
 
 [OVERLAY]
 ShowScreenshotMessage = 0
-TutorialProgress = 4      ; ← must be [OVERLAY], not [GENERAL]
+TutorialProgress = 4      ; ← 必须在 [OVERLAY]，不是 [GENERAL]
 
 [INPUT]
 KeyScreenshot = 0,0,0,0
+```
 
-[GENERAL]
-EffectSearchPaths = .\reshade-shaders\Shaders\
-TextureSearchPaths = .\reshade-shaders\Textures\
+**_sources() — 各 mode 部署哪些文件：**
+```python
+if mode == "custom":
+    return dist/"dxgi.dll", dist/"frame_capture.addon", shader_src, True
+if mode == "official592":
+    return vendor/"reshade592/dxgi.dll", vendor/"addon_official/frame_capture.addon", shader_src, True
 ```
 
 ## Resume Instructions
 
-1. **Rebuild addon** (already done, but do after any `.cpp` change):
-   ```powershell
-   scripts\build.ps1
-   ```
-
-2. **Delete old `ReShade.ini`** in game dir to flush stale ini from 5.9.2 era:
+1. **删除旧 ReShade.ini**（清理 5.9.2 时代的 stale 配置）：
    ```powershell
    Remove-Item "E:\games\ff7remake\End\Binaries\Win64\ReShade.ini" -Force
    ```
 
-3. **Deploy + test**:
+2. **Deploy + 启动游戏**：
    ```powershell
-   uv run main.py launch --game-path "E:\games\ff7remake\End\Binaries\Win64\ff7remake_.exe"
+   uv run main.py launch --clean --game-path "E:\games\ff7remake\End\Binaries\Win64\ff7remake_.exe"
    ```
-   - Press F9 in-game to start capture session
-   - Press F10 once to capture a frame
-   - Expected: `*BackBuffer.bmp` shows game image (NOT psychedelic colors), `*DepthBuffer.exr` ~15–25 MB
-   - If BMP is wrong color: `UIRemove_ColorTex` might not be bound yet — check ReShade log for "FC: listing all effect texture variables" and confirm `UIRemove_ColorTex` appears
-   - If BMP is skipped: log says "UIRemove_ColorTex not ready" — verify `UIRemove` technique is active in `ReShadePreset.ini`
 
-4. **Verify zero splash**: game window should open with no ReShade overlay text at any point.
+3. **游戏内按 F9** 开始采集，**按 F10** 触发一帧捕获。
+
+4. **验证：**
+   - `frames/` 目录出现 `*BackBuffer.bmp`（显示游戏画面，非 psychedelic 色）
+   - `*DepthBuffer.exr` 约 15–25 MB
+   - 游戏帧率明显改善（render 线程不再阻塞在文件 I/O）
+   - ReShade log 中无 `save queue full, dropping frame`（若有，考虑降 --fps 或检查磁盘速度）
+   - 采集结束后自动生成 `dataset.h5`
+
+5. **若 BMP 颜色错误**：检查 ReShade log 中 `FC: listing all effect texture variables` 后是否出现 `UIRemove_ColorTex`；检查 `ReShadePreset.ini` 中 `UIRemove@UIRemove.fx` 是否在 Techniques= 列表且排在 DepthToAddon 之后。
+
+6. **如果 addon 不加载**（无 FC log 输出）：确认 `dist/frame_capture.addon` 是最新编译版本（`scripts\build.ps1`）；检查 `ReShade.log` 中是否有 API version mismatch。
 
 ## Setup Required
 
-- VS 2022 Build Tools (for addon rebuild only)
-- `uv sync` for Python deps
-- Game path: `E:\games\ff7remake\End\Binaries\Win64\ff7remake_.exe`
+- VS 2022 Build Tools（仅 addon 重新编译时需要）
+- `uv sync`（Python 依赖）
+- 游戏路径：`E:\games\ff7remake\End\Binaries\Win64\ff7remake_.exe`
 
 ## Warnings
 
-- **Do NOT use `capture_screenshot()` with `dist/dxgi.dll` (6.7.3)** — on R10G10B10A2 it returns DepthToAddon's ExportTex data (psychedelic colors), not the game image. Use `UIRemove_ColorTex` exclusively.
-- **Do NOT use `vendor/reshade592/dxgi.dll` (5.9.2) for zero-splash** — 5.9.2 has no ini key to suppress the startup splash. The splash is hardcoded.
-- **`reshade-addons/deps/reshade/include/`** — old v1 API. Do NOT use for compilation with `dist/dxgi.dll`; addon will silently fail to load (API version mismatch).
-- **`reshade/include/`** — v20 API. Function names differ from v5: `get_config_value` (not `config_get_value`), `log::message` (not `log_message`), `get_private_data` returns `T*` (not `T&`).
-- **Always write `ReShadePreset.ini`** — `enabled = 1` shader annotations are inert without a preset listing techniques explicitly.
-- **UIRemove must run last** and be listed after DepthToAddon in `Techniques=`. If order is wrong, `UIRemove_ColorTex` captures DepthToAddon's RT output instead of the game image.
-- **`TutorialProgress` must be in `[OVERLAY]`** — writing it to `[GENERAL]` is silently ignored by ReShade.
-- **`reshade/deps/glad/target/`** — pre-generated C headers force-added with `git add -f`. Do not delete.
+- **不要用 `capture_screenshot()` + `dist/dxgi.dll`（6.7.3）**：R10G10B10A2 下返回 ExportTex 数据，非游戏画面。
+- **不要用 `vendor/reshade592/dxgi.dll`** 期望零 splash：5.9.2 splash hardcoded。
+- **不要用 `reshade-addons/deps/reshade/include/`（v1 API）** 配合 6.7.3 DLL：API version mismatch，addon 静默不加载。
+- **`TutorialProgress` 必须在 `[OVERLAY]`**，写到 `[GENERAL]` 被静默忽略。
+- **UIRemove 必须排在 DepthToAddon 之后**（Techniques= 顺序）。
+- **`reshade/deps/glad/target/`** 内有 force-add 的预生成 C headers，不要删除。
+- **save worker MAX_QUEUE=4**：若 worker 跟不上，帧会被丢弃并写 log warning，不会阻塞 render loop。
