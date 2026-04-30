@@ -120,7 +120,12 @@ def _ensure_addon_enabled(addon_dir: Path, cap_width: int = 1600, cap_height: in
         ("GENERAL", "TextureSearchPaths", str(ROOT / "shaders")),
         ("GENERAL", "PresetPath", str(CONFIG_DIR / "unicapPreset.ini")),
         ("OVERLAY", "ShowScreenshotMessage", "0"),
-        ("INPUT", "KeyScreenshot", "0,0,0,0"),
+        ("INPUT", "KeyOverlay",      "0,0,0,0"),
+        ("INPUT", "KeyScreenshot",   "0,0,0,0"),
+        ("INPUT", "KeyEffects",      "0,0,0,0"),
+        ("INPUT", "KeyReload",       "0,0,0,0"),
+        ("INPUT", "KeyNextPreset",   "0,0,0,0"),
+        ("INPUT", "KeyPreviousPreset","0,0,0,0"),
         ("OVERLAY", "TutorialProgress", "4"),
     ]:
         if not cfg.has_section(section):
