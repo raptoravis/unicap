@@ -14,7 +14,6 @@ FF7 Remake 采集管线 — 一键启动
 
 import ctypes
 import json
-import shutil
 import sys
 import threading
 import time
@@ -23,7 +22,6 @@ from .config import GAME_WIN64, FRAMES_DIR, INPUTS_OUT
 
 # ── 路径配置 ──────────────────────────────────────────────────────────────────
 EXTS   = {".bmp", ".exr"}
-POLL_S = 0.1
 
 # ── Windows API ───────────────────────────────────────────────────────────────
 VK_F10            = 0x79
@@ -127,39 +125,17 @@ def _thread_capture(stop: threading.Event, fps: int, duration):
     elapsed = time.perf_counter() - t_start
     print(f"[CAPTURE] 完成：{count} 帧，{elapsed:.1f}s，{count/elapsed:.1f} fps")
 
-# ── 线程：文件搬运 ─────────────────────────────────────────────────────────────
-def _thread_watcher(stop: threading.Event, frames_dir: Path, watch_dir: Path):
-    frames_dir.mkdir(parents=True, exist_ok=True)
-    seen = set(watch_dir.glob("*"))
-    moved = 0
-
-    while not stop.is_set():
-        try:
-            for f in watch_dir.iterdir():
-                if f in seen or f.suffix.lower() not in EXTS:
-                    continue
-                try:
-                    s1 = f.stat().st_size
-                    time.sleep(0.05)
-                    if f.stat().st_size != s1:
-                        continue  # 还在写，下次再处理
-                    shutil.move(str(f), str(frames_dir / f.name))
-                    seen.add(f)
-                    moved += 1
-                    print(f"[WATCHER] {moved:4d} → {f.name}", flush=True)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        stop.wait(POLL_S)
-
-    print(f"[WATCHER] 完成：共移动 {moved} 个文件 → {frames_dir}")
-
 # ── 主入口 ────────────────────────────────────────────────────────────────────
 def run(fps: int = 30, duration=None, frames_dir: Path = None, inputs_out: Path = None, watch_dir: Path = None):
     frames_dir = frames_dir or FRAMES_DIR
     inputs_out = inputs_out or INPUTS_OUT
     watch_dir  = watch_dir  or GAME_WIN64
+
+    frames_dir.mkdir(parents=True, exist_ok=True)
+
+    # 告知 addon 直接写入 frames_dir，省去 monitor+move
+    sidecar = watch_dir / "fc_output_dir.txt"
+    sidecar.write_text(str(frames_dir), encoding="utf-8")
 
     print(f"[采集] fps={fps}  时长={'∞' if not duration else f'{duration}s'}")
     print(f"       帧 → {frames_dir}")
@@ -168,9 +144,8 @@ def run(fps: int = 30, duration=None, frames_dir: Path = None, inputs_out: Path 
 
     stop = threading.Event()
     threads = [
-        threading.Thread(target=_thread_input,   args=(stop, inputs_out),              name="input",   daemon=True),
-        threading.Thread(target=_thread_capture, args=(stop, fps, duration),            name="capture", daemon=True),
-        threading.Thread(target=_thread_watcher, args=(stop, frames_dir, watch_dir),   name="watcher", daemon=True),
+        threading.Thread(target=_thread_input,   args=(stop, inputs_out), name="input",   daemon=True),
+        threading.Thread(target=_thread_capture, args=(stop, fps, duration), name="capture", daemon=True),
     ]
     for t in threads:
         t.start()
@@ -184,6 +159,8 @@ def run(fps: int = 30, duration=None, frames_dir: Path = None, inputs_out: Path 
 
     for t in threads:
         t.join(timeout=10)
+
+    sidecar.unlink(missing_ok=True)
     print("[DONE]")
 
 def main():

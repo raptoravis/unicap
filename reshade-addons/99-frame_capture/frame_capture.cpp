@@ -24,6 +24,8 @@
 #include "miniz.h"
 #include <chrono>
 #include <ctime>
+#include <fstream>
+#include <string>
 
 static bool enableCapturing = true;
 static bool enableDepthExp = true;
@@ -502,9 +504,21 @@ static void on_reshade_present(effect_runtime* runtime)
 	if (!runtime->is_key_pressed(0x79) || !enableCapturing)
 		return;
 
-	WCHAR file_prefix[MAX_PATH] = L"";
-	GetModuleFileNameW(nullptr, file_prefix, ARRAYSIZE(file_prefix));
-	std::filesystem::path save_path = file_prefix;
+	WCHAR exe_buf[MAX_PATH] = L"";
+	GetModuleFileNameW(nullptr, exe_buf, ARRAYSIZE(exe_buf));
+	std::filesystem::path exe_fs(exe_buf);
+	std::filesystem::path out_dir = exe_fs.parent_path();
+	{
+		std::ifstream cfg(out_dir / L"fc_output_dir.txt");
+		std::string line;
+		if (std::getline(cfg, line)) {
+			while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+				line.pop_back();
+			if (!line.empty())
+				out_dir = std::filesystem::u8path(line);
+		}
+	}
+	std::filesystem::path save_path = out_dir / exe_fs.filename();
 	save_path += L' ';
 	const auto now = std::chrono::system_clock::now();
 	const auto now_seconds = std::chrono::time_point_cast<std::chrono::seconds>(now);
