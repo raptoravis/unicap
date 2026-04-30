@@ -17,7 +17,7 @@ static void print_usage(const char *path)
 
 Options:
   -h, --help                Print this help.
-  --version                 Print ReShade version.
+  --version                 Print unicap version.
 
   -D <id>=<text>            Define a preprocessor macro.
   -I <path>                 Add directory to include search path.

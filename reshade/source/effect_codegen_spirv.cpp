@@ -336,7 +336,7 @@ private:
 	{
 		spirv_instruction(spv::OpSource)
 			.add(spv::SourceLanguageUnknown) // ReShade FX is not a reserved token at the moment
-			.add(0) // Language version, TODO: Maybe fill in ReShade version here?
+			.add(0) // Language version, TODO: Maybe fill in unicap version here?
 			.write(spirv);
 
 		if (_debug_info)
