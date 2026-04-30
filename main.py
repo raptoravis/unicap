@@ -100,7 +100,7 @@ def _sources(mode: str):
     return ROOT / "vendor" / "reshade673" / "dxgi.dll", addon, shader_src, True
 
 
-def _ensure_addon_enabled(addon_dir: Path):
+def _ensure_addon_enabled(addon_dir: Path, cap_width: int = 1600, cap_height: int = 1200):
     UNICAP_TEMP.mkdir(parents=True, exist_ok=True)
     ini = UNICAP_TEMP / "unicap.ini"
     cfg = configparser.RawConfigParser()
@@ -112,6 +112,8 @@ def _ensure_addon_enabled(addon_dir: Path):
         ("ADDON", "FC_EnableCapture", "1"),
         ("ADDON", "FC_ExportDepth", "1"),
         ("ADDON", "FC_ExportNormal", "0"),
+        ("ADDON", "FC_CaptureWidth", str(cap_width)),
+        ("ADDON", "FC_CaptureHeight", str(cap_height)),
         ("GENERAL", "EffectSearchPaths", str(ROOT / "shaders")),
         ("GENERAL", "IntermediateCachePath", str(UNICAP_TEMP)),
         ("GENERAL", "TextureSearchPaths", str(ROOT / "shaders")),
@@ -170,7 +172,9 @@ def cmd_deploy(args):
 
     # unicap.ini and unicap.log go to UNICAP_TEMP; game dir stays clean.
     # RESHADE_BASE_PATH_OVERRIDE env var redirects ReShade's base path at launch time.
-    _ensure_addon_enabled(src_addon.parent)
+    cap_width  = getattr(args, "width",  1600) or 1600
+    cap_height = getattr(args, "height", 1200) or 1200
+    _ensure_addon_enabled(src_addon.parent, cap_width, cap_height)
     _ensure_preset()
 
 
@@ -269,15 +273,30 @@ def _make_video(frames_dir: Path, output: Path, fps: int):
             "18",
             str(output),
         ]
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        # libx264 requires even dimensions
+        w_enc = w - (w % 2)
+        h_enc = h - (h % 2)
+        cmd[cmd.index(f"{w}x{h}")] = f"{w_enc}x{h_enc}"
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        ok = True
         for i, bmp in enumerate(bmps):
             img = cv2.imread(str(bmp))
             if img is not None:
-                proc.stdin.write(img.tobytes())
+                if (w_enc, h_enc) != (w, h):
+                    img = img[:h_enc, :w_enc]
+                try:
+                    proc.stdin.write(img.tobytes())
+                except OSError:
+                    ok = False
+                    break
             if (i + 1) % fps == 0:
                 print(f"[VIDEO] {i + 1}/{len(bmps)} 帧", flush=True)
         proc.stdin.close()
         proc.wait()
+        if not ok or proc.returncode != 0:
+            stderr_out = proc.stderr.read().decode(errors="replace")
+            print(f"[VIDEO] ffmpeg 失败 (code {proc.returncode}):\n{stderr_out}")
+            return
     else:
         writer = cv2.VideoWriter(str(output), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
         for i, bmp in enumerate(bmps):
@@ -314,6 +333,8 @@ def main():
     p = sub.add_parser("deploy", help="部署 ReShade DLL + addon 到游戏目录")
     p.add_argument("--mode", choices=["custom", "official592", "official673"], default="custom")
     p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录（目录时自动寻找最大 exe）")
+    p.add_argument("--width",  type=int, default=1600, metavar="W", help="采集分辨率宽（0=原始分辨率，默认1600）")
+    p.add_argument("--height", type=int, default=1200, metavar="H", help="采集分辨率高（0=原始分辨率，默认1200）")
 
     p = sub.add_parser("capture", help="启动采集（不部署）")
     p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录，用于确定帧文件监视目录")
@@ -331,6 +352,8 @@ def main():
     p.add_argument("--duration", type=float, default=10, metavar="SEC")
     p.add_argument("--deploy-only", action="store_true")
     p.add_argument("--no-pack", action="store_true", help="采集结束后跳过自动 HDF5 打包")
+    p.add_argument("--width",  type=int, default=1600, metavar="W", help="采集分辨率宽（0=原始分辨率，默认1600）")
+    p.add_argument("--height", type=int, default=1200, metavar="H", help="采集分辨率高（0=原始分辨率，默认1200）")
 
     p = sub.add_parser("video", help="从 frames 目录生成 MP4 视频")
     p.add_argument("--frames-dir", default=str(FRAMES_DIR))

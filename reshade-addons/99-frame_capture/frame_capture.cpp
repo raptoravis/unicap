@@ -11,6 +11,7 @@
 
 #define ImTextureID unsigned long long
 #define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
 #define TINYEXR_IMPLEMENTATION
 
 #include <imgui.h>
@@ -22,6 +23,7 @@
 #include "FormatEnum.h"
 #include <filesystem>
 #include <stb_image_write.h>
+#include <stb_image_resize.h>
 #include "stb_image.h"
 #include "tinyexr.h"
 #include "miniz.c"
@@ -36,12 +38,14 @@
 #include <queue>
 #include <atomic>
 
-static bool enableCapturing  = true;
-static bool enableDepthExp   = true;
-static bool enableNormalExp  = false;
-static bool doOnce           = false;
-static bool g_logged_textures = false;
-static int  windowSize[2]    = { 320, 560 };
+static bool     enableCapturing   = true;
+static bool     enableDepthExp    = true;
+static bool     enableNormalExp   = false;
+static uint32_t g_cap_width       = 1600;
+static uint32_t g_cap_height      = 1200;
+static bool     doOnce            = false;
+static bool     g_logged_textures = false;
+static int      windowSize[2]     = { 320, 560 };
 
 using namespace reshade::api;
 
@@ -113,20 +117,49 @@ static void save_worker_fn()
             g_save_queue.pop();
         }
 
+        // Resize color if target resolution differs from captured resolution
+        const uint8_t* color_src  = task.color_pixels.data();
+        uint32_t       color_w    = task.width;
+        uint32_t       color_h    = task.height;
+        std::vector<uint8_t> color_resized;
+        if (g_cap_width > 0 && g_cap_height > 0 &&
+            (color_w != g_cap_width || color_h != g_cap_height)) {
+            color_resized.resize(g_cap_width * g_cap_height * 4);
+            stbir_resize_uint8(color_src, (int)color_w, (int)color_h, 0,
+                               color_resized.data(), (int)g_cap_width, (int)g_cap_height, 0, 4);
+            color_src = color_resized.data();
+            color_w   = g_cap_width;
+            color_h   = g_cap_height;
+        }
+
         // Write BMP (RGBA8, 4 channels)
         stbi_write_bmp(task.bmp_path.u8string().c_str(),
-                       task.width, task.height, 4, task.color_pixels.data());
+                       (int)color_w, (int)color_h, 4, color_src);
 
         // Write depth EXR
         if (!task.depth_path.empty() && !task.depth_pixels.empty()) {
             // depth_pixels: RGBA32F packed; depth is in alpha (component 3)
-            uint32_t n = task.depth_w * task.depth_h;
+            const float* depth_src = task.depth_pixels.data();
+            uint32_t     depth_w   = task.depth_w;
+            uint32_t     depth_h   = task.depth_h;
+            std::vector<float> depth_resized;
+            if (g_cap_width > 0 && g_cap_height > 0 &&
+                (depth_w != g_cap_width || depth_h != g_cap_height)) {
+                depth_resized.resize(g_cap_width * g_cap_height * 4);
+                stbir_resize_float(depth_src, (int)depth_w, (int)depth_h, 0,
+                                   depth_resized.data(), (int)g_cap_width, (int)g_cap_height, 0, 4);
+                depth_src = depth_resized.data();
+                depth_w   = g_cap_width;
+                depth_h   = g_cap_height;
+            }
+
+            uint32_t n = depth_w * depth_h;
             std::vector<float> rgb(n * 3);
             for (uint32_t i = 0; i < n; i++) {
-                float d = task.depth_pixels[i * 4 + 3];
+                float d = depth_src[i * 4 + 3];
                 rgb[i * 3] = rgb[i * 3 + 1] = rgb[i * 3 + 2] = d;
             }
-            SaveEXR(rgb.data(), task.depth_w, task.depth_h,
+            SaveEXR(rgb.data(), (int)depth_w, (int)depth_h,
                     task.depth_path.u8string().c_str());
         }
     }
@@ -176,11 +209,15 @@ struct __declspec(uuid("eadae23a-4009-4d32-8557-0af07e45f409")) stored_buffers_i
     resource      color_texture_r   = { 0 };
     resource_desc color_texture_rd;
 
-    // Pre-allocated staging buffers (created once, reused every capture)
-    resource color_staging      = { 0 };
-    uint32_t color_staging_size = 0;
-    resource depth_staging      = { 0 };
-    uint32_t depth_staging_size = 0;
+    // Pre-allocated staging textures (cpu-readable, created once per resolution)
+    // Using textures (not buffers) for DX11/DX12 compatibility:
+    // DX11 does not support copy_texture_to_buffer; copy_texture_region works for both.
+    resource color_staging   = { 0 };
+    uint32_t color_staging_w = 0;
+    uint32_t color_staging_h = 0;
+    resource depth_staging   = { 0 };
+    uint32_t depth_staging_w = 0;
+    uint32_t depth_staging_h = 0;
 
     void update(resource sr, resource_desc srd, resource_view srv) {
         export_texture_r = sr; export_texture_rd = srd; export_texture_rv = srv;
@@ -195,6 +232,8 @@ static void on_init_device(device*)
     reshade::get_config_value(nullptr, "ADDON", "FC_EnableCapture", enableCapturing);
     reshade::get_config_value(nullptr, "ADDON", "FC_ExportDepth",   enableDepthExp);
     reshade::get_config_value(nullptr, "ADDON", "FC_ExportNormal",  enableNormalExp);
+    reshade::get_config_value(nullptr, "ADDON", "FC_CaptureWidth",  g_cap_width);
+    reshade::get_config_value(nullptr, "ADDON", "FC_CaptureHeight", g_cap_height);
 }
 
 static void on_init_effect_runtime(effect_runtime* runtime)
@@ -315,46 +354,47 @@ static void on_reshade_present(effect_runtime* runtime)
     command_list*  cmd   = queue->get_immediate_command_list();
 
     const resource_desc& crd = sbi.color_texture_rd;
-    uint32_t color_row_pitch = (format_row_pitch(crd.texture.format, crd.texture.width) + 255) & ~255;
-    uint32_t color_slice     = format_slice_pitch(crd.texture.format, color_row_pitch, crd.texture.height);
 
-    if (sbi.color_staging.handle == 0 || sbi.color_staging_size < color_slice) {
+    if (sbi.color_staging.handle == 0 ||
+        sbi.color_staging_w != crd.texture.width || sbi.color_staging_h != crd.texture.height) {
         if (sbi.color_staging.handle != 0) dev->destroy_resource(sbi.color_staging);
-        if (!dev->create_resource(resource_desc(color_slice, memory_heap::gpu_to_cpu, resource_usage::copy_dest),
-                                  nullptr, resource_usage::copy_dest, &sbi.color_staging)) {
-            reshade::log::message(reshade::log::level::error, "FC: failed to create color staging buffer");
+        resource_desc sd(crd.texture.width, crd.texture.height, 1, 1,
+                         crd.texture.format, 1, memory_heap::gpu_to_cpu, resource_usage::copy_dest);
+        if (!dev->create_resource(sd, nullptr, resource_usage::copy_dest, &sbi.color_staging)) {
+            reshade::log::message(reshade::log::level::error, "FC: failed to create color staging texture");
             return;
         }
-        sbi.color_staging_size = color_slice;
+        sbi.color_staging_w = crd.texture.width;
+        sbi.color_staging_h = crd.texture.height;
     }
 
     // ── GPU: color copy ───────────────────────────────────────────────────────
     cmd->barrier(sbi.color_texture_r, resource_usage::shader_resource, resource_usage::copy_source);
-    cmd->copy_texture_to_buffer(sbi.color_texture_r, 0, nullptr,
-                                sbi.color_staging, 0, crd.texture.width, crd.texture.height);
+    cmd->copy_texture_region(sbi.color_texture_r, 0, nullptr, sbi.color_staging, 0, nullptr);
     cmd->barrier(sbi.color_texture_r, resource_usage::copy_source, resource_usage::shader_resource);
 
     // ── GPU: depth copy (if enabled) ──────────────────────────────────────────
     bool do_depth = enableDepthExp && sbi.export_texture_r.handle != 0;
-    uint32_t depth_row_pitch = 0;
     if (do_depth) {
         const resource_desc& drd = sbi.export_texture_rd;
-        depth_row_pitch = (format_row_pitch(drd.texture.format, drd.texture.width) + 255) & ~255;
-        uint32_t depth_slice = format_slice_pitch(drd.texture.format, depth_row_pitch, drd.texture.height);
 
-        if (sbi.depth_staging.handle == 0 || sbi.depth_staging_size < depth_slice) {
+        if (sbi.depth_staging.handle == 0 ||
+            sbi.depth_staging_w != drd.texture.width || sbi.depth_staging_h != drd.texture.height) {
             if (sbi.depth_staging.handle != 0) dev->destroy_resource(sbi.depth_staging);
-            if (!dev->create_resource(resource_desc(depth_slice, memory_heap::gpu_to_cpu, resource_usage::copy_dest),
-                                      nullptr, resource_usage::copy_dest, &sbi.depth_staging)) {
-                reshade::log::message(reshade::log::level::error, "FC: failed to create depth staging buffer");
+            resource_desc sd(drd.texture.width, drd.texture.height, 1, 1,
+                             drd.texture.format, 1, memory_heap::gpu_to_cpu, resource_usage::copy_dest);
+            if (!dev->create_resource(sd, nullptr, resource_usage::copy_dest, &sbi.depth_staging)) {
+                reshade::log::message(reshade::log::level::error, "FC: failed to create depth staging texture");
                 do_depth = false;
-            } else sbi.depth_staging_size = depth_slice;
+            } else {
+                sbi.depth_staging_w = drd.texture.width;
+                sbi.depth_staging_h = drd.texture.height;
+            }
         }
 
         if (do_depth) {
             cmd->barrier(sbi.export_texture_r, resource_usage::shader_resource, resource_usage::copy_source);
-            cmd->copy_texture_to_buffer(sbi.export_texture_r, 0, nullptr,
-                                        sbi.depth_staging, 0, drd.texture.width, drd.texture.height);
+            cmd->copy_texture_region(sbi.export_texture_r, 0, nullptr, sbi.depth_staging, 0, nullptr);
             cmd->barrier(sbi.export_texture_r, resource_usage::copy_source, resource_usage::shader_resource);
         }
     }
@@ -369,15 +409,14 @@ static void on_reshade_present(effect_runtime* runtime)
     task.height   = crd.texture.height;
     task.color_pixels.resize(task.width * task.height * 4);
 
-    void* color_ptr = nullptr;
-    dev->map_buffer_region(sbi.color_staging, 0, UINT64_MAX, map_access::read_only, &color_ptr);
-    if (color_ptr) {
-        const uint8_t* src = static_cast<const uint8_t*>(color_ptr);
+    subresource_data color_data = {};
+    if (dev->map_texture_region(sbi.color_staging, 0, nullptr, map_access::read_only, &color_data) && color_data.data) {
+        const uint8_t* src = static_cast<const uint8_t*>(color_data.data);
         for (uint32_t y = 0; y < task.height; y++)
             std::memcpy(task.color_pixels.data() + y * task.width * 4,
-                        src + y * color_row_pitch,
+                        src + y * color_data.row_pitch,
                         task.width * 4);
-        dev->unmap_buffer_region(sbi.color_staging);
+        dev->unmap_texture_region(sbi.color_staging, 0);
     }
 
     if (do_depth) {
@@ -387,16 +426,15 @@ static void on_reshade_present(effect_runtime* runtime)
         task.depth_h = drd.texture.height;
         task.depth_pixels.resize(task.depth_w * task.depth_h * 4);
 
-        void* depth_ptr = nullptr;
-        dev->map_buffer_region(sbi.depth_staging, 0, UINT64_MAX, map_access::read_only, &depth_ptr);
-        if (depth_ptr) {
-            const float* src      = static_cast<const float*>(depth_ptr);
-            uint32_t floats_per_row = depth_row_pitch / sizeof(float);
+        subresource_data depth_data = {};
+        if (dev->map_texture_region(sbi.depth_staging, 0, nullptr, map_access::read_only, &depth_data) && depth_data.data) {
+            const float* src        = static_cast<const float*>(depth_data.data);
+            uint32_t floats_per_row = depth_data.row_pitch / sizeof(float);
             for (uint32_t y = 0; y < task.depth_h; y++)
                 std::memcpy(task.depth_pixels.data() + y * task.depth_w * 4,
                             src + y * floats_per_row,
                             task.depth_w * 4 * sizeof(float));
-            dev->unmap_buffer_region(sbi.depth_staging);
+            dev->unmap_texture_region(sbi.depth_staging, 0);
         }
     }
 
