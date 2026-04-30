@@ -15,12 +15,14 @@ $root     = Split-Path $PSScriptRoot -Parent
 $buildDir = Join-Path $root "build"
 
 # ── Configure ─────────────────────────────────────────────────────────────────
+if ($Rebuild -and (Test-Path $buildDir)) {
+    Write-Host "Removing build\ for full rebuild..." -ForegroundColor Yellow
+    Remove-Item -Recurse -Force $buildDir
+}
+
 if (-not (Test-Path $buildDir)) {
-    Write-Host "Configuring (first run)..." -ForegroundColor Green
-    $extra = if ($Rebuild) { "-DRESHADE_ALWAYS_REBUILD=ON" } else { "" }
-    cmake -S $root -B $buildDir `
-        -G "Visual Studio 17 2022" -A x64 `
-        $extra
+    Write-Host "Configuring..." -ForegroundColor Green
+    & cmake -S $root -B $buildDir -G "Visual Studio 17 2022" -A x64
 } else {
     Write-Host "Build dir exists, skipping configure (delete build\ to reconfigure)" -ForegroundColor Cyan
 }

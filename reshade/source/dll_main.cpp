@@ -61,7 +61,7 @@ std::filesystem::path get_base_path(bool default_to_target_executable_path = fal
 	std::filesystem::path path_override;
 
 	// Cannot use global config here yet, since it uses base path for look up, so look at config file next to target executable instead
-	if (reshade::ini_file(target_executable_parent_path / L"ReShade.ini").get("INSTALL", "BasePath", path_override) &&
+	if (reshade::ini_file(target_executable_parent_path / L"unicap.ini").get("INSTALL", "BasePath", path_override) &&
 		resolve_path(path_override, ec, reshade_dll_parent_path) && std::filesystem::is_directory(path_override, ec))
 		return path_override;
 
@@ -180,7 +180,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 			}
 
 			reshade::log::message(reshade::log::level::info,
-				"Initializing crosire's ReShade version '" VERSION_STRING_FILE "' "
+				"Initializing crosire's unicap version '" VERSION_STRING_FILE "' "
 #ifndef _WIN64
 				"(32-bit) "
 #else

@@ -16,7 +16,7 @@ static std::unordered_map<std::filesystem::path::string_type, std::unique_ptr<re
 
 reshade::ini_file &reshade::global_config()
 {
-	return ini_file::load_cache(g_reshade_base_path / L"ReShade.ini");
+	return ini_file::load_cache(g_reshade_base_path / L"unicap.ini");
 }
 
 reshade::ini_file::ini_file(const std::filesystem::path &path) : _path(path)

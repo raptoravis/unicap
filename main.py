@@ -13,9 +13,11 @@ Usage:
 import argparse
 import configparser
 import ctypes
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +27,8 @@ import tools.capture.pack_hdf5 as pack_hdf5
 from tools.capture.config import DATASET_ROOT, FRAMES_DIR, GAME_PATH, HDF5_OUT, INPUTS_OUT
 
 ROOT = Path(__file__).parent
+CONFIG_DIR = ROOT / "config"
+UNICAP_TEMP = Path(tempfile.gettempdir()) / "unicap"
 
 _user32 = ctypes.WinDLL("user32")
 
@@ -96,21 +100,25 @@ def _sources(mode: str):
     return ROOT / "vendor" / "reshade673" / "dxgi.dll", addon, shader_src, True
 
 
-def _ensure_addon_enabled(game_dir: Path):
-    ini = game_dir / "ReShade.ini"
+def _ensure_addon_enabled(addon_dir: Path):
+    UNICAP_TEMP.mkdir(parents=True, exist_ok=True)
+    ini = UNICAP_TEMP / "unicap.ini"
     cfg = configparser.RawConfigParser()
     cfg.optionxform = str  # preserve key case
     if ini.exists():
         cfg.read(ini, encoding="utf-8")
     for section, key, value in [
+        ("ADDON", "AddonPath", str(addon_dir)),
         ("ADDON", "FC_EnableCapture", "1"),
         ("ADDON", "FC_ExportDepth", "1"),
         ("ADDON", "FC_ExportNormal", "0"),
-        ("OVERLAY", "ShowScreenshotMessage", "0"),  # 不在画面里显示截图通知
-        ("INPUT", "KeyScreenshot", "0,0,0,0"),  # 清空截图快捷键，避免与 F10 冲突
-        ("GENERAL", "EffectSearchPaths", ".\\reshade-shaders\\Shaders\\"),
-        ("GENERAL", "TextureSearchPaths", ".\\reshade-shaders\\Textures\\"),
-        ("OVERLAY", "TutorialProgress", "4"),   # 跳过新手教程，隐藏 "installed successfully" 横幅
+        ("GENERAL", "EffectSearchPaths", str(ROOT / "shaders")),
+        ("GENERAL", "IntermediateCachePath", str(UNICAP_TEMP)),
+        ("GENERAL", "TextureSearchPaths", str(ROOT / "shaders")),
+        ("GENERAL", "PresetPath", str(CONFIG_DIR / "unicapPreset.ini")),
+        ("OVERLAY", "ShowScreenshotMessage", "0"),
+        ("INPUT", "KeyScreenshot", "0,0,0,0"),
+        ("OVERLAY", "TutorialProgress", "4"),
     ]:
         if not cfg.has_section(section):
             cfg.add_section(section)
@@ -119,60 +127,51 @@ def _ensure_addon_enabled(game_dir: Path):
         cfg.write(f)
 
 
-def _ensure_preset(game_dir: Path):
-    # ReShade 不会因为 technique 上的 `enabled = 1` annotation 自动激活技术，
-    # 必须在 preset 里显式列出。顺序也要锁定：DepthToAddon 在前写自定义 RT，
-    # UIRemove 在后把原始 BackBuffer 写回真实后备缓冲，capture_screenshot 才能拿到正确画面。
-    preset = game_dir / "ReShadePreset.ini"
+def _ensure_preset():
+    # Preset lives in repo config/, pointed to by PresetPath in ReShade.ini.
+    # Technique order is locked: DepthToAddon first (writes custom RT),
+    # UIRemove last (restores original BackBuffer to swap chain).
+    CONFIG_DIR.mkdir(exist_ok=True)
+    preset = CONFIG_DIR / "unicapPreset.ini"
     techniques = "DepthToAddon@DepthToAddon.fx,UIRemove@UIRemove.fx"
     content = f"Techniques={techniques}\nTechniqueSorting={techniques}\n"
     if not preset.exists() or "DepthToAddon@DepthToAddon.fx" not in preset.read_text(encoding="utf-8"):
         preset.write_text(content, encoding="utf-8")
 
 
-_DEPLOY_FILES = ["dxgi.dll", "dxgi.dll.bak", "frame_capture.addon", "ReShade.ini", "ReShadePreset.ini"]
-_DEPLOY_DIRS  = ["reshade-shaders"]
 
-
-def _clean_deploy(game_dir: Path):
-    for name in _DEPLOY_FILES:
-        f = game_dir / name
-        if f.exists():
-            f.unlink()
-            print(f"[CLEAN] 删除 {f}")
-    for name in _DEPLOY_DIRS:
-        d = game_dir / name
-        if d.exists():
-            shutil.rmtree(d)
-            print(f"[CLEAN] 删除 {d}")
+def _symlink_file(src: Path, dst: Path):
+    """Create symlink dst → src. Falls back to copy if privilege denied (enable Developer Mode)."""
+    if dst.is_symlink() or dst.exists():
+        dst.unlink()
+    try:
+        os.symlink(str(src), str(dst))
+        print(f"[LINK]  {dst.name} → {src}")
+    except OSError as e:
+        print(f"[警告] 无法创建符号链接（{e.strerror}），改用复制（可启用 Windows 开发者模式以使用符号链接）")
+        shutil.copy2(src, dst)
+        print(f"[COPY]  {dst.name}")
 
 
 def cmd_deploy(args):
-    src_dll, src_addon, shader_src, deploy_shaders = _sources(args.mode)
+    src_dll, src_addon, _shader_src, _deploy_shaders = _sources(args.mode)
     game_dir, _ = _resolve_game_path(args.game_path)
-
-    if getattr(args, "clean", False):
-        _clean_deploy(game_dir)
 
     for f in [src_dll, src_addon]:
         if not f.exists():
             sys.exit(f"[错误] 文件不存在：{f}\n       custom 模式需先执行 scripts\\build.ps1")
 
     dst_dll = game_dir / "dxgi.dll"
-    if dst_dll.exists() and not (game_dir / "dxgi.dll.bak").exists():
-        shutil.copy2(dst_dll, game_dir / "dxgi.dll.bak")
+    bak = game_dir / "dxgi.dll.bak"
+    if dst_dll.exists() and not dst_dll.is_symlink() and not bak.exists():
+        shutil.copy2(dst_dll, bak)
 
-    shutil.copy2(src_dll, dst_dll)
-    shutil.copy2(src_addon, game_dir / "frame_capture.addon")
-    _ensure_addon_enabled(game_dir)
-    _ensure_preset(game_dir)
+    _symlink_file(src_dll, dst_dll)
 
-    if deploy_shaders:
-        shader_dst = game_dir / "reshade-shaders" / "Shaders"
-        shader_dst.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(shader_src / "ReShade.fxh", shader_dst)
-        shutil.copy2(shader_src / "DepthToAddon.fx", shader_dst)
-        shutil.copy2(shader_src / "UIRemove.fx", shader_dst)
+    # unicap.ini and unicap.log go to UNICAP_TEMP; game dir stays clean.
+    # RESHADE_BASE_PATH_OVERRIDE env var redirects ReShade's base path at launch time.
+    _ensure_addon_enabled(src_addon.parent)
+    _ensure_preset()
 
 
 def cmd_capture(args):
@@ -222,7 +221,8 @@ def cmd_launch(args):
         args.game_name = game_exe.stem
     args.watch_dir = game_dir
     print(f"\n[启动] {game_exe}")
-    subprocess.Popen([str(game_exe)], cwd=str(game_dir))
+    env = {**os.environ, "RESHADE_BASE_PATH_OVERRIDE": str(UNICAP_TEMP)}
+    subprocess.Popen([str(game_exe)], cwd=str(game_dir), env=env)
     _wait_for_hotkey(args.start_key)
     cmd_capture(args)
 
@@ -314,7 +314,6 @@ def main():
     p = sub.add_parser("deploy", help="部署 ReShade DLL + addon 到游戏目录")
     p.add_argument("--mode", choices=["custom", "official592", "official673"], default="custom")
     p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录（目录时自动寻找最大 exe）")
-    p.add_argument("--clean", action="store_true", help="部署前删除上次 deploy 留下的所有文件")
 
     p = sub.add_parser("capture", help="启动采集（不部署）")
     p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录，用于确定帧文件监视目录")
@@ -331,7 +330,6 @@ def main():
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--duration", type=float, default=10, metavar="SEC")
     p.add_argument("--deploy-only", action="store_true")
-    p.add_argument("--clean", action="store_true", help="部署前删除上次 deploy 留下的所有文件")
     p.add_argument("--no-pack", action="store_true", help="采集结束后跳过自动 HDF5 打包")
 
     p = sub.add_parser("video", help="从 frames 目录生成 MP4 视频")

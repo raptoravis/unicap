@@ -20,7 +20,7 @@ void reshade::create_effect_runtime(api::swapchain *swapchain, api::command_queu
 	assert((graphics_queue->get_type() & api::command_queue_type::graphics) != 0);
 
 	// Try to find a unique configuration name for this effect runtime instance
-	std::string config_name = "ReShade";
+	std::string config_name = "unicap";
 	if (vr)
 		config_name += "VR";
 	{
