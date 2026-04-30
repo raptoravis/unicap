@@ -16,6 +16,7 @@ scripts\build.ps1 -Rebuild # force-rebuild ReShade core too
 ```
 
 Outputs to `dist/`:
+
 - `dxgi.dll` — ReShade core (DX12/DXGI proxy)
 - `frame_capture.addon` — capture addon
 - `reshade-shaders/Shaders/*.fx` — DepthToAddon + UIRemove shaders
@@ -42,6 +43,7 @@ Machine-specific paths live in `tools/capture/config.py` — edit `GAME_WIN64`, 
 ### C++ layer — `reshade-addons/99-frame_capture/frame_capture.cpp`
 
 ReShade addon compiled to `frame_capture.addon`. On each F10 press (`VK 0x79`), it:
+
 1. Captures the back buffer as BMP via `runtime->capture_screenshot()`
 2. Optionally copies the depth/normal EXR textures exposed by `DepthToAddon.fx` (via `DepthToAddon_ExportTex` texture variable)
 3. Saves all files to the game's working directory (same folder as the `.exe`)
@@ -65,6 +67,7 @@ Runs as a ReShade effect. Exposes the game's depth and normal buffers as `DepthT
 ### Python pipeline — `tools/capture/`
 
 Three concurrent threads in `capture_all.py`:
+
 - **capture thread** — sends F10 keypresses at the target FPS using `keybd_event`
 - **watcher thread** — polls the game directory for new `.bmp`/`.exr` files and moves them to `frames_<tag>/`
 - **input thread** — samples keyboard (`GetKeyboardState`), mouse (`GetCursorPos`), and XInput gamepad at 120 Hz; writes to `inputs_<tag>.jsonl` on stop
@@ -74,16 +77,19 @@ Three concurrent threads in `capture_all.py`:
 ### CMake structure
 
 `CMakeLists.txt` defines three targets:
+
 1. `reshade_core` (ExternalProject, MSBuild) → `dist/dxgi.dll` (unused; reshade/ is 6.7.3 UNOFFICIAL)
 2. `frame_capture` (shared library, MSVC) → `dist/frame_capture.addon` — **this is the primary build output**
 3. `shaders` (custom target, always runs) → copies `.fx` files to `dist/reshade-shaders/Shaders/`
 
 ## Key Files
 
-| File | Role |
-|------|------|
-| `tools/capture/config.py` | All machine-specific paths — edit here for new machines |
-| `reshade-addons/99-frame_capture/frame_capture.cpp` | Entire capture addon (single file) |
-| `CMakeLists.txt` | Full build definition |
-| `scripts/build.ps1` | Build entry point |
-| `main.py` | Python CLI: deploy / launch / capture / pack |
+| File                                                | Role                                                    |
+| --------------------------------------------------- | ------------------------------------------------------- |
+| `tools/capture/config.py`                           | All machine-specific paths — edit here for new machines |
+| `reshade-addons/99-frame_capture/frame_capture.cpp` | Entire capture addon (single file)                      |
+| `CMakeLists.txt`                                    | Full build definition                                   |
+| `scripts/build.ps1`                                 | Build entry point                                       |
+| `main.py`                                           | Python CLI: deploy / launch / capture / pack            |
+
+## 任何输出要么使用英文，要么使用中文，不要使用其他语言
