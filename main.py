@@ -148,7 +148,8 @@ def _symlink_file(src: Path, dst: Path):
         dst.unlink()
     try:
         os.symlink(str(src), str(dst))
-        print(f"[LINK]  {dst.name} → {src}")
+        # print(f"[LINK]  {dst.name} → {src}")
+        pass
     except OSError as e:
         print(f"[警告] 无法创建符号链接（{e.strerror}），改用复制（可启用 Windows 开发者模式以使用符号链接）")
         shutil.copy2(src, dst)
