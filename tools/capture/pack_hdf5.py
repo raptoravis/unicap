@@ -333,7 +333,7 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path):
         if avg_ui > 0:
             print(f"[MASK] 方案A兜底：平均每帧遮罩 {avg_ui:.0f} 个 UI 像素（B 已遮罩的不计入）")
         else:
-            print(f"[MASK] 未发现 UI 像素（ReShade UIRemove.fx 已生效，或当前帧无 UI）")
+            print(f"[MASK] 未发现 UI 像素（当前帧无 UI）")
 
 
 # ─── 抽帧目视验证 ─────────────────────────────────────────────────────────────

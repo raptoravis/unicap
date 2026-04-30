@@ -92,4 +92,4 @@ Three concurrent threads in `capture_all.py`:
 | `scripts/build.ps1`                                 | Build entry point                                       |
 | `main.py`                                           | Python CLI: deploy / launch / capture / pack            |
 
-## 任何输出要么使用英文，要么使用中文，不要使用其他语言
+## 任何输出要么使用英文，要么使用中文，优先使用中文，不要使用其他语言

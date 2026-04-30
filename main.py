@@ -94,13 +94,14 @@ def _sources(mode: str):
     # BMP captured via UIRemove_ColorTex shader export, not capture_screenshot.
     if mode == "custom":
         return dist / "dxgi.dll", dist / "frame_capture.addon", shader_src, True
-    addon = ROOT / "vendor" / "addon_official" / "frame_capture.addon"
     if mode == "official592":
-        return ROOT / "vendor" / "reshade592" / "dxgi.dll", addon, shader_src, True
+        return ROOT / "vendor" / "reshade592" / "dxgi.dll", dist / "frame_capture.addon", shader_src, True
+    addon = ROOT / "vendor" / "addon_official" / "frame_capture.addon"
     return ROOT / "vendor" / "reshade673" / "dxgi.dll", addon, shader_src, True
 
 
-def _ensure_addon_enabled(addon_dir: Path, cap_width: int = 1600, cap_height: int = 1200, cap_fps: int = 30):
+def _ensure_addon_enabled(addon_dir: Path, cap_width: int = 1600, cap_height: int = 1200,
+                           cap_fps: int = 30, pre_ui: bool = True, pre_ui_skip: int = 0):
     UNICAP_TEMP.mkdir(parents=True, exist_ok=True)
     ini = UNICAP_TEMP / "unicap.ini"
     cfg = configparser.RawConfigParser()
@@ -115,6 +116,8 @@ def _ensure_addon_enabled(addon_dir: Path, cap_width: int = 1600, cap_height: in
         ("ADDON", "FC_CaptureWidth", str(cap_width)),
         ("ADDON", "FC_CaptureHeight", str(cap_height)),
         ("ADDON", "FC_TargetFPS", str(cap_fps)),
+        ("ADDON", "FC_PreUICapture",  "1" if pre_ui else "0"),
+        ("ADDON", "FC_PreUISkipCount", str(pre_ui_skip)),
         ("GENERAL", "EffectSearchPaths", str(ROOT / "shaders")),
         ("GENERAL", "IntermediateCachePath", str(UNICAP_TEMP)),
         ("GENERAL", "TextureSearchPaths", str(ROOT / "shaders")),
@@ -179,10 +182,12 @@ def cmd_deploy(args):
 
     # unicap.ini and unicap.log go to UNICAP_TEMP; game dir stays clean.
     # RESHADE_BASE_PATH_OVERRIDE env var redirects ReShade's base path at launch time.
-    cap_width  = getattr(args, "width",  1600) or 1600
-    cap_height = getattr(args, "height", 1200) or 1200
-    cap_fps    = getattr(args, "fps",    30)   or 30
-    _ensure_addon_enabled(src_addon.parent, cap_width, cap_height, cap_fps)
+    cap_width    = getattr(args, "width",        1600) or 1600
+    cap_height   = getattr(args, "height",       1200) or 1200
+    cap_fps      = getattr(args, "fps",          30)   or 30
+    pre_ui       = getattr(args, "pre_ui",       True)
+    pre_ui_skip  = getattr(args, "pre_ui_skip",  0)    or 0
+    _ensure_addon_enabled(src_addon.parent, cap_width, cap_height, cap_fps, pre_ui, pre_ui_skip)
     _ensure_preset()
 
 
@@ -343,6 +348,10 @@ def main():
     p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录（目录时自动寻找最大 exe）")
     p.add_argument("--width",  type=int, default=1600, metavar="W", help="采集分辨率宽（0=原始分辨率，默认1600）")
     p.add_argument("--height", type=int, default=1200, metavar="H", help="采集分辨率高（0=原始分辨率，默认1200）")
+    p.add_argument("--pre-ui", action=argparse.BooleanOptionalAction, default=True,
+                   help="在 HUD 绘制前采集 BackBuffer（默认开启）")
+    p.add_argument("--pre-ui-skip", type=int, default=0, metavar="N",
+                   help="跳过前 N 次无 DSV 的 BackBuffer 绑定（调参用，默认 0）")
 
     p = sub.add_parser("capture", help="启动采集（不部署）")
     p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录，用于确定帧文件监视目录")
@@ -362,6 +371,10 @@ def main():
     p.add_argument("--no-pack", action="store_true", help="采集结束后跳过自动 HDF5 打包")
     p.add_argument("--width",  type=int, default=1600, metavar="W", help="采集分辨率宽（0=原始分辨率，默认1600）")
     p.add_argument("--height", type=int, default=1200, metavar="H", help="采集分辨率高（0=原始分辨率，默认1200）")
+    p.add_argument("--pre-ui", action=argparse.BooleanOptionalAction, default=True,
+                   help="在 HUD 绘制前采集 BackBuffer（默认开启）")
+    p.add_argument("--pre-ui-skip", type=int, default=0, metavar="N",
+                   help="跳过前 N 次无 DSV 的 BackBuffer 绑定（调参用，默认 0）")
 
     p = sub.add_parser("video", help="从 frames 目录生成 MP4 视频")
     p.add_argument("--frames-dir", default=str(FRAMES_DIR))

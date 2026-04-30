@@ -135,13 +135,22 @@ def run(fps: int = 30, duration=None, frames_dir: Path = None, inputs_out: Path 
         stop.set()
 
     elapsed = time.perf_counter() - t_start
-    frame_count = sum(1 for _ in frames_dir.glob("*BackBuffer.bmp"))
-    fps_actual = frame_count / elapsed if elapsed > 0 else 0
-    print(f"[CAPTURE] 完成：{frame_count} 帧，{elapsed:.1f}s，{fps_actual:.1f} fps")
+    bmp_count = sum(1 for _ in frames_dir.glob("*BackBuffer.bmp"))
+    exr_count = sum(1 for _ in frames_dir.glob("*.exr"))
+    fps_actual = bmp_count / elapsed if elapsed > 0 else 0
+    print(f"[CAPTURE] 完成：{bmp_count} BMP  {exr_count} EXR  {elapsed:.1f}s  {fps_actual:.1f} fps")
 
     t_input.join(timeout=10)
 
-    sidecar.unlink(missing_ok=True)
+    try:
+        sidecar.unlink(missing_ok=True)
+    except PermissionError:
+        # Game process still has the file open; overwrite with empty content
+        # so the addon stops capturing (getline on empty file returns false).
+        try:
+            sidecar.write_text("", encoding="utf-8")
+        except OSError:
+            pass
     print("[DONE]")
 
 def main():
