@@ -345,7 +345,6 @@ def cmd_survey(args):
     recommended = survey_mod.run(
         game_dir=game_dir,
         survey_dir=survey_dir,
-        max_skip=args.survey_max,
         step=args.survey_step,
         fps=args.fps,
         timeout_per_skip=args.timeout,
@@ -418,7 +417,7 @@ def main():
                    help="跳过前 N 次无 DSV 的 BackBuffer 绑定（调参用，默认 0）")
 
     p = sub.add_parser("survey", help="自动扫描 pre_ui_skip 范围，找到 UI 消失的临界值")
-    p.add_argument("--mode", choices=["custom", "official592", "official673"], default="official592")
+    p.add_argument("--mode", choices=["custom", "official592", "official673"], default="custom")
     p.add_argument("--game-path", default=str(GAME_PATH))
     p.add_argument("--game-name", default="", help="游戏名（输出路径第一级，默认从 exe 文件名推导）")
     p.add_argument("--dataset-root", default="", metavar="PATH",
@@ -426,8 +425,6 @@ def main():
     p.add_argument("--start-key", default="F9")
     p.add_argument("--fps", type=float, default=1.0, metavar="FPS",
                    help="扫描时的采集帧率（默认 1fps）")
-    p.add_argument("--survey-max", type=int, default=70, metavar="N",
-                   help="最大 skip 值（默认 70）")
     p.add_argument("--survey-step", type=int, default=5, metavar="STEP",
                    help="skip 步长（默认 5）")
     p.add_argument("--survey-dir", default="", metavar="PATH",

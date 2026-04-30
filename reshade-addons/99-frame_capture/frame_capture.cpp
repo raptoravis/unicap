@@ -903,6 +903,12 @@ static void on_reshade_present(effect_runtime* runtime)
             }
         }
 
+        // Survey: write current frame's non-BB pass count so Python knows the range.
+        if (s_survey_mode && s_no_dsv_non_bb > 0) {
+            std::ofstream tf(exe_fs.parent_path() / L"fc_pass_total.txt", std::ios::trunc);
+            tf << s_no_dsv_non_bb << '\n';
+        }
+
         // Enqueue — render thread is now free
         {
             std::lock_guard<std::mutex> lk(g_queue_mutex);
