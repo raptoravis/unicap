@@ -70,13 +70,23 @@ def _weighted_diff(img_a: np.ndarray, img_b: np.ndarray) -> float:
 
 def _find_boundary(captured: dict) -> int:
     """
-    按 skip 从高到低（early pass → late pass）比较相邻帧差分，
-    差分最大处为 UI 合成点；返回其高侧 skip 值（最后的无 UI 帧）。
+    找到"渲染稳定区"的低 skip 边界，即 UI 合成点之上的最后干净帧。
+
+    策略：
+      场景渲染分三段（高→低 skip）：
+        ① 极早期（大 skip）：几乎空/黑，帧间差小
+        ② 主渲染区（中段）：大量几何/光照出现，帧间差大
+        ③ 稳定后处理区（小 skip）：场景已完整，帧间差小；末尾几个 pass 才合成 UI
+
+      用 threshold = 3× 中位差分 将所有相邻帧对分成"稳定"和"不稳定"两类，
+      然后把所有连续稳定对聚成若干"稳定段"。
+      排除完全落在 skip 范围上半段（极早期空场景）的稳定段，
+      取剩余稳定段中 s_lo 最小的那个段，其最小 s_lo 即为推荐 skip。
 
     captured: {skip_value: bmp_path}
     """
     ordered = sorted(captured.keys(), reverse=True)
-    images = {}
+    images: dict[int, np.ndarray] = {}
     for s in ordered:
         img = cv2.imread(str(captured[s]))
         if img is not None:
@@ -85,19 +95,45 @@ def _find_boundary(captured: dict) -> int:
     if len(images) < 2:
         return max(images.keys()) if images else 0
 
-    best_diff = -1.0
-    boundary_hi = ordered[0]
-
+    # 计算所有相邻对的差分
+    pairs: list[tuple[int, int, float]] = []
     for i in range(len(ordered) - 1):
         s_hi, s_lo = ordered[i], ordered[i + 1]
-        if s_hi not in images or s_lo not in images:
-            continue
-        d = _weighted_diff(images[s_hi], images[s_lo])
-        if d > best_diff:
-            best_diff = d
-            boundary_hi = s_hi
+        if s_hi in images and s_lo in images:
+            d = _weighted_diff(images[s_hi], images[s_lo])
+            pairs.append((s_hi, s_lo, d))
 
-    return boundary_hi
+    if not pairs:
+        return ordered[-1]
+
+    all_diffs = sorted(d for _, _, d in pairs)
+    threshold = max(all_diffs[len(all_diffs) // 2] * 3.0, 3.0)  # 3× 中位差分，最小 3.0
+
+    # 将连续"稳定对"聚成段（d < threshold 为稳定）
+    groups: list[list[tuple[int, int, float]]] = []
+    current: list[tuple[int, int, float]] = []
+    for pair in pairs:
+        if pair[2] < threshold:
+            current.append(pair)
+        else:
+            if current:
+                groups.append(current)
+            current = []
+    if current:
+        groups.append(current)
+
+    if not groups:
+        return ordered[0]
+
+    # 排除完全落在 skip 范围上半段的段（极早期空场景段）
+    mid = (ordered[0] + ordered[-1]) / 2
+    late_groups = [g for g in groups if max(s_hi for s_hi, _, _ in g) < mid]
+    if not late_groups:
+        late_groups = groups  # 降级：保留全部
+
+    # 取稳定段中 s_lo 最小的那个，其最小 s_lo = 推荐 skip
+    best = min(late_groups, key=lambda g: min(s_lo for _, s_lo, _ in g))
+    return min(s_lo for _, s_lo, _ in best)
 
 
 def run(
@@ -202,19 +238,28 @@ def run(
     images = {s: cv2.imread(str(captured[s])) for s in ordered}
     images = {s: img for s, img in images.items() if img is not None}
 
-    print(f"\n  {'skip':>5}  {'差分':>10}")
+    print(f"\n  {'skip':>5}  {'差分':>10}  说明")
     prev = None
     for s in ordered:
         if prev is not None and prev in images and s in images:
             d = _weighted_diff(images[prev], images[s])
-            marker = "  ← 推荐边界" if prev == recommended else ""
-            print(f"  {s:5d}  {d:10.2f}{marker}")
+            if s == recommended:
+                note = "← 推荐（稳定区下边界，无 UI）"
+            elif prev == recommended:
+                note = "← UI 合成出现在此范围内"
+            else:
+                note = ""
+            print(f"  {s:5d}  {d:10.2f}  {note}")
         else:
-            print(f"  {s:5d}  {'(基准)':>10}")
+            note = "← 推荐（稳定区下边界，无 UI）" if s == recommended else "(基准)"
+            print(f"  {s:5d}  {'':>10}  {note}")
         prev = s
 
+    step = args_step if (args_step := ordered[-2] - ordered[-1] if len(ordered) >= 2 else 5) > 0 else 5
     print(f"\n[SURVEY] 推荐 skip = {recommended}")
-    print(f"         部署命令:")
-    print(f"           uv run main.py deploy --mode official592 --pre-ui --pre-ui-skip {recommended}")
+    print(f"         如需精确定位，可对 skip {max(0, recommended - step*2)}~{recommended + step*2} 做精细扫描：")
+    print(f"           uv run main.py survey --no-launch --survey-step 1")
+    print(f"         确认后部署：")
+    print(f"           uv run main.py deploy --mode custom --pre-ui --pre-ui-skip {recommended}")
 
     return recommended
