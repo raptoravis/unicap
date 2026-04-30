@@ -27,7 +27,7 @@ Delete `build\` to force CMake reconfigure.
 ```powershell
 uv sync                                    # install Python deps (first time)
 
-uv run main.py launch --mode custom        # deploy + launch game + capture
+uv run main.py launch                      # deploy + launch game + capture (default: official592)
 uv run main.py deploy --game-dir PATH      # deploy files only
 uv run main.py capture                     # capture only (game already running)
 uv run main.py pack                        # pack last session into HDF5
