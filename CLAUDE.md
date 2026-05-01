@@ -29,9 +29,21 @@ Delete `build\` to force CMake reconfigure.
 uv sync                                         # install Python deps (first time)
 
 uv run main.py launch                           # primary flow: deploy + launch + F6/F8/F9 loop
+uv run main.py launch --ui-mode ui-only         # capture post-UI BackBuffer only (no survey)
+uv run main.py launch --ui-mode both            # both pre-UI and post-UI streams (needs survey)
 uv run main.py video  --frames-dir PATH ...     # encode frames → MP4 (post-hoc)
 uv run main.py pack   --frames-dir PATH ...     # pack frames + inputs → HDF5 (post-hoc)
 ```
+
+`--ui-mode` controls what gets captured:
+
+| mode | F6 survey | output BMPs                            | HDF5                  |
+| ---- | --------- | -------------------------------------- | --------------------- |
+| `no-ui` (default) | required  | `<ts> BackBuffer.bmp` (pre-UI)         | `/color`              |
+| `ui-only`         | skipped   | `<ts> BackBuffer.bmp` (post-UI BB)     | `/color`              |
+| `both`            | required  | both `BackBuffer.bmp` + `BackBufferUI.bmp` | `/color` + `/color_ui` |
+
+The addon is driven by two ini keys: `FC_PreUICapture` (1 = scene RT, 0 = post-UI BB) and `FC_BothCapture` (1 = also dump post-UI BMP alongside scene RT). `_ensure_addon_enabled` writes both based on `--ui-mode`.
 
 Deploy + survey + capture are no longer separate subcommands — they all happen inside `launch` (deploy on startup; survey/capture driven by F6/F8/F9 in-game).
 
@@ -63,7 +75,7 @@ ReShade addon compiled to `frame_capture.addon`. It captures at `FC_TargetFPS` u
 
 Settings (`FC_EnableCapture`, `FC_ExportDepth`, `FC_PreUICapture`, `FC_PreUISkipCount`, `FC_TargetFPS`) are read from `%TEMP%\unicap\unicap.ini` via `config_get_value`.
 
-**Important:** `frame_capture.cpp` includes headers from `reshade-addons/deps/reshade/include` (v5 wrapper API). Do not change this include path — the addon is binary-compatible with `vendor/reshade592/dxgi.dll` (5.9.2).
+**Important:** `frame_capture.cpp` includes headers from `reshade-addons/deps/reshade/include` (v5 wrapper API). Do not change this include path — the addon's exported symbols target the v5 ABI and remain compatible with `dist/dxgi.dll` built from the 6.7.3.16 source.
 
 ### Sidecar file protocol (Python ↔ C++ runtime)
 
@@ -81,11 +93,9 @@ When `fc_skip_count.txt` exists and is non-empty, the addon enters survey mode: 
 
 After a survey completes, Python writes the recommended skip to `fc_skip_count.txt` for ~2 frames so the addon picks it up, then deletes the file. This makes the new skip take effect mid-game without requiring a restart, while restoring normal capture filenames for the upcoming session.
 
-### ReShade core — `reshade/` and `vendor/reshade592/`
+### ReShade core — `reshade/` → `dist/dxgi.dll`
 
-**`vendor/reshade592/dxgi.dll`** — official 5.9.2 binary. Both `--mode custom` and `--mode official592` deploy this. It correctly handles R10G10B10A2 swap chains.
-
-**`reshade/`** — contains 6.7.3.16 UNOFFICIAL source. `dist/dxgi.dll` built from it produces incorrect BMP on R10G10B10A2 swap chains and is **not deployed by any mode**. The CMake `reshade_core` target exists as infrastructure but its output is unused.
+`reshade/` contains 6.7.3.16 UNOFFICIAL source. The CMake `reshade_core` ExternalProject target builds it via MSBuild and stages `dist/dxgi.dll`, which `main.py` deploys to the game directory. Tested on FF7R. Note: this build mishandles R10G10B10A2 swap chains; if a future game produces wrong-color BMPs, switch the source to a different ReShade build (no automatic fallback exists).
 
 `reshade/deps/glad/target/` contains pre-generated C headers excluded by glad's own `.gitignore` but **force-added** to this repo (`git add -f`). Do not delete them.
 

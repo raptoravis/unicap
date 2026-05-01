@@ -13,9 +13,9 @@ message(STATUS "MSBuild: ${MSBUILD_EXE}")
 
 # ── ReShade core (dxgi.dll) — built via its native .sln ──────────────────────
 # ReShade has no CMakeLists.txt; we drive its MSBuild solution from here.
-# WARNING: reshade/ source is currently 6.7.3.16 UNOFFICIAL. The resulting dist/dxgi.dll
-# is NOT used for capture — main.py --mode custom deploys vendor/reshade592/dxgi.dll instead.
-# This target is kept only as a build infrastructure placeholder.
+# Source is 6.7.3.16 (unofficial). The resulting dist/dxgi.dll is what main.py
+# deploys to the game directory. If a future game uses R10G10B10A2 swap chains
+# and produces wrong-color BMPs, switch to a different ReShade build.
 include(ExternalProject)
 
 set(RESHADE_SLN "${CMAKE_SOURCE_DIR}/reshade/ReShade.sln")

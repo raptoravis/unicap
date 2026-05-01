@@ -64,7 +64,7 @@ GAMEPAD_DIM = 7  # [buttons, lt, rt, lx, ly, rx, ry]
 # 例：ff7remake_.exe 2026-04-28 19-17-06 805 BackBuffer.bmp
 _RE_A = re.compile(
     r'^.+ (\d{4}-\d{2}-\d{2}) (\d{2}-\d{2}-\d{2}) (\d+)'
-    r' (BackBuffer|DepthBuffer|NormalMap)\.(bmp|exr)$'
+    r' (BackBufferUI|BackBuffer|DepthBuffer|NormalMap)\.(bmp|exr)$'
 )
 
 # 格式 B：前缀 日期 时间_毫秒.扩展名
@@ -138,6 +138,7 @@ def scan_frames(frames_dir: Path):
             frames.append({
                 'ts':     _to_utc_ns(*key),
                 'bmp':    parts['BackBuffer'],
+                'bmp_ui': parts.get('BackBufferUI'),  # "both" mode 的 post-UI BMP
                 'depth':  parts.get('DepthBuffer'),
                 'normal': parts.get('NormalMap'),
             })
@@ -150,7 +151,8 @@ def scan_frames(frames_dir: Path):
         for key, path in simples.items():
             if path.suffix.lower() != '.bmp':
                 continue
-            frames.append({'ts': _to_utc_ns(*key), 'bmp': path, 'depth': None, 'normal': None})
+            frames.append({'ts': _to_utc_ns(*key), 'bmp': path, 'bmp_ui': None,
+                           'depth': None, 'normal': None})
         frames.sort(key=lambda x: x['ts'])
         return 'color-only', frames
 
@@ -237,7 +239,8 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path):
     if n == 0:
         print("[ERROR] 未找到任何有效帧，退出")
         sys.exit(1)
-    print(f"[SCAN] 模式={mode}, 帧数={n}")
+    has_ui = any(f.get('bmp_ui') for f in frames)
+    print(f"[SCAN] 模式={mode}, 帧数={n}{'  (含 post-UI 流)' if has_ui else ''}")
 
     # 读取第一帧确定分辨率
     H, W = _load_bmp(frames[0]['bmp']).shape[:2]
@@ -272,6 +275,11 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path):
             ds_depth  = hf.create_dataset('depth',  (n, H, W),    dtype='float32', chunks=(1, H, W),    **_C)
             ds_normal = hf.create_dataset('normal', (n, H, W, 3), dtype='float32', chunks=(1, H, W, 3), **_C)
 
+        ds_color_ui = None
+        if has_ui:
+            ds_color_ui = hf.create_dataset('color_ui', (n, H, W, 3), dtype='uint8',
+                                            chunks=(1, H, W, 3), **_C)
+
         max_dt = 0.0
         ui_masked_total = 0  # 累计被方案 A 遮罩的像素数（B 已遮罩的为 0，不计入）
         for i, frame in enumerate(frames):
@@ -300,6 +308,8 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path):
                     ds_normal[i] = _load_normal(frame['normal'])
 
             ds_color[i]     = color
+            if ds_color_ui is not None and frame.get('bmp_ui'):
+                ds_color_ui[i] = _load_bmp(frame['bmp_ui'])
             ds_frame_ts[i]  = frame['ts']
             ds_input_ts[i]  = inp['ts']
             ds_input_dt[i]  = float(dt_ms)

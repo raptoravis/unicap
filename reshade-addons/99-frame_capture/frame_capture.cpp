@@ -55,6 +55,7 @@ static uint32_t g_cap_height      = 1200;
 static float    g_target_fps      = 30.0f;
 static bool     g_pre_ui_mode     = false;   // FC_PreUICapture: capture before HUD is drawn
 static uint32_t g_pre_ui_skip     = 0;       // FC_PreUISkipCount: skip first N no-DSV BB binds
+static bool     g_both_capture    = false;   // FC_BothCapture: also dump post-UI BB alongside pre-UI
 static bool     doOnce            = false;
 static bool     g_logged_textures = false;
 static int      windowSize[2]     = { 320, 560 };
@@ -73,6 +74,12 @@ struct SaveTask {
     std::filesystem::path depth_path;     // empty → skip depth
     std::vector<float>    depth_pixels;   // RGBA32F, depth_w*depth_h*4, no padding
     uint32_t              depth_w = 0, depth_h = 0;
+
+    // "Both" mode: optional second BMP holding the post-UI BackBuffer
+    // (UIRemove_ColorTex) captured in the same frame as the pre-UI scene.
+    std::filesystem::path ui_bmp_path;
+    std::vector<uint8_t>  ui_color_pixels; // RGBA8
+    uint32_t              ui_width = 0, ui_height = 0;
 };
 
 static constexpr size_t         MAX_QUEUE   = 4;
@@ -149,6 +156,26 @@ static void save_worker_fn()
         // Write BMP (RGBA8, 4 channels)
         stbi_write_bmp(task.bmp_path.u8string().c_str(),
                        (int)color_w, (int)color_h, 4, color_src);
+
+        // "Both" mode: also write the post-UI BB BMP (no resize — it's already at
+        // the runtime BB size, which equals g_cap_width/height for our use case).
+        if (!task.ui_bmp_path.empty() && !task.ui_color_pixels.empty()) {
+            const uint8_t* ui_src = task.ui_color_pixels.data();
+            uint32_t ui_w = task.ui_width;
+            uint32_t ui_h = task.ui_height;
+            std::vector<uint8_t> ui_resized;
+            if (g_cap_width > 0 && g_cap_height > 0 &&
+                (ui_w != g_cap_width || ui_h != g_cap_height)) {
+                ui_resized.resize(g_cap_width * g_cap_height * 4);
+                stbir_resize_uint8(ui_src, (int)ui_w, (int)ui_h, 0,
+                                   ui_resized.data(), (int)g_cap_width, (int)g_cap_height, 0, 4);
+                ui_src = ui_resized.data();
+                ui_w   = g_cap_width;
+                ui_h   = g_cap_height;
+            }
+            stbi_write_bmp(task.ui_bmp_path.u8string().c_str(),
+                           (int)ui_w, (int)ui_h, 4, ui_src);
+        }
 
         // Write depth EXR
         if (!task.depth_path.empty() && !task.depth_pixels.empty()) {
@@ -414,6 +441,7 @@ static void on_init_device(device*)
     reshade::get_config_value(nullptr, "ADDON", "FC_TargetFPS",      g_target_fps);
     reshade::get_config_value(nullptr, "ADDON", "FC_PreUICapture",   g_pre_ui_mode);
     reshade::get_config_value(nullptr, "ADDON", "FC_PreUISkipCount", g_pre_ui_skip);
+    reshade::get_config_value(nullptr, "ADDON", "FC_BothCapture",    g_both_capture);
 }
 
 static void on_init_swapchain(swapchain* sw, bool /*resize*/)
@@ -863,6 +891,42 @@ static void on_reshade_present(effect_runtime* runtime)
                 }
             }
 
+            // "Both" mode: also copy UIRemove_ColorTex (post-UI BB) into sbi.color_staging
+            // so the worker can dump a parallel "BackBufferUI.bmp" alongside the pre-UI BMP.
+            // Skip in survey mode — survey only needs one capture per skip value.
+            bool do_ui = g_both_capture && !s_survey_mode;
+            if (do_ui) {
+                if (sbi.color_texture_r.handle == 0)
+                    fc_find_export_tex(runtime, sbi);
+                if (sbi.color_texture_r.handle == 0) {
+                    reshade::log::message(reshade::log::level::warning,
+                        "FC: both-mode: UIRemove_ColorTex not ready, skipping post-UI dump");
+                    do_ui = false;
+                }
+            }
+            if (do_ui) {
+                const resource_desc& crd = sbi.color_texture_rd;
+                if (sbi.color_staging.handle == 0 ||
+                    sbi.color_staging_w != crd.texture.width || sbi.color_staging_h != crd.texture.height) {
+                    if (sbi.color_staging.handle != 0) dev->destroy_resource(sbi.color_staging);
+                    resource_desc sd(crd.texture.width, crd.texture.height, 1, 1,
+                                     crd.texture.format, 1, memory_heap::gpu_to_cpu, resource_usage::copy_dest);
+                    if (!dev->create_resource(sd, nullptr, resource_usage::copy_dest, &sbi.color_staging)) {
+                        reshade::log::message(reshade::log::level::error,
+                            "FC: failed to create color staging (both-mode)");
+                        do_ui = false;
+                    } else {
+                        sbi.color_staging_w = crd.texture.width;
+                        sbi.color_staging_h = crd.texture.height;
+                    }
+                }
+            }
+            if (do_ui) {
+                cmd->barrier(sbi.color_texture_r, resource_usage::shader_resource, resource_usage::copy_source);
+                cmd->copy_texture_region(sbi.color_texture_r, 0, nullptr, sbi.color_staging, 0, nullptr);
+                cmd->barrier(sbi.color_texture_r, resource_usage::copy_source, resource_usage::shader_resource);
+            }
+
             queue->wait_idle();
 
             task.width  = g_pre_ui_staging_w;
@@ -892,6 +956,22 @@ static void on_reshade_present(effect_runtime* runtime)
                                     dsrc + y * floats_per_row,
                                     task.depth_w * 4 * sizeof(float));
                     dev->unmap_texture_region(sbi.depth_staging, 0);
+                }
+            }
+
+            if (do_ui) {
+                task.ui_bmp_path = save_prefix; task.ui_bmp_path += L"BackBufferUI.bmp";
+                task.ui_width  = sbi.color_staging_w;
+                task.ui_height = sbi.color_staging_h;
+                task.ui_color_pixels.resize((size_t)task.ui_width * task.ui_height * 4);
+                subresource_data ui_data = {};
+                if (dev->map_texture_region(sbi.color_staging, 0, nullptr, map_access::read_only, &ui_data) && ui_data.data) {
+                    const uint8_t* src = static_cast<const uint8_t*>(ui_data.data);
+                    for (uint32_t y = 0; y < task.ui_height; y++)
+                        std::memcpy(task.ui_color_pixels.data() + y * task.ui_width * 4,
+                                    src + y * ui_data.row_pitch,
+                                    task.ui_width * 4);
+                    dev->unmap_texture_region(sbi.color_staging, 0);
                 }
             }
         } else {

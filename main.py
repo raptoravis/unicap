@@ -8,10 +8,16 @@ Hotkeys (game window must have focus):
   F9  停止当前 survey/采集
 
 Usage:
-  uv run main.py launch [--mode M] [--game-path P] [--game-name N]
-                        [--dataset-root R] [--no-hints]
+  uv run main.py launch [--game-path P] [--game-name N]
+                        [--dataset-root R] [--ui-mode {no-ui,ui-only,both}]
+                        [--no-hints]
   uv run main.py video  --frames-dir P [--output P] [--fps N]
   uv run main.py pack   [--frames-dir P] [--inputs P] [--output P]
+
+ui-mode:
+  no-ui    只输出 pre-UI 帧（默认；F6 survey 必需）
+  ui-only  只输出 post-UI BackBuffer 帧（不需 survey；F6 无效）
+  both     两路并行输出（pre-UI + post-UI；F6 survey 必需）
 """
 
 import argparse
@@ -141,20 +147,17 @@ def _resolve_game_path(path_str: str):
     sys.exit(f"[错误] --game-path 路径不存在：{p}")
 
 
-def _sources(mode: str):
-    shader_src = ROOT / "shaders"
-    dist = ROOT / "dist"
-    if mode == "custom":
-        return dist / "dxgi.dll", dist / "frame_capture.addon", shader_src
-    if mode == "official592":
-        return ROOT / "vendor" / "reshade592" / "dxgi.dll", dist / "frame_capture.addon", shader_src
-    addon = ROOT / "vendor" / "addon_official" / "frame_capture.addon"
-    return ROOT / "vendor" / "reshade673" / "dxgi.dll", addon, shader_src
+DXGI_DLL = ROOT / "dist" / "dxgi.dll"
+ADDON_BIN = ROOT / "dist" / "frame_capture.addon"
+SHADER_SRC = ROOT / "shaders"
 
 
 # ── unicap.ini / preset writers ───────────────────────────────────────────────
 
-def _ensure_addon_enabled(addon_dir: Path, pre_ui_skip: int = 0):
+def _ensure_addon_enabled(addon_dir: Path, pre_ui_skip: int = 0, ui_mode: str = "no-ui"):
+    """ui_mode: 'no-ui' (pre-UI only) | 'ui-only' (post-UI BB only) | 'both' (pre-UI + post-UI)."""
+    pre_ui_flag  = "0" if ui_mode == "ui-only" else "1"
+    both_flag    = "1" if ui_mode == "both" else "0"
     UNICAP_TEMP.mkdir(parents=True, exist_ok=True)
     ini = UNICAP_TEMP / "unicap.ini"
     cfg = configparser.RawConfigParser()
@@ -169,8 +172,9 @@ def _ensure_addon_enabled(addon_dir: Path, pre_ui_skip: int = 0):
         ("ADDON", "FC_CaptureWidth", str(CAP_WIDTH)),
         ("ADDON", "FC_CaptureHeight", str(CAP_HEIGHT)),
         ("ADDON", "FC_TargetFPS", str(CAP_FPS)),
-        ("ADDON", "FC_PreUICapture", "1"),
+        ("ADDON", "FC_PreUICapture", pre_ui_flag),
         ("ADDON", "FC_PreUISkipCount", str(pre_ui_skip)),
+        ("ADDON", "FC_BothCapture", both_flag),
         ("GENERAL", "EffectSearchPaths", str(ROOT / "shaders")),
         ("GENERAL", "IntermediateCachePath", str(UNICAP_TEMP)),
         ("GENERAL", "TextureSearchPaths", str(ROOT / "shaders")),
@@ -218,29 +222,29 @@ def _symlink_file(src: Path, dst: Path):
 # ── Subcommand: deploy ────────────────────────────────────────────────────────
 
 def cmd_deploy(args):
-    src_dll, src_addon, _ = _sources(args.mode)
     game_dir, game_exe = _resolve_game_path(args.game_path)
 
-    for f in [src_dll, src_addon]:
+    for f in [DXGI_DLL, ADDON_BIN]:
         if not f.exists():
-            sys.exit(f"[错误] 文件不存在：{f}\n       custom 模式需先执行 scripts\\build.ps1")
+            sys.exit(f"[错误] 文件不存在：{f}\n       请先执行 scripts\\build.ps1")
 
     dst_dll = game_dir / "dxgi.dll"
     bak = game_dir / "dxgi.dll.bak"
     if dst_dll.exists() and not dst_dll.is_symlink() and not bak.exists():
         shutil.copy2(dst_dll, bak)
-    _symlink_file(src_dll, dst_dll)
+    _symlink_file(DXGI_DLL, dst_dll)
 
     dataset_root_arg = getattr(args, "dataset_root", "") or ""
     dataset_root = Path(dataset_root_arg) if dataset_root_arg else DATASET_ROOT
     game_name = getattr(args, "game_name", "") or game_exe.stem
+    ui_mode = getattr(args, "ui_mode", "no-ui")
     pre_ui_skip = _load_recommended_skip(dataset_root, game_name)
     if pre_ui_skip is not None:
         print(f"[DEPLOY] 自动加载 survey 推荐 pre_ui_skip={pre_ui_skip}（{game_name}）")
     else:
         pre_ui_skip = 0
 
-    _ensure_addon_enabled(src_addon.parent, pre_ui_skip=pre_ui_skip)
+    _ensure_addon_enabled(ADDON_BIN.parent, pre_ui_skip=pre_ui_skip, ui_mode=ui_mode)
     _ensure_preset()
     return game_dir, game_exe, game_name, dataset_root
 
@@ -258,10 +262,17 @@ def cmd_launch(args):
     _set_state(game_dir, "idle")
 
     if args.hints:
+        ui_mode = getattr(args, "ui_mode", "no-ui")
         print()
-        print("┌─ 操作提示 ────────────────────────────────────────────┐")
-        print("│  F6  开始 survey（自动扫描无 UI 的 skip 值）          │")
-        print("│  F8  开始采集（首次会先自动 survey）                  │")
+        print(f"┌─ 操作提示 (ui-mode={ui_mode}) ────────────────────────┐")
+        if ui_mode == "ui-only":
+            print("│  F8  开始采集 post-UI BackBuffer（无需 survey）       │")
+        elif ui_mode == "both":
+            print("│  F6  开始 survey（自动扫描无 UI 的 skip 值）          │")
+            print("│  F8  开始采集（pre-UI + post-UI 双流）                │")
+        else:
+            print("│  F6  开始 survey（自动扫描无 UI 的 skip 值）          │")
+            print("│  F8  开始采集（首次会先自动 survey）                  │")
         print("│  F9  停止当前 survey 或采集                           │")
         print("│  Ctrl+C  退出 main.py（不会关闭游戏）                 │")
         print("└──────────────────────────────────────────────────────┘\n")
@@ -275,24 +286,34 @@ def cmd_launch(args):
 
 
 def _interactive_loop(args, game_dir: Path, game_name: str, dataset_root: Path):
+    ui_mode = getattr(args, "ui_mode", "no-ui")
+    needs_survey = ui_mode != "ui-only"  # ui-only 直接抓 BackBuffer，无需 skip
+
     while True:
         _set_state(game_dir, "idle")
-        print("[等待] 按 F6 = survey   F8 = 采集   (Ctrl+C 退出)")
-        key = _wait_for_keys([VK_F6, VK_F8])
+        if needs_survey:
+            print("[等待] 按 F6 = survey   F8 = 采集   (Ctrl+C 退出)")
+            key = _wait_for_keys([VK_F6, VK_F8])
+        else:
+            print(f"[等待] 按 F8 = 采集（mode={ui_mode}，无需 survey）   (Ctrl+C 退出)")
+            key = _wait_for_keys([VK_F8])
 
         if key == VK_F6:
+            if not needs_survey:
+                print(f"[F6] mode={ui_mode}，本模式不需要 survey，已忽略")
+                continue
             _run_survey(args, game_dir, game_name, dataset_root)
 
         elif key == VK_F8:
             ran_survey = False
-            if _load_recommended_skip(dataset_root, game_name) is None:
+            if needs_survey and _load_recommended_skip(dataset_root, game_name) is None:
                 print("[F8] 未检测到 survey 推荐值，先自动 survey…")
                 ok = _run_survey(args, game_dir, game_name, dataset_root)
                 ran_survey = True
                 if not ok:
                     print("[F8] survey 未完成，已取消采集。再次按 F8 重试")
                     continue
-            _run_capture(game_dir, game_name, dataset_root, just_surveyed=ran_survey)
+            _run_capture(args, game_dir, game_name, dataset_root, just_surveyed=ran_survey)
 
 
 def _run_survey(args, game_dir: Path, game_name: str, dataset_root: Path) -> bool:
@@ -324,8 +345,8 @@ def _run_survey(args, game_dir: Path, game_name: str, dataset_root: Path) -> boo
         return False
 
     # Persist recommendation to ini for next deploy
-    src_addon = _sources(args.mode)[1]
-    _ensure_addon_enabled(src_addon.parent, pre_ui_skip=recommended)
+    _ensure_addon_enabled(ADDON_BIN.parent, pre_ui_skip=recommended,
+                          ui_mode=getattr(args, "ui_mode", "no-ui"))
 
     # Make the new skip take effect immediately in the running game:
     # one-shot survey-mode write so the addon picks up `recommended`,
@@ -349,7 +370,7 @@ def _write_skip_pulse(game_dir: Path, skip: int):
         print(f"[WARN] 无法写 fc_skip_count.txt: {e}")
 
 
-def _run_capture(game_dir: Path, game_name: str, dataset_root: Path, just_surveyed: bool):
+def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path, just_surveyed: bool):
     _set_state(game_dir, "capturing")
     tag = datetime.now().strftime("%Y%m%d_%H%M%S")
     session_dir = dataset_root / game_name / tag
@@ -378,7 +399,11 @@ def _run_capture(game_dir: Path, game_name: str, dataset_root: Path, just_survey
         quit_watcher.set()
         _set_state(game_dir, "idle")
 
-    _make_video(frames_dir, video_out, CAP_FPS)
+    _make_video(frames_dir, video_out, CAP_FPS, glob_pat="*BackBuffer.bmp")
+    # "both" mode: 也生成 post-UI 视频
+    if any(frames_dir.glob("*BackBufferUI.bmp")):
+        _make_video(frames_dir, session_dir / "video_ui.mp4", CAP_FPS,
+                    glob_pat="*BackBufferUI.bmp")
     print(f"[会话] {session_dir}")
     print("[PACK] 开始打包 HDF5…")
     pack_hdf5.pack(frames_dir=frames_dir, inputs_path=inputs_out, output_path=hdf5_out)
@@ -386,11 +411,11 @@ def _run_capture(game_dir: Path, game_name: str, dataset_root: Path, just_survey
 
 # ── Video + pack ──────────────────────────────────────────────────────────────
 
-def _make_video(frames_dir: Path, output: Path, fps: int):
+def _make_video(frames_dir: Path, output: Path, fps: int, glob_pat: str = "*BackBuffer.bmp"):
     import cv2
 
-    bmps = sorted(frames_dir.glob("*BackBuffer.bmp"))
-    if not bmps:
+    bmps = sorted(frames_dir.glob(glob_pat))
+    if not bmps and glob_pat == "*BackBuffer.bmp":
         bmps = sorted(frames_dir.glob("*.bmp"))
     if not bmps:
         print("[VIDEO] 未找到 BMP 文件，跳过")
@@ -471,10 +496,11 @@ def main():
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("launch", help="部署 + 启动游戏 + 进入交互式 F6/F8/F9 工作流")
-    p.add_argument("--mode", choices=["custom", "official592", "official673"], default="custom")
     p.add_argument("--game-path", default=str(GAME_PATH))
     p.add_argument("--game-name", default="", help="游戏名（输出路径第一级，默认从 exe 推导）")
     p.add_argument("--dataset-root", default="", metavar="PATH")
+    p.add_argument("--ui-mode", choices=["no-ui", "ui-only", "both"], default="no-ui",
+                   help="输出: no-ui=只 pre-UI（默认）, ui-only=只 post-UI BB（无需 survey）, both=双流")
     p.add_argument("--hints", action=argparse.BooleanOptionalAction, default=True,
                    help="显示控制台 + addon overlay 操作提示（默认开启）")
 
