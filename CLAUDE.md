@@ -17,7 +17,7 @@ scripts\build.ps1 -Rebuild # force-rebuild ReShade core too
 
 Outputs to `dist/`:
 
-- `dxgi.dll` — ReShade core (DX12/DXGI proxy); built from `reshade/` source but **not deployed** (see ReShade core section)
+- `dxgi.dll` — ReShade core (DX12/DXGI proxy)，built from `reshade/` source；由 `main.py launch` (cmd_deploy) symlink 到游戏目录（无 Windows 开发者模式时退化为 copy）
 - `frame_capture.addon` — capture addon (primary build output)
 - `reshade-shaders/Shaders/*.fx` — DepthToAddon + UIRemove shaders (copied from `shaders/`)
 
@@ -57,9 +57,9 @@ loop driven entirely by in-game hotkeys:
 | **F9**                  | Stop the current survey or capture                                                                 |
 | **Ctrl+C** (in console) | Exit `main.py` (game keeps running)                                                                |
 
-Each capture session writes to `DATASET_ROOT/<game_name>/<YYYYMMDD_HHMMSS>/frames/` with a matching `inputs.jsonl`. After F9 stops capture, packing + video generation run automatically; pressing F8 again starts a new session.
+Each capture session writes to `DATASET_ROOT/<game_name>/<YYYYMMDD_HHMMSS>/frames/` with a matching `inputs.jsonl`. F9 停止后默认只生成 `video.mp4`；HDF5 打包需 `launch --pack` 显式开启，或事后用 `pack --game-dir DIR` 子命令批量补齐。`video` / `pack` 子命令都是"扫游戏目录、缺啥补啥、已存在跳过"。
 
-Capture defaults (FPS=30, 1600×1200) are constants in `main.py` — edit there to change.
+Capture defaults (FPS=30, 1920×1080) 是 `main.py` 顶部常量；1920×1080 匹配 FF7R 的 scene RT 原生分辨率，省掉一次 worker resize（参考 perf commit b7021ed → 19.4 fps）。
 
 Machine-specific paths live in `tools/capture/config.py` — edit `GAME_PATH` and `DATASET_ROOT` there. Both can also be overridden via `--game-path` and `--dataset-root`.
 
@@ -73,7 +73,7 @@ ReShade addon compiled to `frame_capture.addon`. It captures at `FC_TargetFPS` u
 
 **Pre-UI path** (`FC_PreUICapture=1`): Hooks `on_bind_rts_dsv` to intercept render target bindings. Uses reverse-skip: `target = (prev_total - 1 - FC_PreUISkipCount)` selects the Nth-from-last non-BB, no-DSV RT bind within the frame. That RT's color is GPU-copied to `g_pre_ui_staging` during `on_bind_rts_dsv`. In `on_reshade_present`, the staging buffer is decoded to RGBA8 (handling `r16g16b16a16_float` HDR via half-float → Reinhard → sRGB) and saved as BMP. This captures the scene before UI compositing without touching the BackBuffer during Present.
 
-Settings (`FC_EnableCapture`, `FC_ExportDepth`, `FC_PreUICapture`, `FC_PreUISkipCount`, `FC_TargetFPS`) are read from `%TEMP%\unicap\unicap.ini` via `config_get_value`.
+Settings (`FC_EnableCapture`, `FC_ExportDepth`, `FC_PreUICapture`, `FC_PreUISkipCount`, `FC_TargetFPS`, `FC_BothCapture`) are read from `%TEMP%\unicap\unicap.ini` via `config_get_value`. `FC_BothCapture=1` 让 addon 同时落 pre-UI BMP + post-UI `BackBufferUI.bmp`（驱动 `--ui-mode both`）。
 
 **Important:** `frame_capture.cpp` includes headers from `reshade-addons/deps/reshade/include` (v5 wrapper API). Do not change this include path — the addon's exported symbols target the v5 ABI and remain compatible with `dist/dxgi.dll` built from the 6.7.3.16 source.
 
@@ -146,6 +146,7 @@ DATASET_ROOT/
       inputs.jsonl
       dataset.h5
       video.mp4
+      video_ui.mp4       ← 仅 --ui-mode both 时生成（post-UI 流）
     survey/              ← survey scan frames (fixed subdir)
       survey_skip_000_BackBuffer.bmp
       survey_skip_007_BackBuffer.bmp
@@ -159,6 +160,7 @@ Both ReShade core and the addon write to `%TEMP%\unicap\` (i.e. `C:\Users\<user>
 - `unicap.log` — log of the first dxgi.dll-loaded process (often a short-lived launcher/stub).
 - `unicap.log1` — log of the actual long-running game process. **This is the one with the useful diagnostics** (capf frames, FC warnings, shader compile messages).
 - `unicap.ini` — runtime config the addon reads.
+- `unicap-*.{i,asm,cso}` — shader compile cache (commit 09863dd 改前缀 `reshade-` → `unicap-`，与项目命名一致)。看到 `reshade-*.{i,asm,cso}` 说明部署的 `dxgi.dll` 还是旧版，需 `scripts\build.ps1 -Rebuild` 重生成。
 
 When debugging capture issues, default to reading `unicap.log1` first.
 
