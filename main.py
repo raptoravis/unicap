@@ -43,8 +43,11 @@ CONFIG_DIR = ROOT / "config"
 UNICAP_TEMP = Path(tempfile.gettempdir()) / "unicap"
 
 # Capture defaults — change here if a different rate/resolution is needed.
-CAP_WIDTH  = 1600
-CAP_HEIGHT = 1200
+# 1920×1080 matches FF7R's native scene RT — skipping the worker resize cuts
+# ~40 ms/frame off the save path, and avoids the 16:9 → 4:3 horizontal stretch
+# the old 1600×1200 default introduced.
+CAP_WIDTH  = 1920
+CAP_HEIGHT = 1080
 CAP_FPS    = 30
 SURVEY_FPS = 1.0   # Python wait cadence during survey sweep
 

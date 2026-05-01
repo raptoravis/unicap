@@ -83,12 +83,13 @@ struct SaveTask {
     uint32_t              ui_width = 0, ui_height = 0;
 };
 
-static constexpr size_t         MAX_QUEUE   = 16;
-static std::thread              g_save_thread;
-static std::mutex               g_queue_mutex;
-static std::condition_variable  g_queue_cv;
-static std::queue<SaveTask>     g_save_queue;
-static std::atomic<bool>        g_worker_stop { false };
+static constexpr size_t           MAX_QUEUE     = 16;
+static constexpr size_t           NUM_WORKERS   = 2;   // parallel save threads
+static std::vector<std::thread>   g_save_threads;
+static std::mutex                 g_queue_mutex;
+static std::condition_variable    g_queue_cv;
+static std::queue<SaveTask>       g_save_queue;
+static std::atomic<bool>          g_worker_stop { false };
 
 // Single-channel float EXR ("Y"). Used for depth — depth is scalar, so a 3-channel
 // triplicated EXR was wasting 3× compression CPU and 3× file size for no gain.
@@ -1294,7 +1295,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
         if (!reshade::register_addon(hModule))
             return FALSE;
         g_worker_stop = false;
-        g_save_thread = std::thread(save_worker_fn);
+        g_save_threads.reserve(NUM_WORKERS);
+        for (size_t i = 0; i < NUM_WORKERS; ++i)
+            g_save_threads.emplace_back(save_worker_fn);
         register_addon_FC();
         break;
     case DLL_PROCESS_DETACH:
@@ -1304,9 +1307,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
             std::lock_guard<std::mutex> lk(g_queue_mutex);
             g_worker_stop = true;
         }
-        g_queue_cv.notify_one();
-        if (g_save_thread.joinable())
-            g_save_thread.join();
+        g_queue_cv.notify_all();
+        for (auto& t : g_save_threads)
+            if (t.joinable()) t.join();
+        g_save_threads.clear();
         break;
     }
     return TRUE;
