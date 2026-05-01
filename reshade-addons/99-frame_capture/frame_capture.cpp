@@ -233,6 +233,9 @@ struct __declspec(uuid("eadae23a-4009-4d32-8557-0af07e45f409")) stored_buffers_i
     uint32_t depth_staging_w = 0;
     uint32_t depth_staging_h = 0;
 
+    // CaptureStatus.fx uniform — small always-on indicator driven from s_state.
+    effect_uniform_variable status_state_uniform = { 0 };
+
     void update(resource sr, resource_desc srd, resource_view srv) {
         export_texture_r = sr; export_texture_rd = srd; export_texture_rv = srv;
     }
@@ -270,6 +273,10 @@ static uint32_t s_prev_non_bb_total = 0;
 
 // Survey mode: Python writes fc_skip_count.txt to sweep skip values at runtime.
 static bool     s_survey_mode  = false;
+
+// High-level state from Python (fc_state.txt): "idle" / "surveying" / "capturing"
+static char     s_state[32]    = "idle";
+static bool     s_show_hints   = true;
 
 // Diagnostic: log first N capture frames to diagnose pre-UI detection
 static bool     s_cap_armed   = false;  // true in frames where sidecar exists + timer passed
@@ -659,6 +666,18 @@ static void on_begin_render_effects(effect_runtime* runtime, command_list*, reso
         for (uint32_t i = 0; i < n; i++)
             s_backbuffer_handles.insert(runtime->get_back_buffer(i).handle);
     }
+
+    // Drive CaptureStatus.fx uniform from the high-level state so the in-game
+    // indicator reflects idle / surveying / capturing.
+    if (sbi.status_state_uniform.handle == 0)
+        sbi.status_state_uniform = runtime->find_uniform_variable("CaptureStatus.fx", "Status_State");
+    if (sbi.status_state_uniform.handle != 0) {
+        int32_t v = 0;
+        if (std::strcmp(s_state, "surveying") == 0) v = 1;
+        else if (std::strcmp(s_state, "capturing") == 0) v = 2;
+        if (!s_show_hints) v = 0;  // hide indicator when hints disabled
+        runtime->set_uniform_value_int(sbi.status_state_uniform, &v, 1);
+    }
 }
 
 // ── Capture hot path ──────────────────────────────────────────────────────────
@@ -705,6 +724,25 @@ static void on_reshade_present(effect_runtime* runtime)
                 if (s_survey_mode) g_pre_ui_skip = (uint32_t)std::stoul(sl);
             } else {
                 s_survey_mode = false;
+            }
+        }
+
+        // High-level state + hint toggle (Python → addon).
+        {
+            std::ifstream sf(exe_fs.parent_path() / L"fc_state.txt");
+            std::string sl;
+            if (std::getline(sf, sl)) {
+                while (!sl.empty() && (sl.back() == '\r' || sl.back() == '\n')) sl.pop_back();
+                if (!sl.empty()) {
+                    strncpy(s_state, sl.c_str(), sizeof(s_state) - 1);
+                    s_state[sizeof(s_state) - 1] = '\0';
+                }
+            }
+            std::ifstream hf(exe_fs.parent_path() / L"fc_hints.txt");
+            std::string hl;
+            if (std::getline(hf, hl)) {
+                while (!hl.empty() && (hl.back() == '\r' || hl.back() == '\n')) hl.pop_back();
+                s_show_hints = (hl != "0" && !hl.empty());
             }
         }
 
@@ -1000,6 +1038,26 @@ static void draw_settings_overlay(effect_runtime* runtime)
         ImGui::SetWindowPos(ImVec2((IO.DisplaySize.x - 16.0f) / 2.75f, 8.0f));
         doOnce = true;
     }
+
+    // ── Hotkey hints + current state (driven by Python via fc_state.txt) ─────
+    if (s_show_hints) {
+        ImVec4 col = ImVec4(0.5f, 1.0f, 0.5f, 1.0f);  // green = idle
+        const char* label = "IDLE";
+        if (std::strcmp(s_state, "surveying") == 0) {
+            col = ImVec4(0.5f, 0.8f, 1.0f, 1.0f);     // blue = surveying
+            label = "SURVEYING";
+        } else if (std::strcmp(s_state, "capturing") == 0) {
+            col = ImVec4(1.0f, 0.4f, 0.4f, 1.0f);     // red = capturing
+            label = "CAPTURING";
+        }
+        ImGui::TextColored(col, "● 状态: %s", label);
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(1, 1, 0.6f, 1), "[F6] 开始 survey   [F8] 开始采集   [F9] 停止");
+        ImGui::Text("skip = %u   captured = %s", g_pre_ui_skip,
+                    s_pre_ui_captured ? "yes" : "no");
+        ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+    }
+
     if (ImGui::CollapsingHeader("Settings")) {
         ImGui::Spacing();
         modified |= ImGui::Checkbox("Enable capturing", &enableCapturing);

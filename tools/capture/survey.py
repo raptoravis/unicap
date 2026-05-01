@@ -13,6 +13,7 @@ Pre-UI skip 自动扫描工具。
   每次等待 ≥ 2 倍采集间隔可确保拿到正确帧。
 """
 
+import threading
 import time
 from pathlib import Path
 
@@ -43,13 +44,16 @@ def _read_pass_total(game_dir: Path) -> int | None:
         return None
 
 
-def _wait_for_bmp(survey_dir: Path, skip: int, timeout: float) -> Path | None:
+def _wait_for_bmp(survey_dir: Path, skip: int, timeout: float,
+                  abort: threading.Event | None = None) -> Path | None:
     """等待 survey_skip_NNN_BackBuffer.bmp 出现；先删旧文件防止误读。"""
     target = survey_dir / f"survey_skip_{skip:03d}_BackBuffer.bmp"
     if target.exists():
         target.unlink()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        if abort is not None and abort.is_set():
+            return None
         if target.exists():
             return target
         time.sleep(0.3)
@@ -142,6 +146,7 @@ def run(
     step: int = 5,
     fps: float = 1.0,
     timeout_per_skip: float = 10.0,
+    abort_event: threading.Event | None = None,
 ) -> int | None:
     """
     自动探测 pass 总数并扫描全范围，返回推荐 skip 值。
@@ -152,6 +157,7 @@ def run(
         step:              扫描步长（默认 5）
         fps:               采集帧率（默认 1fps）
         timeout_per_skip:  每个 skip 值等待超时秒数
+        abort_event:       外部中止信号（F9 等热键），set 后尽快返回 None
     """
     game_dir   = game_dir   or GAME_WIN64
     survey_dir = survey_dir or (DATASET_ROOT / "survey")
@@ -169,7 +175,7 @@ def run(
     _write_skip(game_dir, 0)
     fc_output_dir.write_text(str(survey_dir), encoding="utf-8")
 
-    bmp_0 = _wait_for_bmp(survey_dir, 0, timeout_per_skip + wait_per_skip)
+    bmp_0 = _wait_for_bmp(survey_dir, 0, timeout_per_skip + wait_per_skip, abort_event)
     if bmp_0 is None:
         print("[SURVEY] ✗ 未收到探测帧，请确认游戏正在运行且已按 F9 激活采集")
         _clear_skip(game_dir)
@@ -188,6 +194,9 @@ def run(
 
     if not total:
         print("[SURVEY] ✗ 未读到 fc_pass_total.txt，无法确定 pass 总数")
+        print(f"         (期望文件: {game_dir / 'fc_pass_total.txt'})")
+        print("         可能原因：游戏不在 3D 场景中（logo/主菜单/加载界面/cutscene 都没有 DSV pass）。")
+        print("         请进入实际游戏画面（角色可移动、看得到 3D 场景）后再按 F6 重试。")
         _clear_skip(game_dir)
         try:
             fc_output_dir.unlink(missing_ok=True)
@@ -206,11 +215,21 @@ def run(
     # ── Phase 2: 扫描 ─────────────────────────────────────────────────────────
     try:
         for skip in skip_values:
+            if abort_event is not None and abort_event.is_set():
+                print("[SURVEY] 收到中止信号，提前停止扫描")
+                break
             _write_skip(game_dir, skip)
-            time.sleep(wait_per_skip)
+            # interruptible wait
+            t_end = time.monotonic() + wait_per_skip
+            while time.monotonic() < t_end:
+                if abort_event is not None and abort_event.is_set():
+                    break
+                time.sleep(0.1)
 
-            bmp = _wait_for_bmp(survey_dir, skip, timeout_per_skip)
+            bmp = _wait_for_bmp(survey_dir, skip, timeout_per_skip, abort_event)
             if bmp is None:
+                if abort_event is not None and abort_event.is_set():
+                    break
                 print(f"  skip={skip:3d}: ✗ TIMEOUT")
                 continue
 
@@ -226,6 +245,9 @@ def run(
         except OSError:
             fc_output_dir.write_text("", encoding="utf-8")
 
+    if abort_event is not None and abort_event.is_set():
+        print("\n[SURVEY] 已中止，跳过分析")
+        return None
     if len(captured) < 2:
         print("\n[SURVEY] 帧数不足，无法分析")
         return None
@@ -233,6 +255,9 @@ def run(
     # ── Phase 3: 分析 ─────────────────────────────────────────────────────────
     print("\n[SURVEY] 分析差分…")
     recommended = _find_boundary(captured)
+
+    rec_file = survey_dir / "recommended_skip.txt"
+    rec_file.write_text(str(recommended), encoding="utf-8")
 
     ordered = sorted(captured.keys(), reverse=True)
     images = {s: cv2.imread(str(captured[s])) for s in ordered}
@@ -257,9 +282,7 @@ def run(
 
     step = args_step if (args_step := ordered[-2] - ordered[-1] if len(ordered) >= 2 else 5) > 0 else 5
     print(f"\n[SURVEY] 推荐 skip = {recommended}")
-    print(f"         如需精确定位，可对 skip {max(0, recommended - step*2)}~{recommended + step*2} 做精细扫描：")
-    print(f"           uv run main.py survey --no-launch --survey-step 1")
-    print(f"         确认后部署：")
-    print(f"           uv run main.py deploy --mode custom --pre-ui --pre-ui-skip {recommended}")
+    print(f"         已写入 {rec_file}")
+    print(f"         下次 launch 时会自动使用此 skip 值")
 
     return recommended

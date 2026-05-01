@@ -86,6 +86,9 @@ add_custom_target(shaders ALL
     COMMAND ${CMAKE_COMMAND} -E copy
         "${CMAKE_SOURCE_DIR}/shaders/UIRemove.fx"
         "${SHADER_DST}/UIRemove.fx"
+    COMMAND ${CMAKE_COMMAND} -E copy
+        "${CMAKE_SOURCE_DIR}/shaders/CaptureStatus.fx"
+        "${SHADER_DST}/CaptureStatus.fx"
     COMMENT "Staging shaders to dist/reshade-shaders/Shaders/"
 )
 

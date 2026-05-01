@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-unicap main controller
+unicap main controller — interactive in-game workflow.
+
+Hotkeys (game window must have focus):
+  F6  开始 survey（自动扫描 pre-UI skip）
+  F8  开始采集（如未 survey 过会先自动 survey）
+  F9  停止当前 survey/采集
 
 Usage:
-  python main.py deploy   [--mode custom|official592|official673] [--game-dir PATH]
-  python main.py launch   [--mode custom|official592|official673] [--fps N] [--duration SEC] [--deploy-only]
-  python main.py capture  [--fps N] [--duration SEC]
-  python main.py pack     [--frames-dir PATH] [--inputs PATH] [--output PATH]
-  python main.py pack     --spot-check PATH [--check-frames 0,99,499] [--check-out PATH]
+  uv run main.py launch [--mode M] [--game-path P] [--game-name N]
+                        [--dataset-root R] [--no-hints]
+  uv run main.py video  --frames-dir P [--output P] [--fps N]
+  uv run main.py pack   [--frames-dir P] [--inputs P] [--output P]
 """
 
 import argparse
@@ -18,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -31,38 +36,91 @@ ROOT = Path(__file__).parent
 CONFIG_DIR = ROOT / "config"
 UNICAP_TEMP = Path(tempfile.gettempdir()) / "unicap"
 
+# Capture defaults — change here if a different rate/resolution is needed.
+CAP_WIDTH  = 1600
+CAP_HEIGHT = 1200
+CAP_FPS    = 30
+SURVEY_FPS = 1.0   # Python wait cadence during survey sweep
+
+VK_F6, VK_F8, VK_F9 = 0x75, 0x77, 0x78
 _user32 = ctypes.WinDLL("user32")
 
-# F1–F12 → VK 0x70–0x7B; also support scroll lock (0x91) as a non-intrusive default
-_KEY_NAMES = {f"F{i}": 0x70 + i - 1 for i in range(1, 13)}
-_KEY_NAMES["SCROLLLOCK"] = 0x91
+
+# ── State sidecar (Python → addon) ────────────────────────────────────────────
+
+def _set_state(game_dir: Path, state: str) -> None:
+    """Write current high-level state to fc_state.txt for the addon overlay."""
+    try:
+        (game_dir / "fc_state.txt").write_text(state, encoding="utf-8")
+    except OSError:
+        pass
 
 
-def _wait_for_hotkey(key_name: str):
-    vk = _KEY_NAMES.get(key_name.upper())
-    if vk is None:
-        sys.exit(f"[错误] 不支持的 --start-key '{key_name}'，可用按键：{', '.join(_KEY_NAMES)}")
-    print(f"[LAUNCH] 在游戏中按 {key_name.upper()} 开始采集 (Ctrl+C 取消)...")
-    # drain any current press so we don't false-trigger immediately
-    while _user32.GetAsyncKeyState(vk) & 0x8000:
-        time.sleep(0.05)
+def _set_hints_flag(game_dir: Path, enabled: bool) -> None:
+    try:
+        (game_dir / "fc_hints.txt").write_text("1" if enabled else "0", encoding="utf-8")
+    except OSError:
+        pass
+
+
+# ── Hotkey polling ────────────────────────────────────────────────────────────
+
+def _key_down(vk: int) -> bool:
+    return bool(_user32.GetAsyncKeyState(vk) & 0x8000)
+
+
+def _drain_keys(vks, poll: float = 0.05) -> None:
+    while any(_key_down(vk) for vk in vks):
+        time.sleep(poll)
+
+
+def _wait_for_keys(vks, abort: threading.Event = None, poll: float = 0.05):
+    """Edge-detected wait for any of `vks`. Returns the pressed VK, or None on abort."""
+    _drain_keys(vks, poll)
     while True:
-        if _user32.GetAsyncKeyState(vk) & 0x8000:
-            print(f"[LAUNCH] {key_name.upper()} 已按下，开始采集\n")
-            return
-        time.sleep(0.05)
+        if abort is not None and abort.is_set():
+            return None
+        for vk in vks:
+            if _key_down(vk):
+                _drain_keys([vk], poll)
+                return vk
+        time.sleep(poll)
 
+
+def _spawn_f9_watcher(stop_event: threading.Event) -> threading.Event:
+    """Background thread that sets stop_event when F9 is pressed.
+    Returns a quit-event the caller can set to release the watcher early."""
+    quit_evt = threading.Event()
+
+    def watcher():
+        _drain_keys([VK_F9])
+        while not quit_evt.is_set() and not stop_event.is_set():
+            if _key_down(VK_F9):
+                stop_event.set()
+                return
+            time.sleep(0.05)
+
+    threading.Thread(target=watcher, daemon=True).start()
+    return quit_evt
+
+
+# ── Survey result lookup ──────────────────────────────────────────────────────
+
+def _load_recommended_skip(dataset_root: Path, game_name: str) -> int | None:
+    p = dataset_root / game_name / "survey" / "recommended_skip.txt"
+    try:
+        v = int(p.read_text(encoding="utf-8").strip())
+        return v if v >= 0 else None
+    except (OSError, ValueError):
+        return None
+
+
+# ── Game path resolution ──────────────────────────────────────────────────────
 
 _SKIP_EXE = {
-    "crashreportclient.exe",
-    "ue4prereqsetup_x64.exe",
-    "ueprereqsetup_x64.exe",
-    "dxsetup.exe",
-    "uninstall.exe",
-    "uninst.exe",
-    "vcredist_x64.exe",
-    "vc_redist.x64.exe",
-    "dotnetfx.exe",
+    "crashreportclient.exe", "ue4prereqsetup_x64.exe", "ueprereqsetup_x64.exe",
+    "dxsetup.exe", "uninstall.exe", "uninst.exe",
+    "vcredist_x64.exe", "vc_redist.x64.exe", "dotnetfx.exe",
 }
 
 
@@ -84,54 +142,49 @@ def _resolve_game_path(path_str: str):
 
 
 def _sources(mode: str):
-    """Returns (src_dll, src_addon, shader_src, deploy_shaders).
-
-    Shaders always need to be deployed: the addon enumerates `DepthToAddon_ExportTex`
-    by name and depends on DepthToAddon.fx + ReShade.fxh + UIRemove.fx being present.
-    """
     shader_src = ROOT / "shaders"
     dist = ROOT / "dist"
-    # custom: 6.7.3 DLL (no startup splash) + our compiled addon.
-    # BMP captured via UIRemove_ColorTex shader export, not capture_screenshot.
     if mode == "custom":
-        return dist / "dxgi.dll", dist / "frame_capture.addon", shader_src, True
+        return dist / "dxgi.dll", dist / "frame_capture.addon", shader_src
     if mode == "official592":
-        return ROOT / "vendor" / "reshade592" / "dxgi.dll", dist / "frame_capture.addon", shader_src, True
+        return ROOT / "vendor" / "reshade592" / "dxgi.dll", dist / "frame_capture.addon", shader_src
     addon = ROOT / "vendor" / "addon_official" / "frame_capture.addon"
-    return ROOT / "vendor" / "reshade673" / "dxgi.dll", addon, shader_src, True
+    return ROOT / "vendor" / "reshade673" / "dxgi.dll", addon, shader_src
 
 
-def _ensure_addon_enabled(addon_dir: Path, cap_width: int = 1600, cap_height: int = 1200,
-                           cap_fps: int = 30, pre_ui: bool = True, pre_ui_skip: int = 0):
+# ── unicap.ini / preset writers ───────────────────────────────────────────────
+
+def _ensure_addon_enabled(addon_dir: Path, pre_ui_skip: int = 0):
     UNICAP_TEMP.mkdir(parents=True, exist_ok=True)
     ini = UNICAP_TEMP / "unicap.ini"
     cfg = configparser.RawConfigParser()
-    cfg.optionxform = str  # preserve key case
+    cfg.optionxform = str
     if ini.exists():
         cfg.read(ini, encoding="utf-8")
-    for section, key, value in [
+    settings = [
         ("ADDON", "AddonPath", str(addon_dir)),
         ("ADDON", "FC_EnableCapture", "1"),
         ("ADDON", "FC_ExportDepth", "1"),
         ("ADDON", "FC_ExportNormal", "0"),
-        ("ADDON", "FC_CaptureWidth", str(cap_width)),
-        ("ADDON", "FC_CaptureHeight", str(cap_height)),
-        ("ADDON", "FC_TargetFPS", str(cap_fps)),
-        ("ADDON", "FC_PreUICapture",  "1" if pre_ui else "0"),
+        ("ADDON", "FC_CaptureWidth", str(CAP_WIDTH)),
+        ("ADDON", "FC_CaptureHeight", str(CAP_HEIGHT)),
+        ("ADDON", "FC_TargetFPS", str(CAP_FPS)),
+        ("ADDON", "FC_PreUICapture", "1"),
         ("ADDON", "FC_PreUISkipCount", str(pre_ui_skip)),
         ("GENERAL", "EffectSearchPaths", str(ROOT / "shaders")),
         ("GENERAL", "IntermediateCachePath", str(UNICAP_TEMP)),
         ("GENERAL", "TextureSearchPaths", str(ROOT / "shaders")),
         ("GENERAL", "PresetPath", str(CONFIG_DIR / "unicapPreset.ini")),
         ("OVERLAY", "ShowScreenshotMessage", "0"),
-        ("INPUT", "KeyOverlay",      "0,0,0,0"),
-        ("INPUT", "KeyScreenshot",   "0,0,0,0"),
-        ("INPUT", "KeyEffects",      "0,0,0,0"),
-        ("INPUT", "KeyReload",       "0,0,0,0"),
-        ("INPUT", "KeyNextPreset",   "0,0,0,0"),
-        ("INPUT", "KeyPreviousPreset","0,0,0,0"),
         ("OVERLAY", "TutorialProgress", "4"),
-    ]:
+        ("INPUT", "KeyOverlay", "0,0,0,0"),
+        ("INPUT", "KeyScreenshot", "0,0,0,0"),
+        ("INPUT", "KeyEffects", "0,0,0,0"),
+        ("INPUT", "KeyReload", "0,0,0,0"),
+        ("INPUT", "KeyNextPreset", "0,0,0,0"),
+        ("INPUT", "KeyPreviousPreset", "0,0,0,0"),
+    ]
+    for section, key, value in settings:
         if not cfg.has_section(section):
             cfg.add_section(section)
         cfg.set(section, key, value)
@@ -140,35 +193,33 @@ def _ensure_addon_enabled(addon_dir: Path, cap_width: int = 1600, cap_height: in
 
 
 def _ensure_preset():
-    # Preset lives in repo config/, pointed to by PresetPath in ReShade.ini.
-    # Technique order is locked: DepthToAddon first (writes custom RT),
-    # UIRemove last (restores original BackBuffer to swap chain).
     CONFIG_DIR.mkdir(exist_ok=True)
     preset = CONFIG_DIR / "unicapPreset.ini"
-    techniques = "DepthToAddon@DepthToAddon.fx,UIRemove@UIRemove.fx"
+    # CaptureStatus runs last so the indicator overlays the displayed backbuffer
+    # without affecting UIRemove_ColorTex (taken in UIRemove's first pass).
+    techniques = "DepthToAddon@DepthToAddon.fx,UIRemove@UIRemove.fx,CaptureStatus@CaptureStatus.fx"
     content = f"Techniques={techniques}\nTechniqueSorting={techniques}\n"
-    if not preset.exists() or "DepthToAddon@DepthToAddon.fx" not in preset.read_text(encoding="utf-8"):
+    existing = preset.read_text(encoding="utf-8") if preset.exists() else ""
+    if "CaptureStatus@CaptureStatus.fx" not in existing:
         preset.write_text(content, encoding="utf-8")
 
 
-
 def _symlink_file(src: Path, dst: Path):
-    """Create symlink dst → src. Falls back to copy if privilege denied (enable Developer Mode)."""
     if dst.is_symlink() or dst.exists():
         dst.unlink()
     try:
         os.symlink(str(src), str(dst))
-        # print(f"[LINK]  {dst.name} → {src}")
-        pass
     except OSError as e:
-        print(f"[警告] 无法创建符号链接（{e.strerror}），改用复制（可启用 Windows 开发者模式以使用符号链接）")
+        print(f"[警告] 无法创建符号链接（{e.strerror}），改用复制（可启用 Windows 开发者模式）")
         shutil.copy2(src, dst)
         print(f"[COPY]  {dst.name}")
 
 
+# ── Subcommand: deploy ────────────────────────────────────────────────────────
+
 def cmd_deploy(args):
-    src_dll, src_addon, _shader_src, _deploy_shaders = _sources(args.mode)
-    game_dir, _ = _resolve_game_path(args.game_path)
+    src_dll, src_addon, _ = _sources(args.mode)
+    game_dir, game_exe = _resolve_game_path(args.game_path)
 
     for f in [src_dll, src_addon]:
         if not f.exists():
@@ -178,73 +229,162 @@ def cmd_deploy(args):
     bak = game_dir / "dxgi.dll.bak"
     if dst_dll.exists() and not dst_dll.is_symlink() and not bak.exists():
         shutil.copy2(dst_dll, bak)
-
     _symlink_file(src_dll, dst_dll)
 
-    # unicap.ini and unicap.log go to UNICAP_TEMP; game dir stays clean.
-    # RESHADE_BASE_PATH_OVERRIDE env var redirects ReShade's base path at launch time.
-    cap_width    = getattr(args, "width",        1600) or 1600
-    cap_height   = getattr(args, "height",       1200) or 1200
-    cap_fps      = getattr(args, "fps",          30)   or 30
-    pre_ui       = getattr(args, "pre_ui",       True)
-    pre_ui_skip  = getattr(args, "pre_ui_skip",  0)    or 0
-    _ensure_addon_enabled(src_addon.parent, cap_width, cap_height, cap_fps, pre_ui, pre_ui_skip)
-    _ensure_preset()
-
-
-def cmd_capture(args):
-    tag = datetime.now().strftime("%Y%m%d_%H%M%S")
-    dataset_root = Path(args.dataset_root) if getattr(args, "dataset_root", None) else DATASET_ROOT
-    game_name = getattr(args, "game_name", "") or ""
-    watch_dir = getattr(args, "watch_dir", None)
-    if watch_dir is None:
-        game_dir, game_exe = _resolve_game_path(args.game_path)
-        watch_dir = game_dir
-        if not game_name:
-            game_name = game_exe.stem
-    game_name = game_name or "capture"
-    session_dir = dataset_root / game_name / tag
-    frames_dir = session_dir / "frames"
-    inputs_out = session_dir / "inputs.jsonl"
-    hdf5_out = session_dir / "dataset.h5"
-    video_out = session_dir / "video.mp4"
-    session_dir.mkdir(parents=True, exist_ok=True)
-    capture_all.run(
-        fps=args.fps,
-        duration=args.duration if args.duration > 0 else None,
-        frames_dir=frames_dir,
-        inputs_out=inputs_out,
-        watch_dir=watch_dir,
-    )
-    _make_video(frames_dir, video_out, args.fps)
-    print(f"\n[会话] {session_dir}")
-    if getattr(args, "no_pack", False):
-        print(f"       打包命令: uv run main.py pack --frames-dir {frames_dir} --inputs {inputs_out} --output {hdf5_out}")
+    dataset_root_arg = getattr(args, "dataset_root", "") or ""
+    dataset_root = Path(dataset_root_arg) if dataset_root_arg else DATASET_ROOT
+    game_name = getattr(args, "game_name", "") or game_exe.stem
+    pre_ui_skip = _load_recommended_skip(dataset_root, game_name)
+    if pre_ui_skip is not None:
+        print(f"[DEPLOY] 自动加载 survey 推荐 pre_ui_skip={pre_ui_skip}（{game_name}）")
     else:
-        print("[PACK] 开始自动打包...")
-        pack_hdf5.pack(
-            frames_dir=frames_dir,
-            inputs_path=inputs_out,
-            output_path=hdf5_out,
-        )
+        pre_ui_skip = 0
 
+    _ensure_addon_enabled(src_addon.parent, pre_ui_skip=pre_ui_skip)
+    _ensure_preset()
+    return game_dir, game_exe, game_name, dataset_root
+
+
+# ── Subcommand: launch (interactive) ──────────────────────────────────────────
 
 def cmd_launch(args):
-    cmd_deploy(args)
-    if args.deploy_only:
-        print("\n[完成] 仅部署，未启动采集")
-        return
+    game_dir, game_exe, game_name, dataset_root = cmd_deploy(args)
 
-    game_dir, game_exe = _resolve_game_path(args.game_path)
-    if not args.game_name:
-        args.game_name = game_exe.stem
-    args.watch_dir = game_dir
     print(f"\n[启动] {game_exe}")
     env = {**os.environ, "RESHADE_BASE_PATH_OVERRIDE": str(UNICAP_TEMP)}
     subprocess.Popen([str(game_exe)], cwd=str(game_dir), env=env)
-    _wait_for_hotkey(args.start_key)
-    cmd_capture(args)
 
+    _set_hints_flag(game_dir, args.hints)
+    _set_state(game_dir, "idle")
+
+    if args.hints:
+        print()
+        print("┌─ 操作提示 ────────────────────────────────────────────┐")
+        print("│  F6  开始 survey（自动扫描无 UI 的 skip 值）          │")
+        print("│  F8  开始采集（首次会先自动 survey）                  │")
+        print("│  F9  停止当前 survey 或采集                           │")
+        print("│  Ctrl+C  退出 main.py（不会关闭游戏）                 │")
+        print("└──────────────────────────────────────────────────────┘\n")
+
+    try:
+        _interactive_loop(args, game_dir, game_name, dataset_root)
+    except KeyboardInterrupt:
+        print("\n[退出] Ctrl+C，main.py 退出。游戏继续运行。")
+    finally:
+        _set_state(game_dir, "idle")
+
+
+def _interactive_loop(args, game_dir: Path, game_name: str, dataset_root: Path):
+    while True:
+        _set_state(game_dir, "idle")
+        print("[等待] 按 F6 = survey   F8 = 采集   (Ctrl+C 退出)")
+        key = _wait_for_keys([VK_F6, VK_F8])
+
+        if key == VK_F6:
+            _run_survey(args, game_dir, game_name, dataset_root)
+
+        elif key == VK_F8:
+            ran_survey = False
+            if _load_recommended_skip(dataset_root, game_name) is None:
+                print("[F8] 未检测到 survey 推荐值，先自动 survey…")
+                ok = _run_survey(args, game_dir, game_name, dataset_root)
+                ran_survey = True
+                if not ok:
+                    print("[F8] survey 未完成，已取消采集。再次按 F8 重试")
+                    continue
+            _run_capture(game_dir, game_name, dataset_root, just_surveyed=ran_survey)
+
+
+def _run_survey(args, game_dir: Path, game_name: str, dataset_root: Path) -> bool:
+    """Returns True if survey produced a recommendation."""
+    _set_state(game_dir, "surveying")
+    print("\n[SURVEY] 开始扫描…（F9 中止）")
+
+    abort = threading.Event()
+    quit_watcher = _spawn_f9_watcher(abort)
+
+    survey_dir = dataset_root / game_name / "survey"
+    try:
+        recommended = survey_mod.run(
+            game_dir=game_dir,
+            survey_dir=survey_dir,
+            step=5,
+            fps=SURVEY_FPS,
+            timeout_per_skip=10.0,
+            abort_event=abort,
+        )
+    finally:
+        quit_watcher.set()
+        _set_state(game_dir, "idle")
+
+    if abort.is_set():
+        print("[SURVEY] F9 中止")
+        return False
+    if recommended is None:
+        return False
+
+    # Persist recommendation to ini for next deploy
+    src_addon = _sources(args.mode)[1]
+    _ensure_addon_enabled(src_addon.parent, pre_ui_skip=recommended)
+
+    # Make the new skip take effect immediately in the running game:
+    # one-shot survey-mode write so the addon picks up `recommended`,
+    # then clear so subsequent capture frames use normal filenames.
+    _write_skip_pulse(game_dir, recommended)
+    return True
+
+
+def _write_skip_pulse(game_dir: Path, skip: int):
+    """Write fc_skip_count.txt = skip; wait one capture interval; clear it.
+    Causes the addon to update g_pre_ui_skip and exit survey filename mode."""
+    p = game_dir / "fc_skip_count.txt"
+    try:
+        p.write_text(str(skip), encoding="utf-8")
+        time.sleep(max(2.0 / max(CAP_FPS, 1), 0.5))  # ≥ 2 frames at CAP_FPS
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            p.write_text("", encoding="utf-8")
+    except OSError as e:
+        print(f"[WARN] 无法写 fc_skip_count.txt: {e}")
+
+
+def _run_capture(game_dir: Path, game_name: str, dataset_root: Path, just_surveyed: bool):
+    _set_state(game_dir, "capturing")
+    tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_dir = dataset_root / game_name / tag
+    frames_dir = session_dir / "frames"
+    inputs_out = session_dir / "inputs.jsonl"
+    hdf5_out   = session_dir / "dataset.h5"
+    video_out  = session_dir / "video.mp4"
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n[CAPTURE] 开始采集 (F9 停止) → {session_dir}")
+    if just_surveyed:
+        time.sleep(0.5)  # let the post-survey skip pulse settle
+
+    stop_event = threading.Event()
+    quit_watcher = _spawn_f9_watcher(stop_event)
+    try:
+        capture_all.run(
+            fps=CAP_FPS,
+            duration=None,
+            frames_dir=frames_dir,
+            inputs_out=inputs_out,
+            watch_dir=game_dir,
+            stop_event=stop_event,
+        )
+    finally:
+        quit_watcher.set()
+        _set_state(game_dir, "idle")
+
+    _make_video(frames_dir, video_out, CAP_FPS)
+    print(f"[会话] {session_dir}")
+    print("[PACK] 开始打包 HDF5…")
+    pack_hdf5.pack(frames_dir=frames_dir, inputs_path=inputs_out, output_path=hdf5_out)
+
+
+# ── Video + pack ──────────────────────────────────────────────────────────────
 
 def _make_video(frames_dir: Path, output: Path, fps: int):
     import cv2
@@ -265,33 +405,16 @@ def _make_video(frames_dir: Path, output: Path, fps: int):
 
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg:
-        cmd = [
-            ffmpeg,
-            "-y",
-            "-f",
-            "rawvideo",
-            "-vcodec",
-            "rawvideo",
-            "-s",
-            f"{w}x{h}",
-            "-pix_fmt",
-            "bgr24",
-            "-r",
-            str(fps),
-            "-i",
-            "pipe:",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-crf",
-            "18",
-            str(output),
-        ]
-        # libx264 requires even dimensions
         w_enc = w - (w % 2)
         h_enc = h - (h % 2)
-        cmd[cmd.index(f"{w}x{h}")] = f"{w_enc}x{h_enc}"
+        cmd = [
+            ffmpeg, "-y",
+            "-f", "rawvideo", "-vcodec", "rawvideo",
+            "-s", f"{w_enc}x{h_enc}", "-pix_fmt", "bgr24",
+            "-r", str(fps), "-i", "pipe:",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
+            str(output),
+        ]
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         ok = True
         for i, bmp in enumerate(bmps):
@@ -307,7 +430,7 @@ def _make_video(frames_dir: Path, output: Path, fps: int):
             if (i + 1) % fps == 0:
                 print(f"[VIDEO] {i + 1}/{len(bmps)} 帧", flush=True)
         proc.stdin.close()
-        stderr_out = proc.stderr.read()  # drain before wait() to prevent pipe deadlock
+        stderr_out = proc.stderr.read()
         proc.wait()
         if not ok or proc.returncode != 0:
             print(f"[VIDEO] ffmpeg 失败 (code {proc.returncode}):\n{stderr_out.decode(errors='replace')}")
@@ -323,40 +446,6 @@ def _make_video(frames_dir: Path, output: Path, fps: int):
         writer.release()
 
     print(f"[VIDEO] 完成：{len(bmps)} 帧 @ {fps}fps → {output}")
-
-
-def cmd_survey(args):
-    game_dir, game_exe = _resolve_game_path(args.game_path)
-    game_name = getattr(args, "game_name", "") or game_exe.stem
-    dataset_root = Path(args.dataset_root) if getattr(args, "dataset_root", None) else DATASET_ROOT
-
-    # Deploy first so the addon is up to date
-    args.pre_ui      = True
-    args.pre_ui_skip = 0
-    cmd_deploy(args)
-
-    if not args.no_launch:
-        print(f"\n[启动] {game_exe}")
-        env = {**os.environ, "RESHADE_BASE_PATH_OVERRIDE": str(UNICAP_TEMP)}
-        subprocess.Popen([str(game_exe)], cwd=str(game_dir), env=env)
-        _wait_for_hotkey(args.start_key)
-
-    survey_dir = Path(args.survey_dir) if args.survey_dir else dataset_root / game_name / "survey"
-    recommended = survey_mod.run(
-        game_dir=game_dir,
-        survey_dir=survey_dir,
-        step=args.survey_step,
-        fps=args.fps,
-        timeout_per_skip=args.timeout,
-    )
-
-    if recommended is not None and not args.dry_run:
-        print(f"\n[SURVEY] 自动写入推荐 skip={recommended} 到 unicap.ini")
-        _ensure_addon_enabled(
-            _sources(args.mode)[1].parent,
-            pre_ui=True,
-            pre_ui_skip=recommended,
-        )
 
 
 def cmd_video(args):
@@ -375,75 +464,26 @@ def cmd_pack(args):
         )
 
 
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
 def main():
     parser = argparse.ArgumentParser(prog="main.py")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("deploy", help="部署 ReShade DLL + addon 到游戏目录")
-    p.add_argument("--mode", choices=["custom", "official592", "official673"], default="custom")
-    p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录（目录时自动寻找最大 exe）")
-    p.add_argument("--width",  type=int, default=1600, metavar="W", help="采集分辨率宽（0=原始分辨率，默认1600）")
-    p.add_argument("--height", type=int, default=1200, metavar="H", help="采集分辨率高（0=原始分辨率，默认1200）")
-    p.add_argument("--pre-ui", action=argparse.BooleanOptionalAction, default=True,
-                   help="在 HUD 绘制前采集 BackBuffer（默认开启）")
-    p.add_argument("--pre-ui-skip", type=int, default=0, metavar="N",
-                   help="跳过前 N 次无 DSV 的 BackBuffer 绑定（调参用，默认 0）")
-
-    p = sub.add_parser("capture", help="启动采集（不部署）")
-    p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录，用于确定帧文件监视目录")
-    p.add_argument("--game-name", default="", help="游戏名（输出路径第一级，默认从 --game-path 推导）")
-    p.add_argument("--dataset-root", default="", metavar="PATH",
-                   help="数据集根目录（默认使用 config.py 中的 DATASET_ROOT）")
-    p.add_argument("--fps", type=int, default=30)
-    p.add_argument("--duration", type=float, default=0, metavar="SEC", help="录制秒数，0=无限")
-    p.add_argument("--no-pack", action="store_true", help="采集结束后跳过自动 HDF5 打包")
-
-    p = sub.add_parser("launch", help="部署 + 启动游戏 + 采集")
-    p.add_argument("--mode", choices=["custom", "official592", "official673"], default="custom")
-    p.add_argument("--game-path", default=str(GAME_PATH), help="游戏 exe 路径或目录")
-    p.add_argument("--game-name", default="", help="游戏名（输出路径第一级，默认从 exe 文件名推导）")
-    p.add_argument("--dataset-root", default="", metavar="PATH",
-                   help="数据集根目录（默认使用 config.py 中的 DATASET_ROOT）")
-    p.add_argument("--start-key", default="F9", help="游戏内按此键触发采集，支持 F1-F12 / ScrollLock（默认 F9）")
-    p.add_argument("--fps", type=int, default=30)
-    p.add_argument("--duration", type=float, default=10, metavar="SEC")
-    p.add_argument("--deploy-only", action="store_true")
-    p.add_argument("--no-pack", action="store_true", help="采集结束后跳过自动 HDF5 打包")
-    p.add_argument("--width",  type=int, default=1600, metavar="W", help="采集分辨率宽（0=原始分辨率，默认1600）")
-    p.add_argument("--height", type=int, default=1200, metavar="H", help="采集分辨率高（0=原始分辨率，默认1200）")
-    p.add_argument("--pre-ui", action=argparse.BooleanOptionalAction, default=True,
-                   help="在 HUD 绘制前采集 BackBuffer（默认开启）")
-    p.add_argument("--pre-ui-skip", type=int, default=0, metavar="N",
-                   help="跳过前 N 次无 DSV 的 BackBuffer 绑定（调参用，默认 0）")
-
-    p = sub.add_parser("survey", help="自动扫描 pre_ui_skip 范围，找到 UI 消失的临界值")
+    p = sub.add_parser("launch", help="部署 + 启动游戏 + 进入交互式 F6/F8/F9 工作流")
     p.add_argument("--mode", choices=["custom", "official592", "official673"], default="custom")
     p.add_argument("--game-path", default=str(GAME_PATH))
-    p.add_argument("--game-name", default="", help="游戏名（输出路径第一级，默认从 exe 文件名推导）")
-    p.add_argument("--dataset-root", default="", metavar="PATH",
-                   help="数据集根目录（默认使用 config.py 中的 DATASET_ROOT）")
-    p.add_argument("--start-key", default="F9")
-    p.add_argument("--fps", type=float, default=1.0, metavar="FPS",
-                   help="扫描时的采集帧率（默认 1fps）")
-    p.add_argument("--survey-step", type=int, default=5, metavar="STEP",
-                   help="skip 步长（默认 5）")
-    p.add_argument("--survey-dir", default="", metavar="PATH",
-                   help="扫描帧保存目录（覆盖默认的 DATASET_ROOT/<game>/survey）")
-    p.add_argument("--timeout", type=float, default=10.0, metavar="SEC",
-                   help="每个 skip 值等待超时（默认 10s）")
-    p.add_argument("--no-launch", action="store_true",
-                   help="不启动游戏（游戏已在运行时使用）")
-    p.add_argument("--dry-run", action="store_true",
-                   help="只分析，不自动写入推荐 skip 到 unicap.ini")
-    p.add_argument("--width",  type=int, default=1600, metavar="W")
-    p.add_argument("--height", type=int, default=1200, metavar="H")
+    p.add_argument("--game-name", default="", help="游戏名（输出路径第一级，默认从 exe 推导）")
+    p.add_argument("--dataset-root", default="", metavar="PATH")
+    p.add_argument("--hints", action=argparse.BooleanOptionalAction, default=True,
+                   help="显示控制台 + addon overlay 操作提示（默认开启）")
 
-    p = sub.add_parser("video", help="从 frames 目录生成 MP4 视频")
+    p = sub.add_parser("video", help="从 frames 目录生成 MP4")
     p.add_argument("--frames-dir", default=str(FRAMES_DIR))
     p.add_argument("--output", default=str(DATASET_ROOT / "video.mp4"))
-    p.add_argument("--fps", type=int, default=30)
+    p.add_argument("--fps", type=int, default=CAP_FPS)
 
-    p = sub.add_parser("pack", help="pack frame data into HDF5")
+    p = sub.add_parser("pack", help="把 frames + inputs 打包成 HDF5")
     p.add_argument("--frames-dir", default=str(FRAMES_DIR))
     p.add_argument("--inputs", default=str(INPUTS_OUT))
     p.add_argument("--output", default=str(HDF5_OUT))
@@ -452,8 +492,7 @@ def main():
     p.add_argument("--check-out", default=str(DATASET_ROOT / "spot_checks"))
 
     args = parser.parse_args()
-    {"deploy": cmd_deploy, "capture": cmd_capture, "launch": cmd_launch,
-     "survey": cmd_survey, "video": cmd_video, "pack": cmd_pack}[args.cmd](args)
+    {"launch": cmd_launch, "video": cmd_video, "pack": cmd_pack}[args.cmd](args)
 
 
 if __name__ == "__main__":

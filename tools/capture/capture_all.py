@@ -92,7 +92,14 @@ def _thread_input(stop: threading.Event, inputs_out: Path):
     print(f"[INPUT ] 完成：{count} 条，{elapsed:.1f}s，{count/elapsed:.1f} Hz → {inputs_out}")
 
 # ── 主入口 ────────────────────────────────────────────────────────────────────
-def run(fps: int = 30, duration=None, frames_dir: Path = None, inputs_out: Path = None, watch_dir: Path = None):
+def run(fps: int = 30, duration=None, frames_dir: Path = None, inputs_out: Path = None,
+        watch_dir: Path = None, stop_event: threading.Event = None):
+    """
+    采集帧 + 输入。停止条件（任一触发即停）：
+      - 外部 stop_event 被 set（F9 热键）
+      - duration 秒数到（仅在 duration > 0 时生效）
+      - Ctrl+C
+    """
     frames_dir = frames_dir or FRAMES_DIR
     inputs_out = inputs_out or INPUTS_OUT
     watch_dir  = watch_dir  or GAME_WIN64
@@ -103,12 +110,12 @@ def run(fps: int = 30, duration=None, frames_dir: Path = None, inputs_out: Path 
     sidecar = watch_dir / "fc_output_dir.txt"
     sidecar.write_text(str(frames_dir), encoding="utf-8")
 
-    print(f"[采集] fps={fps}  时长={'∞' if not duration else f'{duration}s'}")
+    stop_label = "F9/Ctrl+C" if stop_event is not None else ("Ctrl+C" if not duration else f"{duration}s/Ctrl+C")
+    print(f"[采集] fps={fps}  停止={stop_label}")
     print(f"       帧 → {frames_dir}")
-    print(f"       输入 → {inputs_out}")
-    print("       Ctrl+C 随时停止\n")
+    print(f"       输入 → {inputs_out}\n")
 
-    stop = threading.Event()
+    stop = stop_event if stop_event is not None else threading.Event()
     t_input = threading.Thread(target=_thread_input, args=(stop, inputs_out), name="input", daemon=True)
     t_input.start()
 

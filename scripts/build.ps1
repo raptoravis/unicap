@@ -36,6 +36,4 @@ Write-Host "  dxgi.dll              (ReShade core)" -ForegroundColor Gray
 Write-Host "  frame_capture.addon   (frame capture addon)" -ForegroundColor Gray
 Write-Host "  reshade-shaders\Shaders\*.fx" -ForegroundColor Gray
 Write-Host "`nNext steps:" -ForegroundColor White
-Write-Host "  uv run main.py deploy          # deploy to game directory" -ForegroundColor Gray
-Write-Host "  uv run main.py launch          # deploy + start capture" -ForegroundColor Gray
-Write-Host "  uv run main.py capture         # capture only (no deploy)" -ForegroundColor Gray
+Write-Host "  uv run main.py launch          # deploy + start game + F6/F8/F9 loop" -ForegroundColor Gray
