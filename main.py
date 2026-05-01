@@ -9,17 +9,17 @@ Hotkeys (game window must have focus):
 
 Usage:
   uv run main.py launch [--game-path P] [--game-name N]
-                        [--dataset-root R] [--ui-mode {no-ui,ui-only,both}]
+                        [--dataset-root R] [--ui-mode {no-ui,ui,both}]
                         [--no-hints] [--no-video] [--pack]
-  uv run main.py video  GAME_DIR [--fps N]
-  uv run main.py pack   GAME_DIR
+  uv run main.py video  --game-dir DIR [--fps N]
+  uv run main.py pack   --game-dir DIR [--no-depth]
 
-video / pack: 扫描 GAME_DIR 下所有采集会话（dataset-root/<game>/<timestamp>/），
+video / pack: 扫描 --game-dir 下所有采集会话（dataset-root/<game>/<timestamp>/），
               为缺少 video.mp4 / dataset.h5 的会话生成；已存在则跳过。
 
 ui-mode:
   no-ui    只输出 pre-UI 帧（默认；F6 survey 必需）
-  ui-only  只输出 post-UI BackBuffer 帧（不需 survey；F6 无效）
+  ui       只输出 post-UI BackBuffer 帧（不需 survey；F6 无效）
   both     两路并行输出（pre-UI + post-UI；F6 survey 必需）
 """
 
@@ -171,8 +171,8 @@ SHADER_SRC = ROOT / "shaders"
 # ── unicap.ini / preset writers ───────────────────────────────────────────────
 
 def _ensure_addon_enabled(addon_dir: Path, pre_ui_skip: int = 0, ui_mode: str = "no-ui"):
-    """ui_mode: 'no-ui' (pre-UI only) | 'ui-only' (post-UI BB only) | 'both' (pre-UI + post-UI)."""
-    pre_ui_flag  = "0" if ui_mode == "ui-only" else "1"
+    """ui_mode: 'no-ui' (pre-UI only) | 'ui' (post-UI BB only) | 'both' (pre-UI + post-UI)."""
+    pre_ui_flag  = "0" if ui_mode == "ui" else "1"
     both_flag    = "1" if ui_mode == "both" else "0"
     UNICAP_TEMP.mkdir(parents=True, exist_ok=True)
     ini = UNICAP_TEMP / "unicap.ini"
@@ -281,7 +281,7 @@ def cmd_launch(args):
         ui_mode = getattr(args, "ui_mode", "no-ui")
         print()
         print(f"┌─ 操作提示 (ui-mode={ui_mode}) ────────────────────────┐")
-        if ui_mode == "ui-only":
+        if ui_mode == "ui":
             print("│  F8  开始采集 post-UI BackBuffer（无需 survey）       │")
         elif ui_mode == "both":
             print("│  F6  开始 survey（自动扫描无 UI 的 skip 值）          │")
@@ -303,7 +303,7 @@ def cmd_launch(args):
 
 def _interactive_loop(args, game_dir: Path, game_name: str, dataset_root: Path):
     ui_mode = getattr(args, "ui_mode", "no-ui")
-    needs_survey = ui_mode != "ui-only"  # ui-only 直接抓 BackBuffer，无需 skip
+    needs_survey = ui_mode != "ui"  # ui 模式直接抓 BackBuffer，无需 skip
 
     while True:
         _set_state(game_dir, "idle")
@@ -552,7 +552,7 @@ def _make_video(frames_dir: Path, output: Path, fps: float = 0,
 
 def cmd_video(args):
     if not args.game_dir:
-        sys.exit("[错误] video 需要游戏目录参数：uv run main.py video <GAME_DIR>")
+        sys.exit("[错误] video 需要游戏目录参数：uv run main.py video --game-dir <DIR>")
 
     game_dir = Path(args.game_dir)
     if not game_dir.is_dir():
@@ -608,7 +608,7 @@ def cmd_pack(args):
         return
 
     if not args.game_dir:
-        sys.exit("[错误] pack 需要游戏目录参数：uv run main.py pack <GAME_DIR>")
+        sys.exit("[错误] pack 需要游戏目录参数：uv run main.py pack --game-dir <DIR>")
 
     game_dir = Path(args.game_dir)
     if not game_dir.is_dir():
@@ -640,7 +640,8 @@ def cmd_pack(args):
         print(f"\n[PACK] {sess.name} →")
         t0 = time.perf_counter()
         try:
-            pack_hdf5.pack(frames_dir=frames, inputs_path=inputs, output_path=h5)
+            pack_hdf5.pack(frames_dir=frames, inputs_path=inputs, output_path=h5,
+                           include_depth=args.depth)
         except Exception as e:
             elapsed = time.perf_counter() - t0
             print(f"[ERROR] {sess.name} 失败：{e}  耗时 {_fmt_dur(elapsed)}")
@@ -663,8 +664,8 @@ def main():
     p.add_argument("--game-path", default=str(GAME_PATH))
     p.add_argument("--game-name", default="", help="游戏名（输出路径第一级，默认从 exe 推导）")
     p.add_argument("--dataset-root", default="", metavar="PATH")
-    p.add_argument("--ui-mode", choices=["no-ui", "ui-only", "both"], default="no-ui",
-                   help="输出: no-ui=只 pre-UI（默认）, ui-only=只 post-UI BB（无需 survey）, both=双流")
+    p.add_argument("--ui-mode", choices=["no-ui", "ui", "both"], default="no-ui",
+                   help="输出: no-ui=只 pre-UI（默认）, ui=只 post-UI BB（无需 survey）, both=双流")
     p.add_argument("--hints", action=argparse.BooleanOptionalAction, default=True,
                    help="显示控制台 + addon overlay 操作提示（默认开启）")
     p.add_argument("--video", action=argparse.BooleanOptionalAction, default=True,
@@ -673,14 +674,16 @@ def main():
                    help="F9 停止采集后立即打包 HDF5（默认不打包）")
 
     p = sub.add_parser("video", help="批量生成游戏目录下所有缺失的 video.mp4 / video_ui.mp4")
-    p.add_argument("game_dir", nargs="?", default="",
+    p.add_argument("--game-dir", default="", metavar="DIR",
                    help="dataset-root 下的游戏目录（其下含 <YYYYMMDD_HHMMSS>/frames/ 子目录）")
     p.add_argument("--fps", type=float, default=0,
                    help="编码 fps；默认 0 = 从 BMP 文件名时间戳自动估算（推荐）")
 
     p = sub.add_parser("pack", help="批量打包游戏目录下所有采集会话；已有 dataset.h5 跳过")
-    p.add_argument("game_dir", nargs="?", default="",
+    p.add_argument("--game-dir", default="", metavar="DIR",
                    help="dataset-root 下的游戏目录（其下含 <YYYYMMDD_HHMMSS>/frames/ 子目录）")
+    p.add_argument("--depth", action=argparse.BooleanOptionalAction, default=True,
+                   help="包含 /depth + /normal + UI mask（默认开启；--no-depth 跳过 EXR、只打 color）")
     p.add_argument("--spot-check", metavar="H5_PATH")
     p.add_argument("--check-frames", default="0,99,499")
     p.add_argument("--check-out", default=str(DATASET_ROOT / "spot_checks"))

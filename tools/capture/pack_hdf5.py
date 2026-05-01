@@ -232,13 +232,19 @@ def _load_normal(path: Path) -> np.ndarray:
 
 # ─── HDF5 打包 ────────────────────────────────────────────────────────────────
 
-def pack(frames_dir: Path, inputs_path: Path, output_path: Path):
+def pack(frames_dir: Path, inputs_path: Path, output_path: Path, include_depth: bool = True):
     print(f"[SCAN] 扫描: {frames_dir}")
     mode, frames = scan_frames(frames_dir)
     n = len(frames)
     if n == 0:
         print("[ERROR] 未找到任何有效帧，退出")
         sys.exit(1)
+    if not include_depth and mode == 'triplet':
+        print("[SCAN] --no-depth: 跳过 /depth /normal 数据集与 UI mask")
+        mode = 'color'
+        for f in frames:
+            f['depth'] = None
+            f['normal'] = None
     has_ui = any(f.get('bmp_ui') for f in frames)
     print(f"[SCAN] 模式={mode}, 帧数={n}{'  (含 post-UI 流)' if has_ui else ''}")
 

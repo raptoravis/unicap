@@ -29,10 +29,10 @@ Delete `build\` to force CMake reconfigure.
 uv sync                                         # install Python deps (first time)
 
 uv run main.py launch                           # primary flow: deploy + launch + F6/F8/F9 loop
-uv run main.py launch --ui-mode ui-only         # capture post-UI BackBuffer only (no survey)
+uv run main.py launch --ui-mode ui              # capture post-UI BackBuffer only (no survey)
 uv run main.py launch --ui-mode both            # both pre-UI and post-UI streams (needs survey)
-uv run main.py video  --frames-dir PATH ...     # encode frames → MP4 (post-hoc)
-uv run main.py pack   --frames-dir PATH ...     # pack frames + inputs → HDF5 (post-hoc)
+uv run main.py video  --game-dir DIR            # encode frames → MP4 (post-hoc, batch)
+uv run main.py pack   --game-dir DIR [--no-depth]  # pack frames + inputs → HDF5 (post-hoc, batch)
 ```
 
 `--ui-mode` controls what gets captured:
@@ -40,7 +40,7 @@ uv run main.py pack   --frames-dir PATH ...     # pack frames + inputs → HDF5 
 | mode | F6 survey | output BMPs                            | HDF5                  |
 | ---- | --------- | -------------------------------------- | --------------------- |
 | `no-ui` (default) | required  | `<ts> BackBuffer.bmp` (pre-UI)         | `/color`              |
-| `ui-only`         | skipped   | `<ts> BackBuffer.bmp` (post-UI BB)     | `/color`              |
+| `ui`              | skipped   | `<ts> BackBuffer.bmp` (post-UI BB)     | `/color`              |
 | `both`            | required  | both `BackBuffer.bmp` + `BackBufferUI.bmp` | `/color` + `/color_ui` |
 
 The addon is driven by two ini keys: `FC_PreUICapture` (1 = scene RT, 0 = post-UI BB) and `FC_BothCapture` (1 = also dump post-UI BMP alongside scene RT). `_ensure_addon_enabled` writes both based on `--ui-mode`.
