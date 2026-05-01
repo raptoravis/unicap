@@ -229,10 +229,8 @@ def _symlink_file(src: Path, dst: Path):
         dst.unlink()
     try:
         os.symlink(str(src), str(dst))
-    except OSError as e:
-        print(f"[警告] 无法创建符号链接（{e.strerror}），改用复制（可启用 Windows 开发者模式）")
+    except OSError:
         shutil.copy2(src, dst)
-        print(f"[COPY]  {dst.name}")
 
 
 # ── Subcommand: deploy ────────────────────────────────────────────────────────
