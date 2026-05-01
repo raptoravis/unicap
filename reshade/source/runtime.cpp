@@ -3537,7 +3537,7 @@ bool reshade::runtime::load_effect_cache(const std::string &id, const std::strin
 		return false;
 
 	std::filesystem::path path = g_reshade_base_path / _effect_cache_path;
-	path /= std::filesystem::u8path("reshade-" + id + '.' + type);
+	path /= std::filesystem::u8path("unicap-" + id + '.' + type);
 
 	FILE *const file = _wfsopen(path.c_str(), L"rb", SH_DENYNO);
 	if (file == nullptr)
@@ -3558,7 +3558,7 @@ bool reshade::runtime::save_effect_cache(const std::string &id, const std::strin
 		return false;
 
 	std::filesystem::path path = g_reshade_base_path / _effect_cache_path;
-	path /= std::filesystem::u8path("reshade-" + id + '.' + type);
+	path /= std::filesystem::u8path("unicap-" + id + '.' + type);
 
 	FILE *const file = _wfsopen(path.c_str(), L"wb", SH_DENYNO);
 	if (file == nullptr)
@@ -3580,7 +3580,7 @@ void reshade::runtime::clear_effect_cache()
 
 		const std::filesystem::path filename = entry.path().filename();
 		const std::filesystem::path extension = entry.path().extension();
-		if (filename.wstring().compare(0, 8, L"reshade-") != 0 || (extension != L".i" && extension != L".cso" && extension != L".asm"))
+		if (filename.wstring().compare(0, 7, L"unicap-") != 0 || (extension != L".i" && extension != L".cso" && extension != L".asm"))
 			continue;
 
 		std::filesystem::remove(entry, ec);
