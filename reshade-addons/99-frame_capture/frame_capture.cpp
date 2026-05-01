@@ -25,6 +25,7 @@
 #include <imgui.h>
 #include <reshade.hpp>
 #include <vector>
+#include <array>
 #include <cstring>
 #include <algorithm>
 #include <unordered_map>
@@ -82,41 +83,35 @@ struct SaveTask {
     uint32_t              ui_width = 0, ui_height = 0;
 };
 
-static constexpr size_t         MAX_QUEUE   = 4;
+static constexpr size_t         MAX_QUEUE   = 16;
 static std::thread              g_save_thread;
 static std::mutex               g_queue_mutex;
 static std::condition_variable  g_queue_cv;
 static std::queue<SaveTask>     g_save_queue;
 static std::atomic<bool>        g_worker_stop { false };
 
-static bool SaveEXR(const float* rgb, int width, int height, const char* outfilename)
+// Single-channel float EXR ("Y"). Used for depth — depth is scalar, so a 3-channel
+// triplicated EXR was wasting 3× compression CPU and 3× file size for no gain.
+// pack_hdf5._load_depth already handles 1-channel and 3-channel transparently.
+static bool SaveEXR(const float* y, int width, int height, const char* outfilename)
 {
     EXRHeader header; InitEXRHeader(&header);
     EXRImage  image;  InitEXRImage(&image);
-    image.num_channels = 3;
+    image.num_channels = 1;
 
-    std::vector<float> ch[3];
-    for (int c = 0; c < 3; c++) ch[c].resize(width * height);
-    for (int i = 0; i < width * height; i++) {
-        ch[0][i] = rgb[3 * i + 0];
-        ch[1][i] = rgb[3 * i + 1];
-        ch[2][i] = rgb[3 * i + 2];
-    }
-    float* ptrs[3] = { ch[0].data(), ch[1].data(), ch[2].data() };
+    float* ptrs[1] = { const_cast<float*>(y) };
     image.images = (unsigned char**)ptrs;
     image.width  = width;
     image.height = height;
 
-    header.compression_type = TINYEXR_COMPRESSIONTYPE_ZIP;  // ZIP ~4x faster than PIZ
-    header.num_channels = 3;
-    header.channels = (EXRChannelInfo*)malloc(sizeof(EXRChannelInfo) * 3);
-    strncpy(header.channels[0].name, "B", 255);
-    strncpy(header.channels[1].name, "G", 255);
-    strncpy(header.channels[2].name, "R", 255);
-    header.pixel_types           = (int*)malloc(sizeof(int) * 3);
-    header.requested_pixel_types = (int*)malloc(sizeof(int) * 3);
-    for (int i = 0; i < 3; i++)
-        header.pixel_types[i] = header.requested_pixel_types[i] = TINYEXR_PIXELTYPE_FLOAT;
+    header.compression_type = TINYEXR_COMPRESSIONTYPE_ZIP;
+    header.num_channels = 1;
+    header.channels = (EXRChannelInfo*)malloc(sizeof(EXRChannelInfo));
+    strncpy(header.channels[0].name, "Y", 255);
+    header.pixel_types           = (int*)malloc(sizeof(int));
+    header.requested_pixel_types = (int*)malloc(sizeof(int));
+    header.pixel_types[0]           = TINYEXR_PIXELTYPE_FLOAT;
+    header.requested_pixel_types[0] = TINYEXR_PIXELTYPE_FLOAT;
 
     const char* err = nullptr;
     int ret = SaveEXRImageToFile(&image, &header, outfilename, &err);
@@ -177,30 +172,23 @@ static void save_worker_fn()
                            (int)ui_w, (int)ui_h, 4, ui_src);
         }
 
-        // Write depth EXR
+        // Write depth EXR (single-channel float; render thread already extracted scalar depth)
         if (!task.depth_path.empty() && !task.depth_pixels.empty()) {
-            // depth_pixels: RGBA32F packed; depth is in alpha (component 3)
             const float* depth_src = task.depth_pixels.data();
             uint32_t     depth_w   = task.depth_w;
             uint32_t     depth_h   = task.depth_h;
             std::vector<float> depth_resized;
             if (g_cap_width > 0 && g_cap_height > 0 &&
                 (depth_w != g_cap_width || depth_h != g_cap_height)) {
-                depth_resized.resize(g_cap_width * g_cap_height * 4);
+                depth_resized.resize((size_t)g_cap_width * g_cap_height);
                 stbir_resize_float(depth_src, (int)depth_w, (int)depth_h, 0,
-                                   depth_resized.data(), (int)g_cap_width, (int)g_cap_height, 0, 4);
+                                   depth_resized.data(), (int)g_cap_width, (int)g_cap_height, 0, 1);
                 depth_src = depth_resized.data();
                 depth_w   = g_cap_width;
                 depth_h   = g_cap_height;
             }
 
-            uint32_t n = depth_w * depth_h;
-            std::vector<float> rgb(n * 3);
-            for (uint32_t i = 0; i < n; i++) {
-                float d = depth_src[i * 4 + 3];
-                rgb[i * 3] = rgb[i * 3 + 1] = rgb[i * 3 + 2] = d;
-            }
-            SaveEXR(rgb.data(), (int)depth_w, (int)depth_h,
+            SaveEXR(depth_src, (int)depth_w, (int)depth_h,
                     task.depth_path.u8string().c_str());
         }
     }
@@ -335,6 +323,17 @@ static inline uint8_t hdr_to_u8(float v) noexcept
     return (uint8_t)(v * 255.0f + 0.5f);
 }
 
+// 65536-entry F16→sRGB-u8 LUT. powf-per-pixel was costing ~170 ms of render-thread
+// time per 1600×1200 r16g16b16a16_float frame, capping capture at 3–4 fps. Since
+// the input is only 16 bits, exhaustive precompute is 64 KB — trivial — and turns
+// the inner loop into a single byte load per channel.
+static const std::array<uint8_t, 65536> g_hdr_f16_lut = []() {
+    std::array<uint8_t, 65536> a{};
+    for (uint32_t i = 0; i < 65536; ++i)
+        a[i] = hdr_to_u8(half_to_float((uint16_t)i));
+    return a;
+}();
+
 static void decode_to_rgba8(const void* src, uint32_t row_pitch,
                              uint8_t* dst, uint32_t w, uint32_t h, format fmt)
 {
@@ -374,12 +373,13 @@ static void decode_to_rgba8(const void* src, uint32_t row_pitch,
         }
 
         case format::r16g16b16a16_float: {
-            // 4 × F16 per pixel — HDR, needs tone mapping
+            // 4 × F16 per pixel — HDR, needs tone mapping. LUT-driven (see g_hdr_f16_lut).
             const uint16_t* p16 = reinterpret_cast<const uint16_t*>(row);
+            const uint8_t*  lut = g_hdr_f16_lut.data();
             for (uint32_t x = 0; x < w; x++) {
-                out[x*4+0] = hdr_to_u8(half_to_float(p16[x*4+0]));
-                out[x*4+1] = hdr_to_u8(half_to_float(p16[x*4+1]));
-                out[x*4+2] = hdr_to_u8(half_to_float(p16[x*4+2]));
+                out[x*4+0] = lut[p16[x*4+0]];
+                out[x*4+1] = lut[p16[x*4+1]];
+                out[x*4+2] = lut[p16[x*4+2]];
                 out[x*4+3] = 255;
             }
             break;
@@ -584,9 +584,17 @@ static void on_bind_rts_dsv(command_list* cmd_list, uint32_t count,
     // Backbuffer about to be bound: all non-BB passes are done.
     // Copy the tracked scene RT now while it's still active and in shader_resource state
     // (the final composite pass just read from it before transitioning to the backbuffer).
-    // Doing this here (mid-frame, on the game's cmd list) avoids accessing a resource
-    // that UE4 may alias/deactivate after Present.
-    if (s_last_non_bb_rt.handle != 0 && s_had_depth_pass) {
+    //
+    // Safety gate: this shader_resource barrier is ONLY guaranteed valid for the LAST
+    // non-BB RT (the BB compositor's input). For mid-pipeline RTs (specific skip>0
+    // targets), the RT may be in some other state — the barrier then fails validation
+    // and the game's CommandList::Close() returns E_INVALIDARG. So we restrict this
+    // path to the always-overwrite case (skip=0 or unknown total). For specific
+    // targets, fc_copy_rt_at_bind handles it at bind time on the legacy path; on the
+    // enhanced render pass path (DX12 BeginRenderPass), specific-target capture is
+    // not supported — survey will fall back to UIRemove for those skips.
+    bool safe_last_rt = (g_pre_ui_skip == 0 || s_prev_non_bb_total == 0);
+    if (s_last_non_bb_rt.handle != 0 && s_had_depth_pass && safe_last_rt) {
         if (!g_pre_ui_staging.handle ||
             g_pre_ui_staging_w != s_last_non_bb_w || g_pre_ui_staging_h != s_last_non_bb_h) {
             if (g_pre_ui_staging.handle) dev->destroy_resource(g_pre_ui_staging);
@@ -657,11 +665,10 @@ static void on_begin_render_pass(command_list* cmd_list, uint32_t count,
                 s_last_non_bb_w   = rd.texture.width;
                 s_last_non_bb_h   = rd.texture.height;
                 s_last_non_bb_fmt = rd.texture.format;
-                if (s_survey_mode &&
-                    fc_copy_rt_at_bind(cmd_list, dev, r,
-                                       rd.texture.width, rd.texture.height, rd.texture.format)) {
-                    s_pre_ui_captured = true;
-                }
+                // NOTE: do NOT call fc_copy_rt_at_bind here. on_begin_render_pass
+                // fires BEFORE BeginRenderPass's implicit state transition, so the
+                // RT is not reliably in render_target — render_target↔copy_source
+                // barriers fail validation on Close() and crash the game.
             }
             break;
         }
@@ -669,7 +676,12 @@ static void on_begin_render_pass(command_list* cmd_list, uint32_t count,
         return;
     }
 
-    if (s_last_non_bb_rt.handle != 0 && s_had_depth_pass) {
+    // BB-bind branch. Same safety gate as on_bind_rts_dsv: only safe for the LAST
+    // non-BB RT (always-overwrite case). For specific skip>0 targets in the enhanced
+    // render pass path, fall back gracefully (do nothing → use_scene_rt=false →
+    // UIRemove fallback in on_reshade_present).
+    bool safe_last_rt = (g_pre_ui_skip == 0 || s_prev_non_bb_total == 0);
+    if (s_last_non_bb_rt.handle != 0 && s_had_depth_pass && safe_last_rt) {
         if (!g_pre_ui_staging.handle ||
             g_pre_ui_staging_w != s_last_non_bb_w || g_pre_ui_staging_h != s_last_non_bb_h) {
             if (g_pre_ui_staging.handle) dev->destroy_resource(g_pre_ui_staging);
@@ -830,6 +842,37 @@ static void on_reshade_present(effect_runtime* runtime)
         }
         s_cap_armed = true;   // sidecar confirmed — mark for diagnostic log
 
+        // Survey housekeeping: pass-total signal must reach Python every frame
+        // regardless of dedup, so Phase 1 of survey can read it.
+        if (s_survey_mode && s_no_dsv_non_bb > 0) {
+            std::ofstream tf(exe_fs.parent_path() / L"fc_pass_total.txt", std::ios::trunc);
+            tf << s_no_dsv_non_bb << '\n';
+        }
+
+        // Survey-mode save dedup: write at most one BMP per distinct skip value.
+        // Without this, FF7R-style enhanced-render-pass pipelines force every
+        // skip>0 frame down the UIRemove fallback path (identical content for
+        // every saved frame). At game framerate (~20+ fps × 7.5 MB) the disk
+        // saturates, the save queue stays at capacity, and Python's wait for
+        // the next skip's file TIMEOUTs because new enqueues keep getting
+        // dropped. Saving once per skip change brings writes down to ~one
+        // per Python advance (≈ 1 every 2.5 s), which the worker drains easily.
+        {
+            static uint32_t s_survey_last_saved_skip = UINT32_MAX;
+            static bool     s_was_in_survey          = false;
+            if (s_survey_mode) {
+                if (!s_was_in_survey) {
+                    s_was_in_survey          = true;
+                    s_survey_last_saved_skip = UINT32_MAX;
+                }
+                if (this_frame_skip == s_survey_last_saved_skip)
+                    goto reset_frame_state;
+                s_survey_last_saved_skip = this_frame_skip;
+            } else {
+                s_was_in_survey = false;
+            }
+        }
+
         // ── Build filename prefix ────────────────────────────────────────────
         const auto now         = std::chrono::system_clock::now();
         const auto now_seconds = std::chrono::time_point_cast<std::chrono::seconds>(now);
@@ -946,15 +989,19 @@ static void on_reshade_present(effect_runtime* runtime)
                 task.depth_path = save_prefix; task.depth_path += L"DepthBuffer.exr";
                 task.depth_w = drd.texture.width;
                 task.depth_h = drd.texture.height;
-                task.depth_pixels.resize((size_t)task.depth_w * task.depth_h * 4);
+                // Single-channel depth: extract alpha (scalar depth) only.
+                task.depth_pixels.resize((size_t)task.depth_w * task.depth_h);
                 subresource_data depth_data = {};
                 if (dev->map_texture_region(sbi.depth_staging, 0, nullptr, map_access::read_only, &depth_data) && depth_data.data) {
                     const float* dsrc       = static_cast<const float*>(depth_data.data);
                     uint32_t floats_per_row = depth_data.row_pitch / sizeof(float);
-                    for (uint32_t y = 0; y < task.depth_h; y++)
-                        std::memcpy(task.depth_pixels.data() + y * task.depth_w * 4,
-                                    dsrc + y * floats_per_row,
-                                    task.depth_w * 4 * sizeof(float));
+                    float* dst = task.depth_pixels.data();
+                    for (uint32_t y = 0; y < task.depth_h; y++) {
+                        const float* row = dsrc + y * floats_per_row;
+                        float*       out = dst  + (size_t)y * task.depth_w;
+                        for (uint32_t x = 0; x < task.depth_w; x++)
+                            out[x] = row[x * 4 + 3];   // depth is in alpha
+                    }
                     dev->unmap_texture_region(sbi.depth_staging, 0);
                 }
             }
@@ -1050,25 +1097,23 @@ static void on_reshade_present(effect_runtime* runtime)
                 task.depth_path = save_prefix; task.depth_path += L"DepthBuffer.exr";
                 task.depth_w = drd.texture.width;
                 task.depth_h = drd.texture.height;
-                task.depth_pixels.resize((size_t)task.depth_w * task.depth_h * 4);
+                // Single-channel depth: extract alpha (scalar depth) only.
+                task.depth_pixels.resize((size_t)task.depth_w * task.depth_h);
 
                 subresource_data depth_data = {};
                 if (dev->map_texture_region(sbi.depth_staging, 0, nullptr, map_access::read_only, &depth_data) && depth_data.data) {
                     const float* src        = static_cast<const float*>(depth_data.data);
                     uint32_t floats_per_row = depth_data.row_pitch / sizeof(float);
-                    for (uint32_t y = 0; y < task.depth_h; y++)
-                        std::memcpy(task.depth_pixels.data() + y * task.depth_w * 4,
-                                    src + y * floats_per_row,
-                                    task.depth_w * 4 * sizeof(float));
+                    float* dst = task.depth_pixels.data();
+                    for (uint32_t y = 0; y < task.depth_h; y++) {
+                        const float* row = src + y * floats_per_row;
+                        float*       out = dst + (size_t)y * task.depth_w;
+                        for (uint32_t x = 0; x < task.depth_w; x++)
+                            out[x] = row[x * 4 + 3];   // depth is in alpha
+                    }
                     dev->unmap_texture_region(sbi.depth_staging, 0);
                 }
             }
-        }
-
-        // Survey: write current frame's non-BB pass count so Python knows the range.
-        if (s_survey_mode && s_no_dsv_non_bb > 0) {
-            std::ofstream tf(exe_fs.parent_path() / L"fc_pass_total.txt", std::ios::trunc);
-            tf << s_no_dsv_non_bb << '\n';
         }
 
         // Enqueue — render thread is now free
