@@ -15,8 +15,3 @@ DATASET_ROOT = Path(r"D:\unicap_output")
 FRAMES_DIR = DATASET_ROOT / "frames"
 INPUTS_OUT = DATASET_ROOT / "inputs.jsonl"
 HDF5_OUT = DATASET_ROOT / "dataset.h5"
-
-# ── ReShade 部署根 (unicap 仓库) ──────────────────────────────────────
-REPO_ROOT = Path(__file__).parents[2]
-DIST_DIR = REPO_ROOT / "dist"
-VENDOR_DIR = REPO_ROOT / "vendor"

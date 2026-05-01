@@ -42,6 +42,9 @@ import tools.capture.pack_hdf5 as pack_hdf5
 import tools.capture.survey as survey_mod
 from tools.capture.config import DATASET_ROOT, GAME_PATH
 
+# Source mode: __file__ → repo root. Nuitka standalone: __file__ → unicap.dist/,
+# which contains dist/ shaders/ config/ alongside unicap.exe — same layout, so
+# no special-casing needed. Onefile is NOT supported (AV flags the bootloader).
 ROOT = Path(__file__).parent
 CONFIG_DIR = ROOT / "config"
 UNICAP_TEMP = Path(tempfile.gettempdir()) / "unicap"
@@ -655,7 +658,7 @@ def cmd_pack(args):
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(prog="main.py")
+    parser = argparse.ArgumentParser(prog="unicap")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("launch", help="部署 + 启动游戏 + 进入交互式 F6/F8/F9 工作流")
