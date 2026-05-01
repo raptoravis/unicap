@@ -2,6 +2,7 @@ build/
 # dist/
 dist-exe/
 dist-exe-build/
+unicap-*.zip
 *.user
 *.suo
 .vs/

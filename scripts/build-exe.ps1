@@ -108,6 +108,7 @@ try {
         --include-data-files=dist/dxgi.dll=dist/dxgi.dll `
         --include-data-dir=shaders=shaders `
         --include-data-dir=config=config `
+        --include-data-files=pyproject.toml=pyproject.toml `
         --product-name=unicap `
         --file-version=$version `
         --product-version=$version `
@@ -155,15 +156,36 @@ if ($missing.Count -gt 0) {
     exit 1
 }
 
+# ── 打包 zip 分发包 ───────────────────────────────────────────────────────────
+# zip 内顶级目录 = unicap-<version>/，解压不污染当前目录
+$staging = Join-Path $root "unicap-$version"
+$zip     = Join-Path $root "unicap-$version.zip"
+if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }
+if (Test-Path $zip)     { Remove-Item -Force $zip }
+
+Write-Host "`n打包分发 zip…" -ForegroundColor Cyan
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+Move-Item -Path $outDir -Destination $staging
+try {
+    [System.IO.Compression.ZipFile]::CreateFromDirectory(
+        $staging, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $true
+    )
+} finally {
+    # 还原 dist-exe/ 目录，方便就地运行
+    Move-Item -Path $staging -Destination $outDir
+}
+
 # ── 报告 ──────────────────────────────────────────────────────────────────────
 $exeMB    = [math]::Round((Get-Item $exe).Length / 1MB, 1)
 $totalMB  = [math]::Round(((Get-ChildItem $outDir -Recurse | Measure-Object -Property Length -Sum).Sum) / 1MB, 1)
 $fileCnt  = (Get-ChildItem $outDir -Recurse -File).Count
+$zipMB    = [math]::Round((Get-Item $zip).Length / 1MB, 1)
 
 Write-Host "`n构建成功 ✓" -ForegroundColor Green
 Write-Host "  unicap.exe: $exeMB MB" -ForegroundColor White
 Write-Host "  总大小:     $totalMB MB ($fileCnt 个文件)" -ForegroundColor White
 Write-Host "  位置:       $outDir\" -ForegroundColor White
+Write-Host "  分发包:     $zip ($zipMB MB)" -ForegroundColor White
 Write-Host "  关键资产:   ✓ dxgi.dll / frame_capture.addon / shaders / config" -ForegroundColor Green
-Write-Host "`n分发: zip $outDir\ 整个文件夹给最终用户。" -ForegroundColor Cyan
+Write-Host "`n分发: 直接发 unicap-$version.zip。" -ForegroundColor Cyan
 Write-Host "运行: $exe launch --help" -ForegroundColor Cyan

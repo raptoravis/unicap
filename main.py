@@ -49,6 +49,19 @@ ROOT = Path(__file__).parent
 CONFIG_DIR = ROOT / "config"
 UNICAP_TEMP = Path(tempfile.gettempdir()) / "unicap"
 
+
+def _read_version() -> str:
+    """Read [project].version from pyproject.toml. Source mode reads repo
+    pyproject.toml; packaged mode reads the copy embedded into unicap.dist/."""
+    try:
+        import tomllib
+        return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    except (ImportError, OSError, KeyError):
+        return "unknown"
+
+
+VERSION = _read_version()
+
 # Capture defaults — change here if a different rate/resolution is needed.
 # 1920×1080 matches FF7R's native scene RT — skipping the worker resize cuts
 # ~40 ms/frame off the save path, and avoids the 16:9 → 4:3 horizontal stretch
@@ -659,6 +672,7 @@ def cmd_pack(args):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--version", action="version", version=f"unicap v{VERSION}")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("launch", help="部署 + 启动游戏 + 进入交互式 F6/F8/F9 工作流")
@@ -690,6 +704,7 @@ def main():
     p.add_argument("--check-out", default=str(DATASET_ROOT / "spot_checks"))
 
     args = parser.parse_args()
+    print(f"unicap v{VERSION}", flush=True)
     {"launch": cmd_launch, "video": cmd_video, "pack": cmd_pack}[args.cmd](args)
 
 
