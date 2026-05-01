@@ -10,9 +10,12 @@ Hotkeys (game window must have focus):
 Usage:
   uv run main.py launch [--game-path P] [--game-name N]
                         [--dataset-root R] [--ui-mode {no-ui,ui-only,both}]
-                        [--no-hints]
-  uv run main.py video  --frames-dir P [--output P] [--fps N]
-  uv run main.py pack   [--frames-dir P] [--inputs P] [--output P]
+                        [--no-hints] [--no-video] [--pack]
+  uv run main.py video  GAME_DIR [--fps N]
+  uv run main.py pack   GAME_DIR
+
+video / pack: 扫描 GAME_DIR 下所有采集会话（dataset-root/<game>/<timestamp>/），
+              为缺少 video.mp4 / dataset.h5 的会话生成；已存在则跳过。
 
 ui-mode:
   no-ui    只输出 pre-UI 帧（默认；F6 survey 必需）
@@ -24,6 +27,7 @@ import argparse
 import configparser
 import ctypes
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -36,7 +40,7 @@ from pathlib import Path
 import tools.capture.capture_all as capture_all
 import tools.capture.pack_hdf5 as pack_hdf5
 import tools.capture.survey as survey_mod
-from tools.capture.config import DATASET_ROOT, FRAMES_DIR, GAME_PATH, HDF5_OUT, INPUTS_OUT
+from tools.capture.config import DATASET_ROOT, GAME_PATH
 
 ROOT = Path(__file__).parent
 CONFIG_DIR = ROOT / "config"
@@ -53,6 +57,15 @@ SURVEY_FPS = 1.0   # Python wait cadence during survey sweep
 
 VK_F6, VK_F8, VK_F9 = 0x75, 0x77, 0x78
 _user32 = ctypes.WinDLL("user32")
+
+
+# ── Timing helper ─────────────────────────────────────────────────────────────
+
+def _fmt_dur(seconds: float) -> str:
+    if seconds >= 60:
+        m, s = divmod(seconds, 60)
+        return f"{int(m)}m{s:.1f}s"
+    return f"{seconds:.1f}s"
 
 
 # ── State sidecar (Python → addon) ────────────────────────────────────────────
@@ -323,6 +336,7 @@ def _run_survey(args, game_dir: Path, game_name: str, dataset_root: Path) -> boo
     """Returns True if survey produced a recommendation."""
     _set_state(game_dir, "surveying")
     print("\n[SURVEY] 开始扫描…（F9 中止）")
+    t0 = time.perf_counter()
 
     abort = threading.Event()
     quit_watcher = _spawn_f9_watcher(abort)
@@ -341,11 +355,14 @@ def _run_survey(args, game_dir: Path, game_name: str, dataset_root: Path) -> boo
         quit_watcher.set()
         _set_state(game_dir, "idle")
 
+    elapsed = time.perf_counter() - t0
     if abort.is_set():
-        print("[SURVEY] F9 中止")
+        print(f"[SURVEY] F9 中止  耗时 {_fmt_dur(elapsed)}")
         return False
     if recommended is None:
+        print(f"[SURVEY] 未推荐 skip  耗时 {_fmt_dur(elapsed)}")
         return False
+    print(f"[SURVEY] 完成 推荐 skip={recommended}  耗时 {_fmt_dur(elapsed)}")
 
     # Persist recommendation to ini for next deploy
     _ensure_addon_enabled(ADDON_BIN.parent, pre_ui_skip=recommended,
@@ -379,7 +396,6 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path, just_
     session_dir = dataset_root / game_name / tag
     frames_dir = session_dir / "frames"
     inputs_out = session_dir / "inputs.jsonl"
-    hdf5_out   = session_dir / "dataset.h5"
     video_out  = session_dir / "video.mp4"
     session_dir.mkdir(parents=True, exist_ok=True)
 
@@ -387,6 +403,7 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path, just_
     if just_surveyed:
         time.sleep(0.5)  # let the post-survey skip pulse settle
 
+    t_cap = time.perf_counter()
     stop_event = threading.Event()
     quit_watcher = _spawn_f9_watcher(stop_event)
     try:
@@ -401,20 +418,66 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path, just_
     finally:
         quit_watcher.set()
         _set_state(game_dir, "idle")
+    print(f"[CAPTURE] 总耗时 {_fmt_dur(time.perf_counter() - t_cap)}")
 
-    _make_video(frames_dir, video_out, CAP_FPS, glob_pat="*BackBuffer.bmp")
-    # "both" mode: 也生成 post-UI 视频
-    if any(frames_dir.glob("*BackBufferUI.bmp")):
-        _make_video(frames_dir, session_dir / "video_ui.mp4", CAP_FPS,
-                    glob_pat="*BackBufferUI.bmp")
+    if getattr(args, "video", True):
+        t_video = time.perf_counter()
+        _make_video(frames_dir, video_out, fps=0, glob_pat="*BackBuffer.bmp")
+        # "both" mode: 也生成 post-UI 视频
+        if any(frames_dir.glob("*BackBufferUI.bmp")):
+            _make_video(frames_dir, session_dir / "video_ui.mp4", fps=0,
+                        glob_pat="*BackBufferUI.bmp")
+        print(f"[VIDEO] 总耗时 {_fmt_dur(time.perf_counter() - t_video)}")
+    else:
+        print(f"[VIDEO] --no-video 跳过；待会儿运行：")
+        print(f"        uv run main.py video \"{dataset_root / game_name}\"")
+
     print(f"[会话] {session_dir}")
-    print("[PACK] 开始打包 HDF5…")
-    pack_hdf5.pack(frames_dir=frames_dir, inputs_path=inputs_out, output_path=hdf5_out)
+    if getattr(args, "pack", False):
+        print("[PACK] 开始打包 HDF5…")
+        t_pack = time.perf_counter()
+        try:
+            pack_hdf5.pack(frames_dir=frames_dir, inputs_path=inputs_out,
+                           output_path=session_dir / "dataset.h5")
+        except Exception as e:
+            print(f"[PACK] 失败：{e}")
+        print(f"[PACK] 总耗时 {_fmt_dur(time.perf_counter() - t_pack)}")
+    else:
+        print(f"[PACK] launch 默认不打包（加 --pack 可即时打包），待会儿运行：")
+        print(f"       uv run main.py pack \"{dataset_root / game_name}\"")
 
 
 # ── Video + pack ──────────────────────────────────────────────────────────────
 
-def _make_video(frames_dir: Path, output: Path, fps: int, glob_pat: str = "*BackBuffer.bmp"):
+# BMP 文件名格式：<prefix> YYYY-MM-DD HH-MM-SS <ms> BackBuffer.bmp
+_RE_BMP_TS = re.compile(r' (\d{4}-\d{2}-\d{2}) (\d{2}-\d{2}-\d{2}) (\d+) ')
+
+
+def _bmp_ts_ms(p: Path) -> int | None:
+    m = _RE_BMP_TS.search(p.name)
+    if not m:
+        return None
+    try:
+        dt = datetime.strptime(f"{m.group(1)} {m.group(2).replace('-', ':')}",
+                               "%Y-%m-%d %H:%M:%S")
+        return int(dt.timestamp() * 1000) + int(m.group(3))
+    except ValueError:
+        return None
+
+
+def _estimate_fps(bmps: list[Path]) -> float | None:
+    """从首/末 BMP 文件名时间戳估算实际 fps；不可解析则返回 None。"""
+    if len(bmps) < 2:
+        return None
+    t0, t1 = _bmp_ts_ms(bmps[0]), _bmp_ts_ms(bmps[-1])
+    if t0 is None or t1 is None or t1 <= t0:
+        return None
+    return (len(bmps) - 1) * 1000.0 / (t1 - t0)
+
+
+def _make_video(frames_dir: Path, output: Path, fps: float = 0,
+                glob_pat: str = "*BackBuffer.bmp"):
+    """fps=0 时按文件名时间戳自动估算实际采集 fps，避免快进/慢放。"""
     import cv2
 
     bmps = sorted(frames_dir.glob(glob_pat))
@@ -424,12 +487,23 @@ def _make_video(frames_dir: Path, output: Path, fps: int, glob_pat: str = "*Back
         print("[VIDEO] 未找到 BMP 文件，跳过")
         return
 
+    if fps <= 0:
+        est = _estimate_fps(bmps)
+        if est is None:
+            fps = CAP_FPS
+            print(f"[VIDEO] 时间戳估算失败，回退 fps={fps}")
+        else:
+            fps = est
+            print(f"[VIDEO] 自动 fps={fps:.2f}（{len(bmps)} 帧 / 文件名时间戳）")
+
     first = cv2.imread(str(bmps[0]))
     if first is None:
         print("[VIDEO] 无法读取第一帧，跳过")
         return
     h, w = first.shape[:2]
     output.parent.mkdir(parents=True, exist_ok=True)
+
+    progress_step = max(int(round(fps)), 1)
 
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg:
@@ -439,7 +513,7 @@ def _make_video(frames_dir: Path, output: Path, fps: int, glob_pat: str = "*Back
             ffmpeg, "-y",
             "-f", "rawvideo", "-vcodec", "rawvideo",
             "-s", f"{w_enc}x{h_enc}", "-pix_fmt", "bgr24",
-            "-r", str(fps), "-i", "pipe:",
+            "-r", f"{fps:.6f}", "-i", "pipe:",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
             str(output),
         ]
@@ -455,7 +529,7 @@ def _make_video(frames_dir: Path, output: Path, fps: int, glob_pat: str = "*Back
                 except OSError:
                     ok = False
                     break
-            if (i + 1) % fps == 0:
+            if (i + 1) % progress_step == 0:
                 print(f"[VIDEO] {i + 1}/{len(bmps)} 帧", flush=True)
         proc.stdin.close()
         stderr_out = proc.stderr.read()
@@ -469,7 +543,7 @@ def _make_video(frames_dir: Path, output: Path, fps: int, glob_pat: str = "*Back
             img = cv2.imread(str(bmp))
             if img is not None:
                 writer.write(img)
-            if (i + 1) % fps == 0:
+            if (i + 1) % progress_step == 0:
                 print(f"[VIDEO] {i + 1}/{len(bmps)} 帧", flush=True)
         writer.release()
 
@@ -477,19 +551,106 @@ def _make_video(frames_dir: Path, output: Path, fps: int, glob_pat: str = "*Back
 
 
 def cmd_video(args):
-    _make_video(Path(args.frames_dir), Path(args.output), args.fps)
+    if not args.game_dir:
+        sys.exit("[错误] video 需要游戏目录参数：uv run main.py video <GAME_DIR>")
+
+    game_dir = Path(args.game_dir)
+    if not game_dir.is_dir():
+        sys.exit(f"[错误] 游戏目录不存在：{game_dir}")
+
+    sessions = sorted(
+        d for d in game_dir.iterdir()
+        if d.is_dir() and d.name != "survey" and (d / "frames").is_dir()
+    )
+    if not sessions:
+        sys.exit(f"[错误] 在 {game_dir} 下未找到任何采集会话（缺少 <ts>/frames/）")
+
+    print(f"[VIDEO] 找到 {len(sessions)} 个会话（{game_dir}）")
+    made = skipped = failed = 0
+    t_total = time.perf_counter()
+    for sess in sessions:
+        frames = sess / "frames"
+        # 主流：BackBuffer
+        targets = [(sess / "video.mp4", "*BackBuffer.bmp")]
+        # post-UI 流（both 模式才存在）
+        if any(frames.glob("*BackBufferUI.bmp")):
+            targets.append((sess / "video_ui.mp4", "*BackBufferUI.bmp"))
+
+        for out, pat in targets:
+            if out.exists():
+                print(f"[SKIP] {sess.name}/{out.name}（已存在, {out.stat().st_size/1024/1024:.1f} MB）")
+                skipped += 1
+                continue
+            print(f"\n[VIDEO] {sess.name}/{out.name} ←")
+            t0 = time.perf_counter()
+            try:
+                _make_video(frames, out, args.fps, glob_pat=pat)
+            except Exception as e:
+                elapsed = time.perf_counter() - t0
+                print(f"[ERROR] {sess.name}/{out.name} 失败：{e}  耗时 {_fmt_dur(elapsed)}")
+                failed += 1
+                continue
+            elapsed = time.perf_counter() - t0
+            if not out.exists():
+                # _make_video 内部 print 跳过 / 失败 但未抛错
+                failed += 1
+                continue
+            print(f"[VIDEO] {sess.name}/{out.name} 完成  耗时 {_fmt_dur(elapsed)}")
+            made += 1
+
+    print(f"\n[DONE] 生成 {made}，跳过 {skipped}，失败 {failed}；总耗时 {_fmt_dur(time.perf_counter() - t_total)}")
 
 
 def cmd_pack(args):
     if args.spot_check:
         indices = [int(x) for x in args.check_frames.split(",")]
         pack_hdf5.spot_check(Path(args.spot_check), indices, Path(args.check_out))
-    else:
-        pack_hdf5.pack(
-            frames_dir=Path(args.frames_dir),
-            inputs_path=Path(args.inputs),
-            output_path=Path(args.output),
-        )
+        return
+
+    if not args.game_dir:
+        sys.exit("[错误] pack 需要游戏目录参数：uv run main.py pack <GAME_DIR>")
+
+    game_dir = Path(args.game_dir)
+    if not game_dir.is_dir():
+        sys.exit(f"[错误] 游戏目录不存在：{game_dir}")
+
+    sessions = sorted(
+        d for d in game_dir.iterdir()
+        if d.is_dir() and d.name != "survey" and (d / "frames").is_dir()
+    )
+    if not sessions:
+        sys.exit(f"[错误] 在 {game_dir} 下未找到任何采集会话（缺少 <ts>/frames/）")
+
+    print(f"[PACK] 找到 {len(sessions)} 个会话（{game_dir}）")
+    packed = skipped = failed = 0
+    t_total = time.perf_counter()
+    for sess in sessions:
+        h5 = sess / "dataset.h5"
+        if h5.exists():
+            print(f"[SKIP] {sess.name}（已存在 dataset.h5, {h5.stat().st_size/1024/1024:.1f} MB）")
+            skipped += 1
+            continue
+        frames = sess / "frames"
+        inputs = sess / "inputs.jsonl"
+        if not inputs.is_file():
+            print(f"[SKIP] {sess.name}（缺少 inputs.jsonl）")
+            failed += 1
+            continue
+
+        print(f"\n[PACK] {sess.name} →")
+        t0 = time.perf_counter()
+        try:
+            pack_hdf5.pack(frames_dir=frames, inputs_path=inputs, output_path=h5)
+        except Exception as e:
+            elapsed = time.perf_counter() - t0
+            print(f"[ERROR] {sess.name} 失败：{e}  耗时 {_fmt_dur(elapsed)}")
+            failed += 1
+            continue
+        elapsed = time.perf_counter() - t0
+        print(f"[PACK] {sess.name} 完成  耗时 {_fmt_dur(elapsed)}")
+        packed += 1
+
+    print(f"\n[DONE] 打包 {packed}，跳过 {skipped}，失败 {failed}；总耗时 {_fmt_dur(time.perf_counter() - t_total)}")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -506,16 +667,20 @@ def main():
                    help="输出: no-ui=只 pre-UI（默认）, ui-only=只 post-UI BB（无需 survey）, both=双流")
     p.add_argument("--hints", action=argparse.BooleanOptionalAction, default=True,
                    help="显示控制台 + addon overlay 操作提示（默认开启）")
+    p.add_argument("--video", action=argparse.BooleanOptionalAction, default=True,
+                   help="F9 停止采集后生成 video.mp4（默认开启；--no-video 跳过）")
+    p.add_argument("--pack", action="store_true",
+                   help="F9 停止采集后立即打包 HDF5（默认不打包）")
 
-    p = sub.add_parser("video", help="从 frames 目录生成 MP4")
-    p.add_argument("--frames-dir", default=str(FRAMES_DIR))
-    p.add_argument("--output", default=str(DATASET_ROOT / "video.mp4"))
-    p.add_argument("--fps", type=int, default=CAP_FPS)
+    p = sub.add_parser("video", help="批量生成游戏目录下所有缺失的 video.mp4 / video_ui.mp4")
+    p.add_argument("game_dir", nargs="?", default="",
+                   help="dataset-root 下的游戏目录（其下含 <YYYYMMDD_HHMMSS>/frames/ 子目录）")
+    p.add_argument("--fps", type=float, default=0,
+                   help="编码 fps；默认 0 = 从 BMP 文件名时间戳自动估算（推荐）")
 
-    p = sub.add_parser("pack", help="把 frames + inputs 打包成 HDF5")
-    p.add_argument("--frames-dir", default=str(FRAMES_DIR))
-    p.add_argument("--inputs", default=str(INPUTS_OUT))
-    p.add_argument("--output", default=str(HDF5_OUT))
+    p = sub.add_parser("pack", help="批量打包游戏目录下所有采集会话；已有 dataset.h5 跳过")
+    p.add_argument("game_dir", nargs="?", default="",
+                   help="dataset-root 下的游戏目录（其下含 <YYYYMMDD_HHMMSS>/frames/ 子目录）")
     p.add_argument("--spot-check", metavar="H5_PATH")
     p.add_argument("--check-frames", default="0,99,499")
     p.add_argument("--check-out", default=str(DATASET_ROOT / "spot_checks"))
