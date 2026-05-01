@@ -1,89 +1,94 @@
-# Handoff: main.py CLI 重构 + video 快进修复 + cache 文件名 reshade- → unicap-
+# Handoff: 实机回归 OK + CLI 微调 + CLAUDE.md 6 处事实纠错
 
-**Generated**: 2026-05-01 19:35
-**Branch**: master（与 origin/master 同步，clean）
-**Status**: Done（代码已 commit + push）；下面 3 项实机回归仍待用户跑
+**Generated**: 2026-05-01 21:30
+**Branch**: master（与 origin/master 同步；CLAUDE.md 6 处文档纠错未 commit）
+**Status**: Done — 上份 handoff 列的 3 项实机回归全部通过；本会话又收 4 项小改 + 1 份文档纠错
 
 ## Goal
 
-本会话两块工作：
-1. **`main.py` CLI 优化**：survey/capture/pack 加耗时统计；launch 默认不 pack；pack 与 video 子命令重构成"扫整个游戏目录、缺啥补啥、已存在跳过"的批量模式；修复 video 播放快进（按固定 30 fps 编码导致 19/12 fps 采集被压缩 1.5×~2.5×）。
-2. **shader cache 文件名前缀 `reshade-` → `unicap-`**（`%TEMP%\unicap\` 下的 `.i` / `.asm` / `.cso` 文件），与项目命名一致。
+用户反馈实机回归通过后，做了 4 个小型 CLI 改动 + 1 个静默 + 1 份 CLAUDE.md 文档纠错：
+1. `--ui-mode` 枚举 `ui-only` → `ui`（用户原话："唯一需要修改的就是把 --ui-mode 的 ui-only 修改为 ui"）
+2. `pack` 加 `--depth/--no-depth`（缺省包含）
+3. `pack` / `video` 位置参数 `game_dir` → `--game-dir DIR` flag
+4. dxgi.dll 部署：symlink fail → copy 时静默（不再打印 `[警告]` 和 `[COPY]`）
+5. CLAUDE.md 6 处事实纠错（基于 /init 自检发现）
 
 ## Completed
 
-### main.py CLI（commit `7e7e7e7`）
+### CLI 改动（commit `334303d`）
 
-- [x] `_fmt_dur(seconds)` helper（≥60s 输出 `m分s秒`）
-- [x] `_run_survey` / `_run_capture` 三段耗时（CAPTURE / VIDEO / PACK 分开）
-- [x] launch 加 `--video / --no-video`（默认 True）+ `--pack`（默认 False）两个 toggle
-- [x] `cmd_pack` 重构：位置参数 `game_dir`，扫描 `<game_dir>/<ts>/frames/` 缺 `dataset.h5` 则补、已存在跳过、缺 inputs 计 failed、末尾汇总 `打包/跳过/失败` + 总耗时
-- [x] `cmd_video` 同架构重构（含 `*BackBufferUI.bmp` 二级流）
-- [x] **`_make_video` 默认从文件名时间戳估算 fps**（`fps=0` 触发自动）：regex `_RE_BMP_TS = r' (\d{4}-\d{2}-\d{2}) (\d{2}-\d{2}-\d{2}) (\d+) '`；`(n-1) * 1000 / (last_ms - first_ms)`；估算失败回退 `CAP_FPS=30`。`cmd_video --fps` 默认 0 = auto
+- [x] `--ui-mode {no-ui,ui,both}`（5 处 `main.py` + 2 处 `CLAUDE.md` 替换）
+- [x] `cmd_pack` 加 `--depth` BooleanOptionalAction（默认 True）→ 透传 `pack_hdf5.pack(include_depth=...)`
+- [x] `pack_hdf5.pack` 签名加 `include_depth: bool = True`；关闭时 `mode='triplet'` 降级为 `'color'`，跳过 `/depth` `/normal` 数据集 + EXR 加载 + UI mask
+- [x] `pack` / `video` 子命令位置参数 `game_dir` → `--game-dir DIR` flag（argparse `--game-dir` 自动转 `args.game_dir`，调用代码无需改）
+- [x] docstring + 错误提示同步更新
 
-### reshade core（commit `09863dd`）
+### Symlink 静默（commit `bddd939`）
 
-- [x] `reshade/source/runtime.cpp` 三处替换 `"reshade-"` → `"unicap-"`（line 3540, 3561, 3583）；`compare(0, 8, ...)` 长度 8→7
-- [x] `scripts\build.ps1 -Rebuild` 全量重建 → `dist\dxgi.dll` (5.5 MB) + `dist\frame_capture.addon` (206 KB)，timestamp 19:31
+- [x] `_symlink_file` 砍掉 `[警告] 无法创建符号链接...` + `[COPY]` 两条 print；OSError 静默 fallback 到 `shutil.copy2`
+
+### CLAUDE.md 文档纠错（**未 commit**）
+
+- [x] Line 20: `dxgi.dll` "**not deployed**" → 实际由 `cmd_deploy` symlink 部署
+- [x] Line 60: "packing + video generation run automatically" → 默认只 video；pack 改为 `launch --pack` opt-in 或事后 `pack` 子命令批量
+- [x] Line 62: 1600×1200 → 1920×1080（带 commit b7021ed 引用）
+- [x] Line 76: 加 `FC_BothCapture` 到 settings 列表
+- [x] Runtime logs 节加 `unicap-*.{i,asm,cso}` shader cache 行 + "看到 reshade- 说明 dll 未更新"诊断提示
+- [x] Dataset layout 加 `video_ui.mp4`（`--ui-mode both` 才生成）
+
+### 上份 handoff 遗留的实机回归（用户口头确认全过）
+
+- [x] `unicap-` 前缀实机验证（清旧 cache → launch → `%TEMP%\unicap\` 全 `unicap-*`）
+- [x] video 快进修复实机验证
+- [x] `--ui-mode ui-only` / `both` 实机验证 → 用户唯一反馈："`ui-only` 改成 `ui`"，已合入 commit 334303d
 
 ## Not Yet Done
 
-- [ ] **重生成那段被快进的 video 实机回放确认正常速率**（`D:\unicap_output\ff7remake_\20260501_161710\` 在测试中已被删，原始 BMP 不可用 → 录新一段做回归）
-- [ ] **`unicap-` 前缀实机验证**：当前游戏没重启，`%TEMP%\unicap\` 仍是 `reshade-*.{i,asm,cso}` 旧文件
-- [ ] **`--ui-mode ui-only` / `both` 实机验证**（自上份 handoff 起就遗留，本会话未动）
+- [ ] **CLAUDE.md 6 处纠错 commit + push**（`git diff --stat` 仅 `CLAUDE.md`，10 行净改动）
+- [ ] 暂无其他遗留功能项
 
 ## Failed Approaches (Don't Repeat These)
 
-1. **改源码后忘了重建 dxgi.dll**
-   首轮直接编辑 `runtime.cpp` 后告诉用户"清缓存重启游戏" → 用户截图回复"还是老样子"。原因：`reshade_core` 是 ExternalProject + stamp file，`build.ps1` 不带 `-Rebuild` 会跳过 reshade，dxgi.dll 没更新。
-   → 教训：动 `reshade/source/` 后必须 `-Rebuild`。CMakeLists.txt 有 `-DRESHADE_ALWAYS_REBUILD=ON` 选项可以让它每次都跑（但默认关，因为完整 MSBuild ~30s）。
+1. **`rtk init -g` 想装 PreToolUse hook 实现自动 `rtk` 前缀 → Windows 上不支持**
+   `rtk init --show` 显示 `[--] Hook: not found`，跑 `rtk init -g --auto-patch` 输出 `[warn] Hook-based mode requires Unix (macOS/Linux). Windows: use --claude-md mode for full injection.`。
+   → 结论：Windows 上 RTK 永远是 CLAUDE.md 注入模式 + AI 手动加 `rtk` 前缀。每次 Bash 输出顶部的 `[rtk] /!\ No hook installed` 警告**在 Windows 上是永久误报**，忽略即可。
+   → 备选 `snip`（Go 实现的 RTK clone）几乎肯定有同样的 Unix-only hook 限制。真要 Windows 自动 hook 就得自己写 PowerShell PreToolUse hook，ROI 不高。
 
-2. **初版 launch 直接砍掉 pack，没留 opt-in flag**
-   `8e0d2c4 → 7e7e7e7` 的早期 commit 草稿里，launch 默认不 pack 且没有 `--pack` flag。用户问"如果要直接打包怎么办" → 加了 `--pack`。video 同款重构时吸取教训，一开始就给了 `--video / --no-video`。
-   → 教训：删默认行为时随手加一个"恢复旧行为"的 flag。
-
-3. **`fps` 改 float 后 `(i + 1) % fps` 没改**
-   原版 `fps: int`，进度打印 `if (i + 1) % fps == 0`。auto fps 后 fps 是 12.187，`% 12.187 == 0` 永远不真 + 边界会除零。
-   → 改用：`progress_step = max(int(round(fps)), 1)` 在循环外算一次。
-   → 教训：放宽字段类型时（int → float）grep 调用点找 `%` / `//` / `range()` / 索引等隐式 int-only 运算。
-
-4. **ffmpeg `-r` 直接 `str(fps)` for float**
-   `str(12.187)` 理论可用但精度依赖 locale。换成 `f"{fps:.6f}"` 强制点号小数 6 位。
-
-5. **测 `_estimate_fps` 直接 `python -c ...`**
-   报 `ModuleNotFoundError: cv2`（main.py 顶层 import → pack_hdf5 → cv2）。
-   → 改用：`uv run python -c ...` 走项目环境。
+2. **CLI 改造时漏改 `args.game_dir` 引用**
+   把位置参数改成 `--game-dir` flag 时差点忘了：argparse **自动**把 `--game-dir` 转成 `args.game_dir`（dash → underscore），调用代码（`if not args.game_dir`、`Path(args.game_dir)`）保持不变即可。一开始想成需要改 6 处 `args.game_dir` 引用 → 实际只改 2 行 argparse 声明。
+   → 教训：argparse dash-to-underscore 转换对位置参数和 flag 都生效，rename flag 不影响下游 attribute 名。
 
 ## Key Decisions
 
 | Decision | Rationale |
 |----------|-----------|
-| `_make_video(fps=0)` 触发自动估算 | 老调用都需要修；统一让"传 0 等于自动"，零侵入 |
-| `cmd_video --fps` 默认 0（auto），用户显式覆盖才用具体值 | 修复快进 + 保留"我就要锁定 30 fps"逃生通道 |
-| `--pack` opt-in，`--video` opt-out | pack 耗时显著 > video；匹配各自常见用法 |
-| video / pack 子命令丢掉旧 `--frames-dir` / `--inputs` / `--output` | 用户原话"像 pack 那样对游戏的输出目录检查"，单一位置参数最少噪音 |
-| 自动 fps 失败回退 `CAP_FPS=30` 而非报错 | 单帧 / 文件名异常 session 也能出片，不卡批量流程 |
-| Cache prefix 改 7 字符 `unicap-` 而非保留 8 字符比如 `unicap--` | 自然命名 > 字节对齐；`compare(0, 7, ...)` 一并改了 |
-| 旧 `reshade-` cache 文件**不**做向下兼容自动清理 | 一次性手工清理代价低，不值得改源码维护双 prefix 规则 |
+| `--depth/--no-depth` 关闭时连 `/normal` 一起跳 | 二者绑定在 EXR triplet 模式同一条加载路径；只跳 `/depth` 留 `/normal` 半边没意义。同时也跳 UI mask（mask 依赖 depth==0）。语义统一为"色彩-only HDF5"。 |
+| `--no-depth` 不提供"加载 depth 但不写"的子模式 | YAGNI；若以后要"应用 mask 但不存 depth"再加 |
+| `pack`/`video` 位置参数 → `--game-dir` flag | 用户截图明确要求 `--game-dir`；flag 形式更显式，避免后续追加更多 flag 时位置参数语义混乱 |
+| symlink fallback 完全静默（不留 stderr/log 痕迹） | 用户原话"把这两个输出 suppress 掉"——直接删，不做 `--verbose` 等开关 |
+| 两次 commit 拆分（HANDOFF doc + CLI 改进）| 上份 agent 留的 HANDOFF.md 是历史记录，CLI 改动是本会话产出，分开干净 |
+| CLAUDE.md 纠错单独一次 commit | 文档纠错和功能改动语义不同，便于后续 cherry-pick / revert |
 
 ## Current State
 
 **Working**:
-- `main.py` 所有子命令 `--help` 正常；`python -c "import ast; ast.parse(...)"` 通过
-- `_estimate_fps` 实测 125 帧 session = 12.187 fps（手算 124 / 10.175 = 12.187 ✓）
-- `dist\dxgi.dll` 已包含 `unicap-` prefix 改动（19:31 timestamp）
+- `uv run main.py launch --help` / `pack --help` / `video --help` 全 OK
+- `uv run main.py pack --help` 显示 `[--game-dir DIR] [--depth | --no-depth]`
+- `uv run main.py video --help` 显示 `[--game-dir DIR] [--fps FPS]`
+- 所有 CLI / addon / dxgi.dll 改动已实机验证（用户口头确认）
 
-**Pending verification**:
-- 实跑 `uv run main.py video <game_dir>` 重生成被快进的 video（原 session 已删，需录新片回归）
-- 实跑 launch 看 `%TEMP%\unicap\` 是 `unicap-*.{i,asm,cso}`
-- ui-only / both 模式（上份 handoff 起遗留）
+**Uncommitted**:
+- 仅 `CLAUDE.md`（6 处文档纠错，10 行净改动）
 
-**Tree state**: clean，与 origin/master 同步。最近 5 commit：
+**Tree**: master 与 origin/master 同步；最近 8 commit：
 ```
+bddd939 chore: suppress symlink fallback warning + COPY 提示
+334303d feat: pack/video CLI 改进 — ui-mode 重命名 + --depth toggle + --game-dir flag
+f89fe7e docs: handoff — main.py CLI 重构 + cache prefix reshade- → unicap-
 09863dd chore: shader cache prefix reshade- → unicap-
-b52ac6e update                                            ← 用户自己提的（非本 AI 会话）
+b52ac6e update
 7e7e7e7 feat: video/pack 批量子命令 + 耗时统计 + 自动 fps 估算
-8e0d2c4 handoff: 收尾 — perf 完工 19.4 fps，...
+8e0d2c4 handoff: 收尾 — perf 完工 19.4 fps
 b7021ed perf: 1920×1080 native + 2-worker pool → 19.4 fps capture
 ```
 
@@ -91,102 +96,86 @@ b7021ed perf: 1920×1080 native + 2-worker pool → 19.4 fps capture
 
 | File | Why It Matters |
 |------|----------------|
-| `main.py` | 本会话主要改动；新增 `_fmt_dur` (~L60)、`_RE_BMP_TS / _bmp_ts_ms / _estimate_fps` (~L451-475)；`_make_video` 签名改 `fps: float = 0`；`cmd_pack` / `cmd_video` 全部重写；CLI 子命令改位置参数 |
-| `reshade/source/runtime.cpp` | 三处 `"reshade-" → "unicap-"`（L3540, L3561, L3583）+ `compare(0, 8, ...)` → `compare(0, 7, ...)` |
-| `tools/capture/pack_hdf5.py` | `scan_frames` 文件名 regex 是 main.py `_RE_BMP_TS` 的参考来源（pack_hdf5 用 ns 精度，main.py 简化为 ms） |
-| `CMakeLists.txt` | `reshade_core` 是 ExternalProject + stamp，必须 `build.ps1 -Rebuild` 才会重跑 MSBuild |
+| `main.py` | 本会话主要改动文件：argparse 改 flag 形式 + `--depth` 透传 + `_symlink_file` 静默 |
+| `tools/capture/pack_hdf5.py` | `pack(include_depth: bool = True)` 新参数；`mode='triplet'` 降级逻辑在函数顶部 |
+| `CLAUDE.md` | 已纠 6 处事实失准；diff 未 commit |
 
 ## Code Context
 
-### main.py 新增 fps 估算
+### `pack_hdf5.pack` 新签名
 
 ```python
-_RE_BMP_TS = re.compile(r' (\d{4}-\d{2}-\d{2}) (\d{2}-\d{2}-\d{2}) (\d+) ')
-
-def _bmp_ts_ms(p: Path) -> int | None:
-    # 文件名：<prefix> 2026-05-01 16-17-10 325 BackBuffer.bmp
-    # 端到端只用差值，本地 / UTC 都行
-
-def _estimate_fps(bmps: list[Path]) -> float | None:
-    # (n-1) * 1000 / (last_ms - first_ms)；<2 帧或解析失败返 None
-
-def _make_video(frames_dir, output, fps: float = 0, glob_pat="*BackBuffer.bmp"):
-    if fps <= 0:
-        est = _estimate_fps(bmps)
-        fps = est if est else CAP_FPS
-    progress_step = max(int(round(fps)), 1)   # ← 不能用 % fps，fps 是 float
-    # ffmpeg ... "-r", f"{fps:.6f}"           ← 不要 str(fps)
+def pack(frames_dir: Path, inputs_path: Path, output_path: Path, include_depth: bool = True):
+    ...
+    mode, frames = scan_frames(frames_dir)
+    ...
+    if not include_depth and mode == 'triplet':
+        print("[SCAN] --no-depth: 跳过 /depth /normal 数据集与 UI mask")
+        mode = 'color'
+        for f in frames:
+            f['depth'] = None
+            f['normal'] = None
+    ...
 ```
+关键：把 `mode` 强行降到 `'color'` + 清空 frame['depth'/'normal']，下游 `if mode == 'triplet'` 分支自然全跳过，无需散点 if。
 
-### CLI 形态
+### CLI 形态（最新）
 
 ```
-uv run main.py launch [--no-video] [--pack]
-uv run main.py video <GAME_DIR> [--fps N]   # 0 = auto
-uv run main.py pack  <GAME_DIR>
+uv run main.py launch [--ui-mode {no-ui,ui,both}] [--no-video] [--pack]
+uv run main.py video  --game-dir DIR [--fps N]              # 0 = auto
+uv run main.py pack   --game-dir DIR [--no-depth]
 ```
 
-### reshade prefix 改动
+### `_symlink_file` 现状
 
-```cpp
-// runtime.cpp L3540 / L3561 (read & write paths)
-path /= std::filesystem::u8path("unicap-" + id + '.' + type);
-
-// runtime.cpp L3583 (clear_effect_cache)
-if (filename.wstring().compare(0, 7, L"unicap-") != 0 || ...)
+```python
+def _symlink_file(src: Path, dst: Path):
+    if dst.is_symlink() or dst.exists():
+        dst.unlink()
+    try:
+        os.symlink(str(src), str(dst))
+    except OSError:
+        shutil.copy2(src, dst)
+```
+完全无输出。诊断 dxgi.dll 是否为 symlink 用 PowerShell：
+```powershell
+(Get-Item "<game>\dxgi.dll").LinkType   # 'SymbolicLink' 或 $null（fallback 到 copy）
 ```
 
 ## Resume Instructions
 
-### 1. 实机验证 unicap- prefix（≤2 分钟）
+### 1. 把 CLAUDE.md 纠错 commit + push（30 秒）
 
-```powershell
-# 退出当前游戏（dxgi.dll 是 symlink；游戏运行时锁着旧 DLL）
-# 然后：
-Remove-Item "$env:TEMP\unicap\reshade-*","$env:TEMP\unicap\unicap.log*"
-uv run main.py launch
-# 启动后随便走两步触发 shader 编译
-# 退游戏后看：
-ls "$env:TEMP\unicap\"
+```bash
+git add CLAUDE.md
+git commit -m "docs: CLAUDE.md 6 处事实纠错 — dxgi 部署 / pack 默认 / 分辨率 / FC_BothCapture / unicap- cache / video_ui"
+rtk git push
 ```
+预期：成功推到 origin/master，工作树 clean。
 
-期望：`unicap-CaptureStatus-*.{i,asm,cso}`、`unicap-DepthToAddon-*.{i,asm,cso}`、`unicap-UIRemove-*.{i,asm,cso}` —— 没有任何 `reshade-` 前缀。
+### 2. 后续若遇 RTK 警告
 
-如果还看到 `reshade-` 前缀：
-- 检查 `dist\dxgi.dll` 修改时间是否为 19:31 之后（旧 dll 没替换）
-- 检查游戏目录 `dxgi.dll` 是 symlink 指向 `dist\dxgi.dll`（不是 copy）：`(Get-Item "<game>\dxgi.dll").LinkType` 应为 `SymbolicLink`
+每次 Bash 输出顶部的 `[rtk] /!\ No hook installed — run 'rtk init -g'` 在 Windows 上**永远会出现**。
+- 不要再 `rtk init -g`，已经是 CLAUDE.md 注入模式的 up-to-date 状态
+- 不要相信 `rtk init --show` 里的 `[warn] Global (~/.claude/CLAUDE.md): old RTK block` —— 实际状态是最新（同一次输出还说了 `already contains up-to-date rtk instructions`）
 
-### 2. 实机验证 video 快进修复（≥10 秒采集 1 段）
+### 3. 若需要再调 ui-mode 行为
 
-```powershell
-uv run main.py launch
-# 游戏内：F8 → 等 ~15 秒 → F9
-# 等待 [VIDEO] 自动 fps=XX.YY（XXX 帧 / 文件名时间戳） 输出
-# 然后回放生成的 video.mp4，秒表对一下与采集时长是否一致
+`main.py:_ensure_addon_enabled` 是单点开关：
+```python
+pre_ui_flag  = "0" if ui_mode == "ui" else "1"   # ← 若改 enum 值，先改这里
+both_flag    = "1" if ui_mode == "both" else "0"
 ```
-
-期望：
-- 控制台打印 `[VIDEO] 自动 fps=...` 行
-- video.mp4 时长 ≈ 采集时长（不再快进）
-
-如果仍快进：检查 `_estimate_fps` 输出。可能 BMP 文件名 regex 失配（addon 命名格式变了？）。
-
-### 3. ui-only / both 实机（上份 handoff 遗留）
-
-```powershell
-uv run main.py launch --ui-mode ui-only   # F8 直接采，BMP 应带 UI
-uv run main.py launch --ui-mode both      # F6 → F8 双流（video.mp4 + video_ui.mp4）
-```
+另外 `cmd_launch` 提示框（~L284）+ `_interactive_loop` survey 判断（~L306）也都靠字符串比对。grep `"ui"` 或 `"both"` 找全。
 
 ## Warnings
 
-- **改 `reshade/source/` 必须 `-Rebuild`**。stamp file 让普通 build 跳过。本会话因此返工一次。
-- **旧 `reshade-*.{i,asm,cso}` 不会被新 cleanup 自动清**（filter 只匹配 `unicap-`）。手动 `Remove-Item` 一次即可。
-- **`_RE_BMP_TS` 和 addon BMP 命名强耦合**：`<prefix> YYYY-MM-DD HH-MM-SS <ms> BackBuffer.bmp`。改 addon 命名格式时 regex 静默失效 → fps 回退 30 → 又快进。命名定义在 `frame_capture.cpp` 的 BMP 写盘路径。
-- **video / pack 已存在则跳过**按文件名判断；损坏的 video.mp4 也算"已存在"。重生成需手动 `rm` 旧文件。考虑过加 `--force` 但 YAGNI。
-- **fps 估算只看首末两帧**：中间长暂停会让估值偏低。capture 不会主动暂停，但理论存在。
-- **承袭上份 handoff 所有 warning**：`safe_last_rt` 守门、`fc_pass_total.txt` 写出顺序、`reshade-addons/deps/reshade/include` v5 wrapper、R10G10B10A2 swap chain 错色、`NUM_WORKERS=2` constexpr。
+- **CLAUDE.md 还没 commit** —— `git status` 唯一 dirty 项就是这个。下次 agent 第一件事：confirm + commit + push。
+- **`--depth/--no-depth` 仅 `pack` 子命令上有**；`launch --pack` 走默认 `True`，即"含 depth"。若用户想 launch 时也能选，得给 `cmd_launch` 的 argparse 也加 `--depth`，并把 `args.depth` 透到 `_run_capture` 内部那次 `pack_hdf5.pack(...)` 调用。**目前未做** —— 用户未要求。
+- **承袭上份 handoff 所有 warnings**：`reshade/source/` 改了必须 `-Rebuild`；旧 `reshade-*.{i,asm,cso}` cache 不会自动清；`_RE_BMP_TS` 与 addon BMP 命名强耦合（改 addon 命名格式时 fps 估算会静默回退到 30）；R10G10B10A2 swap chain 错色；`NUM_WORKERS=2` constexpr。
+- **RTK Windows 警告**永远在，别浪费时间想"修"它。
 
 ## Setup Required
 
-无新增。沿用：VS 2022 + MSBuild v143、`uv sync`、`tools/capture/config.py` 的 `DATASET_ROOT`、日志在 `%TEMP%\unicap\unicap.log{,1}`。
+无新增。沿用：VS 2022 + MSBuild v143、`uv sync`、`tools/capture/config.py` 的 `GAME_PATH`/`DATASET_ROOT`、日志在 `%TEMP%\unicap\unicap.log{,1}`。
