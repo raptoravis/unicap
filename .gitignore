@@ -1,6 +1,7 @@
 build/
 # dist/
 dist-exe/
+dist-exe-build/
 *.user
 *.suo
 .vs/

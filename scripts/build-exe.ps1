@@ -50,7 +50,7 @@ $version = $version.Trim()
 Write-Host "Version: $version (来自 pyproject.toml)" -ForegroundColor Cyan
 
 # ── Nuitka 安装检查 ───────────────────────────────────────────────────────────
-$nuitkaCheck = & uv run python -c "import nuitka" 2>&1
+& uv run python -c "import nuitka" *>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Nuitka 未安装，正在 uv add nuitka…" -ForegroundColor Yellow
     & uv add --dev nuitka

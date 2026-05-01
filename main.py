@@ -658,7 +658,7 @@ def cmd_pack(args):
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(prog="unicap")
+    parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("launch", help="部署 + 启动游戏 + 进入交互式 F6/F8/F9 工作流")
