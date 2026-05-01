@@ -34,6 +34,6 @@ cmake --build $buildDir --config Release --parallel
 Write-Host "`nArtifacts in: $root\dist\" -ForegroundColor White
 Write-Host "  dxgi.dll              (ReShade core)" -ForegroundColor Gray
 Write-Host "  frame_capture.addon   (frame capture addon)" -ForegroundColor Gray
-Write-Host "  reshade-shaders\Shaders\*.fx" -ForegroundColor Gray
+Write-Host "  unicap-shaders\Shaders\*.fx" -ForegroundColor Gray
 Write-Host "`nNext steps:" -ForegroundColor White
 Write-Host "  uv run main.py launch          # deploy + start game + F6/F8/F9 loop" -ForegroundColor Gray

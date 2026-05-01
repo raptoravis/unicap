@@ -19,7 +19,7 @@ Outputs to `dist/`:
 
 - `dxgi.dll` — ReShade core (DX12/DXGI proxy)，built from `reshade/` source；由 `main.py launch` (cmd_deploy) symlink 到游戏目录（无 Windows 开发者模式时退化为 copy）
 - `frame_capture.addon` — capture addon (primary build output)
-- `reshade-shaders/Shaders/*.fx` — DepthToAddon + UIRemove shaders (copied from `shaders/`)
+- `unicap-shaders/Shaders/*.fx` — DepthToAddon + UIRemove shaders (copied from `shaders/`)
 
 Delete `build\` to force CMake reconfigure.
 
@@ -134,7 +134,7 @@ The addon handles all timing and frame output; `capture_all.py` only records inp
 
 1. `reshade_core` (ExternalProject, MSBuild) → `dist/dxgi.dll` (unused)
 2. `frame_capture` (shared library, MSVC, CXX17) → `dist/frame_capture.addon`
-3. `shaders` (custom target, always runs) → copies `.fx` files to `dist/reshade-shaders/Shaders/`
+3. `shaders` (custom target, always runs) → copies `.fx` files to `dist/unicap-shaders/Shaders/`
 
 ## Dataset output layout
 

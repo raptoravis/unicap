@@ -73,7 +73,7 @@ target_compile_definitions(frame_capture PRIVATE
 )
 
 # ── Shaders ───────────────────────────────────────────────────────────────────
-set(SHADER_DST "${CMAKE_SOURCE_DIR}/dist/reshade-shaders/Shaders")
+set(SHADER_DST "${CMAKE_SOURCE_DIR}/dist/unicap-shaders/Shaders")
 
 add_custom_target(shaders ALL
     COMMAND ${CMAKE_COMMAND} -E make_directory "${SHADER_DST}"
@@ -89,7 +89,7 @@ add_custom_target(shaders ALL
     COMMAND ${CMAKE_COMMAND} -E copy
         "${CMAKE_SOURCE_DIR}/shaders/CaptureStatus.fx"
         "${SHADER_DST}/CaptureStatus.fx"
-    COMMENT "Staging shaders to dist/reshade-shaders/Shaders/"
+    COMMENT "Staging shaders to dist/unicap-shaders/Shaders/"
 )
 
 # ── Deploy target (cmake --install) ──────────────────────────────────────────
@@ -102,7 +102,7 @@ install(FILES
     DESTINATION "${GAME_WIN64}"
 )
 install(FILES
-    "${CMAKE_SOURCE_DIR}/dist/reshade-shaders/Shaders/DepthToAddon.fx"
-    "${CMAKE_SOURCE_DIR}/dist/reshade-shaders/Shaders/UIRemove.fx"
-    DESTINATION "${GAME_WIN64}/reshade-shaders/Shaders"
+    "${CMAKE_SOURCE_DIR}/dist/unicap-shaders/Shaders/DepthToAddon.fx"
+    "${CMAKE_SOURCE_DIR}/dist/unicap-shaders/Shaders/UIRemove.fx"
+    DESTINATION "${GAME_WIN64}/unicap-shaders/Shaders"
 )
