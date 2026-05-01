@@ -119,13 +119,16 @@ def _find_boundary(captured: dict) -> int:
     all_diffs = sorted(d for _, _, d in pairs)
     threshold = max(all_diffs[len(all_diffs) // 2] * 3.0, 3.0)  # 3× 中位差分，最小 3.0
 
-    # FF7R-类管线特例：如果最大跳变恰好在最小那对 skip 之间，且明显大于其他差分，
-    # 说明 UI 是合成在最后一个非 BB RT 之内（不是 BB），这时 skip=0 才是干净的
-    # pre-UI 帧。默认算法假设"稳定区=pre-UI"在这种情况下会推荐错的一侧。
+    # FF7R-类管线特例：如果紧挨 skip=0 的那一对差分远大于"中段稳定差分"，
+    # 说明 UI 合成在最后一个非 BB RT 之内（不是 BB），skip=0 才是干净的 pre-UI 帧。
+    # 不看全局 max — 早期空场景→主渲染区的跳变（首端）也可能很大，会把 max
+    # 拐到 (high, mid) 那对上，让特例判否、退到默认流程返回错的一侧。
     median_diff = all_diffs[len(all_diffs) // 2]
-    largest = max(pairs, key=lambda p: p[2])
-    if largest[1] == ordered[-1] and largest[2] > 5.0 * max(median_diff, 1.0):
-        return largest[1]
+    adj_zero = next((p for p in pairs if p[1] == ordered[-1]), None)
+    mid_diffs = sorted(d for _, _, d in pairs[1:-1]) if len(pairs) >= 3 else []
+    mid_median = mid_diffs[len(mid_diffs) // 2] if mid_diffs else median_diff
+    if adj_zero is not None and adj_zero[2] > 5.0 * max(mid_median, 1.0):
+        return ordered[-1]
 
     # 将连续"稳定对"聚成段（d < threshold 为稳定）
     groups: list[list[tuple[int, int, float]]] = []
@@ -267,6 +270,19 @@ def run(
     if abort_event is not None and abort_event.is_set():
         print("\n[SURVEY] 已中止，跳过分析")
         return None
+
+    # 特例：total=1（如 Batman AK），无法 boundary 分析。skip=0 是唯一可选值，
+    # 但能否采到 pre-UI 帧取决于该游戏管线（FF7R 类的"UI 合成在最后一个非 BB
+    # RT 内"假设不一定成立）。
+    if total == 1 and 0 in captured:
+        print("\n[SURVEY] 警告：该游戏仅 1 个非 BB pass，无法做 boundary 分析。")
+        print("         skip=0 是唯一可选值；pre-UI 帧能否采到取决于游戏管线。")
+        print("         建议：先打开 survey_skip_000_BackBuffer.bmp 检查是否含 UI；")
+        print("               若含 UI，请改用 --ui-mode ui（跳过 survey，直抓 BackBuffer）。")
+        rec_file = survey_dir / "recommended_skip.txt"
+        rec_file.write_text("0", encoding="utf-8")
+        return 0
+
     if len(captured) < 2:
         print("\n[SURVEY] 帧数不足，无法分析")
         return None
