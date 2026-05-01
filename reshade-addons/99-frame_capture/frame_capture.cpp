@@ -460,6 +460,37 @@ static void on_destroy_device(device* dev)
     }
 }
 
+// Survey mode bind-time copy: the chosen RT is currently in render_target
+// state (the game just transitioned it for this bind), so we can safely copy
+// from it now using render_target↔copy_source barriers.  The deferred
+// shader_resource→copy_source barrier at BB-bind time crashes the game
+// (E_INVALIDARG on Close) for mid-pipeline RTs that were never read as SRV.
+// Captured contents are the RT's pre-this-frame state (= last frame's draws
+// into it); for survey's adjacent-skip-diff algorithm that's still meaningful.
+static bool fc_copy_rt_at_bind(command_list* cmd_list, device* dev,
+                                resource rt, uint32_t w, uint32_t h, format fmt)
+{
+    if (!g_pre_ui_staging.handle ||
+        g_pre_ui_staging_w != w || g_pre_ui_staging_h != h) {
+        if (g_pre_ui_staging.handle) dev->destroy_resource(g_pre_ui_staging);
+        g_pre_ui_staging = { 0 };
+        resource_desc sd(w, h, 1, 1, fmt, 1,
+                         memory_heap::gpu_to_cpu, resource_usage::copy_dest);
+        if (!dev->create_resource(sd, nullptr, resource_usage::copy_dest, &g_pre_ui_staging)) {
+            reshade::log::message(reshade::log::level::error,
+                "FC: failed to create scene RT staging (survey bind-time)");
+            return false;
+        }
+        g_pre_ui_staging_w   = w;
+        g_pre_ui_staging_h   = h;
+        g_pre_ui_staging_fmt = fmt;
+    }
+    cmd_list->barrier(rt, resource_usage::render_target, resource_usage::copy_source);
+    cmd_list->copy_texture_region(rt, 0, nullptr, g_pre_ui_staging, 0, nullptr);
+    cmd_list->barrier(rt, resource_usage::copy_source, resource_usage::render_target);
+    return true;
+}
+
 // Called on every OMSetRenderTargets (DX11) or equivalent.
 // When the game switches from depth-enabled 3D passes to a no-DSV pass that
 // writes to the swap chain back buffer, we copy the back buffer content —
@@ -507,6 +538,14 @@ static void on_bind_rts_dsv(command_list* cmd_list, uint32_t count,
                 s_last_non_bb_w   = rd.texture.width;
                 s_last_non_bb_h   = rd.texture.height;
                 s_last_non_bb_fmt = rd.texture.format;
+                // Survey mode: do the GPU copy NOW with render_target barriers.
+                // Avoids the BB-bind shader_resource assumption that crashes
+                // for mid-pipeline RTs not actually read as SRV downstream.
+                if (s_survey_mode &&
+                    fc_copy_rt_at_bind(cmd_list, dev, r,
+                                       rd.texture.width, rd.texture.height, rd.texture.format)) {
+                    s_pre_ui_captured = true;
+                }
             }
             break;
         }
@@ -590,6 +629,11 @@ static void on_begin_render_pass(command_list* cmd_list, uint32_t count,
                 s_last_non_bb_w   = rd.texture.width;
                 s_last_non_bb_h   = rd.texture.height;
                 s_last_non_bb_fmt = rd.texture.format;
+                if (s_survey_mode &&
+                    fc_copy_rt_at_bind(cmd_list, dev, r,
+                                       rd.texture.width, rd.texture.height, rd.texture.format)) {
+                    s_pre_ui_captured = true;
+                }
             }
             break;
         }

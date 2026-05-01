@@ -45,17 +45,23 @@ def _read_pass_total(game_dir: Path) -> int | None:
 
 
 def _wait_for_bmp(survey_dir: Path, skip: int, timeout: float,
+                  mtime_floor: float,
                   abort: threading.Event | None = None) -> Path | None:
-    """等待 survey_skip_NNN_BackBuffer.bmp 出现；先删旧文件防止误读。"""
+    """等待 survey_skip_NNN_BackBuffer.bmp 出现。
+
+    用 mtime_floor 排除上轮 survey 的同名残留：addon 在 wait_per_skip 期间
+    会重复覆盖同一文件，主动 unlink 会和 addon 写盘抢锁导致 WinError 32。
+    """
     target = survey_dir / f"survey_skip_{skip:03d}_BackBuffer.bmp"
-    if target.exists():
-        target.unlink()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if abort is not None and abort.is_set():
             return None
-        if target.exists():
-            return target
+        try:
+            if target.stat().st_mtime >= mtime_floor:
+                return target
+        except OSError:
+            pass
         time.sleep(0.3)
     return None
 
@@ -112,6 +118,14 @@ def _find_boundary(captured: dict) -> int:
 
     all_diffs = sorted(d for _, _, d in pairs)
     threshold = max(all_diffs[len(all_diffs) // 2] * 3.0, 3.0)  # 3× 中位差分，最小 3.0
+
+    # FF7R-类管线特例：如果最大跳变恰好在最小那对 skip 之间，且明显大于其他差分，
+    # 说明 UI 是合成在最后一个非 BB RT 之内（不是 BB），这时 skip=0 才是干净的
+    # pre-UI 帧。默认算法假设"稳定区=pre-UI"在这种情况下会推荐错的一侧。
+    median_diff = all_diffs[len(all_diffs) // 2]
+    largest = max(pairs, key=lambda p: p[2])
+    if largest[1] == ordered[-1] and largest[2] > 5.0 * max(median_diff, 1.0):
+        return largest[1]
 
     # 将连续"稳定对"聚成段（d < threshold 为稳定）
     groups: list[list[tuple[int, int, float]]] = []
@@ -170,12 +184,16 @@ def run(
     fc_pass_total = game_dir / "fc_pass_total.txt"
     fc_pass_total.unlink(missing_ok=True)
 
+    # mtime 基线：本轮开始之后 addon 写出的帧才算数（排除上轮残留同名 BMP）
+    mtime_floor = time.time()
+
     # ── Phase 1: 探测帧（skip=0）→ 获取 pass 总数 ─────────────────────────────
     print("[SURVEY] Phase 1: 探测帧，获取 pass 总数…")
     _write_skip(game_dir, 0)
     fc_output_dir.write_text(str(survey_dir), encoding="utf-8")
 
-    bmp_0 = _wait_for_bmp(survey_dir, 0, timeout_per_skip + wait_per_skip, abort_event)
+    bmp_0 = _wait_for_bmp(survey_dir, 0, timeout_per_skip + wait_per_skip,
+                          mtime_floor, abort_event)
     if bmp_0 is None:
         print("[SURVEY] ✗ 未收到探测帧，请确认游戏正在运行且已按 F9 激活采集")
         _clear_skip(game_dir)
@@ -226,7 +244,8 @@ def run(
                     break
                 time.sleep(0.1)
 
-            bmp = _wait_for_bmp(survey_dir, skip, timeout_per_skip, abort_event)
+            bmp = _wait_for_bmp(survey_dir, skip, timeout_per_skip,
+                                mtime_floor, abort_event)
             if bmp is None:
                 if abort_event is not None and abort_event.is_set():
                     break
