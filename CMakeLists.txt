@@ -18,9 +18,17 @@ message(STATUS "MSBuild: ${MSBUILD_EXE}")
 # and produces wrong-color BMPs, switch to a different ReShade build.
 include(ExternalProject)
 
-set(RESHADE_SLN "${CMAKE_SOURCE_DIR}/reshade/ReShade.sln")
-set(RESHADE_DLL "${CMAKE_SOURCE_DIR}/reshade/bin/x64/Release/ReShade64.dll")
+set(RESHADE_SLN     "${CMAKE_SOURCE_DIR}/reshade/ReShade.sln")
+set(RESHADE_DLL     "${CMAKE_SOURCE_DIR}/reshade/bin/x64/Release/ReShade64.dll")
+set(UNICAP_VK_JSON  "${CMAKE_SOURCE_DIR}/reshade-addons/UniCap64.json")
 
+# Same DLL bytes serve two injection paths under unicap-branded filenames:
+#   dist/dxgi.dll       — DX10/11/12 proxy DLL (loaded next to game exe)
+#   dist/UniCap64.dll   — Vulkan implicit layer (loaded via VK_IMPLICIT_LAYER_PATH
+#                         env var in main.py; UniCap64.json references this name)
+# UniCap64.json is the Vulkan layer manifest customized for unicap branding —
+# stored in repo, NOT generated from reshade/setup/ReShade64.json (which would
+# carry the "VK_LAYER_reshade" name and require post-copy patching).
 ExternalProject_Add(reshade_core
     SOURCE_DIR       "${CMAKE_SOURCE_DIR}/reshade"
     CONFIGURE_COMMAND ""
@@ -33,7 +41,10 @@ ExternalProject_Add(reshade_core
     BUILD_IN_SOURCE  1
     INSTALL_COMMAND  ${CMAKE_COMMAND} -E copy "${RESHADE_DLL}"
                      "${CMAKE_SOURCE_DIR}/dist/dxgi.dll"
-    # ReShade builds a single ReShade64.dll; renamed to dxgi.dll for DX12/DXGI proxy injection
+            COMMAND  ${CMAKE_COMMAND} -E copy "${RESHADE_DLL}"
+                     "${CMAKE_SOURCE_DIR}/dist/UniCap64.dll"
+            COMMAND  ${CMAKE_COMMAND} -E copy "${UNICAP_VK_JSON}"
+                     "${CMAKE_SOURCE_DIR}/dist/UniCap64.json"
     STAMP_DIR        "${CMAKE_BINARY_DIR}/stamps/reshade_core"
     BUILD_BYPRODUCTS "${RESHADE_DLL}"
 )
@@ -84,8 +95,8 @@ add_custom_target(shaders ALL
         "${CMAKE_SOURCE_DIR}/shaders/DepthToAddon.fx"
         "${SHADER_DST}/DepthToAddon.fx"
     COMMAND ${CMAKE_COMMAND} -E copy
-        "${CMAKE_SOURCE_DIR}/shaders/UIRemove.fx"
-        "${SHADER_DST}/UIRemove.fx"
+        "${CMAKE_SOURCE_DIR}/shaders/BackBufferExport.fx"
+        "${SHADER_DST}/BackBufferExport.fx"
     COMMAND ${CMAKE_COMMAND} -E copy
         "${CMAKE_SOURCE_DIR}/shaders/CaptureStatus.fx"
         "${SHADER_DST}/CaptureStatus.fx"
@@ -103,6 +114,6 @@ install(FILES
 )
 install(FILES
     "${CMAKE_SOURCE_DIR}/dist/unicap-shaders/Shaders/DepthToAddon.fx"
-    "${CMAKE_SOURCE_DIR}/dist/unicap-shaders/Shaders/UIRemove.fx"
+    "${CMAKE_SOURCE_DIR}/dist/unicap-shaders/Shaders/BackBufferExport.fx"
     DESTINATION "${GAME_WIN64}/unicap-shaders/Shaders"
 )

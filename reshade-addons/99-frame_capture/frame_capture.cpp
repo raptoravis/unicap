@@ -77,7 +77,7 @@ struct SaveTask {
     uint32_t              depth_w = 0, depth_h = 0;
 
     // "Both" mode: optional second BMP holding the post-UI BackBuffer
-    // (UIRemove_ColorTex) captured in the same frame as the pre-UI scene.
+    // (BackBufferExport_ColorTex) captured in the same frame as the pre-UI scene.
     std::filesystem::path ui_bmp_path;
     std::vector<uint8_t>  ui_color_pixels; // RGBA8
     uint32_t              ui_width = 0, ui_height = 0;
@@ -286,6 +286,7 @@ static format   s_last_non_bb_fmt  = format::unknown;
 
 // Previous frame's non-BB RT count — used by reverse-skip to hit the Nth-from-last pass.
 static uint32_t s_prev_non_bb_total = 0;
+
 
 // Survey mode: Python writes fc_skip_count.txt to sweep skip values at runtime.
 static bool     s_survey_mode  = false;
@@ -500,7 +501,8 @@ static bool fc_copy_rt_at_bind(command_list* cmd_list, device* dev,
                                 resource rt, uint32_t w, uint32_t h, format fmt)
 {
     if (!g_pre_ui_staging.handle ||
-        g_pre_ui_staging_w != w || g_pre_ui_staging_h != h) {
+        g_pre_ui_staging_w != w || g_pre_ui_staging_h != h ||
+        g_pre_ui_staging_fmt != fmt) {
         if (g_pre_ui_staging.handle) dev->destroy_resource(g_pre_ui_staging);
         g_pre_ui_staging = { 0 };
         resource_desc sd(w, h, 1, 1, fmt, 1,
@@ -593,11 +595,12 @@ static void on_bind_rts_dsv(command_list* cmd_list, uint32_t count,
     // path to the always-overwrite case (skip=0 or unknown total). For specific
     // targets, fc_copy_rt_at_bind handles it at bind time on the legacy path; on the
     // enhanced render pass path (DX12 BeginRenderPass), specific-target capture is
-    // not supported — survey will fall back to UIRemove for those skips.
+    // not supported — survey will fall back to BackBufferExport for those skips.
     bool safe_last_rt = (g_pre_ui_skip == 0 || s_prev_non_bb_total == 0);
     if (s_last_non_bb_rt.handle != 0 && s_had_depth_pass && safe_last_rt) {
         if (!g_pre_ui_staging.handle ||
-            g_pre_ui_staging_w != s_last_non_bb_w || g_pre_ui_staging_h != s_last_non_bb_h) {
+            g_pre_ui_staging_w != s_last_non_bb_w || g_pre_ui_staging_h != s_last_non_bb_h ||
+            g_pre_ui_staging_fmt != s_last_non_bb_fmt) {
             if (g_pre_ui_staging.handle) dev->destroy_resource(g_pre_ui_staging);
             g_pre_ui_staging = { 0 };
             resource_desc sd(s_last_non_bb_w, s_last_non_bb_h, 1, 1,
@@ -680,11 +683,12 @@ static void on_begin_render_pass(command_list* cmd_list, uint32_t count,
     // BB-bind branch. Same safety gate as on_bind_rts_dsv: only safe for the LAST
     // non-BB RT (always-overwrite case). For specific skip>0 targets in the enhanced
     // render pass path, fall back gracefully (do nothing → use_scene_rt=false →
-    // UIRemove fallback in on_reshade_present).
+    // BackBufferExport fallback in on_reshade_present).
     bool safe_last_rt = (g_pre_ui_skip == 0 || s_prev_non_bb_total == 0);
     if (s_last_non_bb_rt.handle != 0 && s_had_depth_pass && safe_last_rt) {
         if (!g_pre_ui_staging.handle ||
-            g_pre_ui_staging_w != s_last_non_bb_w || g_pre_ui_staging_h != s_last_non_bb_h) {
+            g_pre_ui_staging_w != s_last_non_bb_w || g_pre_ui_staging_h != s_last_non_bb_h ||
+            g_pre_ui_staging_fmt != s_last_non_bb_fmt) {
             if (g_pre_ui_staging.handle) dev->destroy_resource(g_pre_ui_staging);
             g_pre_ui_staging = { 0 };
             resource_desc sd(s_last_non_bb_w, s_last_non_bb_h, 1, 1,
@@ -719,7 +723,7 @@ static void fc_find_export_tex(effect_runtime* runtime, stored_buffers_inst& sbi
                 resource r = dev->get_resource_from_view(srv);
                 sbi.update(r, dev->get_resource_desc(r), srv);
             } else sbi.reset();
-        } else if (std::strcmp(name, "UIRemove_ColorTex") == 0) {
+        } else if (std::strcmp(name, "BackBufferExport_ColorTex") == 0) {
             rt->get_texture_binding(variable, &srv, &srv_srgb);
             if (srv.handle != 0) {
                 resource r = dev->get_resource_from_view(srv);
@@ -852,7 +856,7 @@ static void on_reshade_present(effect_runtime* runtime)
 
         // Survey-mode save dedup: write at most one BMP per distinct skip value.
         // Without this, FF7R-style enhanced-render-pass pipelines force every
-        // skip>0 frame down the UIRemove fallback path (identical content for
+        // skip>0 frame down the BackBufferExport fallback path (identical content for
         // every saved frame). At game framerate (~20+ fps × 7.5 MB) the disk
         // saturates, the save queue stays at capacity, and Python's wait for
         // the next skip's file TIMEOUTs because new enqueues keep getting
@@ -908,7 +912,7 @@ static void on_reshade_present(effect_runtime* runtime)
         bool use_scene_rt = g_pre_ui_mode && s_pre_ui_captured && g_pre_ui_staging.handle != 0;
         if (g_pre_ui_mode && !use_scene_rt)
             reshade::log::message(reshade::log::level::warning,
-                "FC: pre-UI mode ON but scene RT not copied this frame — falling back to UIRemove_ColorTex");
+                "FC: pre-UI mode ON but scene RT not copied this frame — falling back to BackBufferExport_ColorTex");
 
         if (use_scene_rt) {
             // Color already in g_pre_ui_staging. Issue depth copy now (ReShade-managed, known state).
@@ -935,7 +939,7 @@ static void on_reshade_present(effect_runtime* runtime)
                 }
             }
 
-            // "Both" mode: also copy UIRemove_ColorTex (post-UI BB) into sbi.color_staging
+            // "Both" mode: also copy BackBufferExport_ColorTex (post-UI BB) into sbi.color_staging
             // so the worker can dump a parallel "BackBufferUI.bmp" alongside the pre-UI BMP.
             // Skip in survey mode — survey only needs one capture per skip value.
             bool do_ui = g_both_capture && !s_survey_mode;
@@ -944,7 +948,7 @@ static void on_reshade_present(effect_runtime* runtime)
                     fc_find_export_tex(runtime, sbi);
                 if (sbi.color_texture_r.handle == 0) {
                     reshade::log::message(reshade::log::level::warning,
-                        "FC: both-mode: UIRemove_ColorTex not ready, skipping post-UI dump");
+                        "FC: both-mode: BackBufferExport_ColorTex not ready, skipping post-UI dump");
                     do_ui = false;
                 }
             }
@@ -1023,11 +1027,11 @@ static void on_reshade_present(effect_runtime* runtime)
                 }
             }
         } else {
-            // ── Original path: read UIRemove_ColorTex (RGBA8, post-UI) ───────
+            // ── Original path: read BackBufferExport_ColorTex (RGBA8, post-UI) ───────
             if (sbi.color_texture_r.handle == 0)
                 fc_find_export_tex(runtime, sbi);
             if (sbi.color_texture_r.handle == 0) {
-                reshade::log::message(reshade::log::level::warning, "FC: UIRemove_ColorTex not ready, skipped");
+                reshade::log::message(reshade::log::level::warning, "FC: BackBufferExport_ColorTex not ready, skipped");
                 goto reset_frame_state;
             }
 

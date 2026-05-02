@@ -26,18 +26,21 @@ $ErrorActionPreference = "Stop"
 $root      = Split-Path $PSScriptRoot -Parent
 $outDir    = Join-Path $root "dist-exe"
 $buildDir  = Join-Path $root "dist-exe-build"   # Nuitka 中间产物
-$distDir   = Join-Path $root "dist"
 $mainPy    = Join-Path $root "main.py"
 $pyproject = Join-Path $root "pyproject.toml"
 
 # ── 前置检查 ──────────────────────────────────────────────────────────────────
-if (-not (Test-Path (Join-Path $distDir "dxgi.dll"))) {
-    Write-Host "[错误] dist\dxgi.dll 不存在 — 先跑 scripts\build.ps1 构建 C++ 部分。" -ForegroundColor Red
-    exit 1
-}
-if (-not (Test-Path (Join-Path $distDir "frame_capture.addon"))) {
-    Write-Host "[错误] dist\frame_capture.addon 不存在 — 先跑 scripts\build.ps1。" -ForegroundColor Red
-    exit 1
+$preflight = @(
+    @{ Name = "dist\dxgi.dll";            Hint = "scripts\build.ps1 构建 C++ 部分" }
+    @{ Name = "dist\UniCap64.dll";        Hint = "scripts\build.ps1（Vulkan layer DLL）" }
+    @{ Name = "dist\UniCap64.json";       Hint = "scripts\build.ps1（Vulkan layer manifest）" }
+    @{ Name = "dist\frame_capture.addon"; Hint = "scripts\build.ps1" }
+)
+foreach ($p in $preflight) {
+    if (-not (Test-Path (Join-Path $root $p.Name))) {
+        Write-Host "[错误] $($p.Name) 不存在 — 先跑 $($p.Hint)。" -ForegroundColor Red
+        exit 1
+    }
 }
 
 # ── pyproject.toml version 提取 ───────────────────────────────────────────────
@@ -106,6 +109,7 @@ try {
         --include-package=numpy `
         --include-data-dir=dist=dist `
         --include-data-files=dist/dxgi.dll=dist/dxgi.dll `
+        --include-data-files=dist/UniCap64.dll=dist/UniCap64.dll `
         --include-data-dir=shaders=shaders `
         --include-data-dir=config=config `
         --include-data-files=pyproject.toml=pyproject.toml `
@@ -142,6 +146,8 @@ Remove-Item -Recurse -Force $buildDir -ErrorAction SilentlyContinue
 $exe = Join-Path $outDir "unicap.exe"
 $required = @(
     "dist\dxgi.dll",
+    "dist\UniCap64.dll",
+    "dist\UniCap64.json",
     "dist\frame_capture.addon",
     "shaders\DepthToAddon.fx",
     "config\unicapPreset.ini"
@@ -186,6 +192,6 @@ Write-Host "  unicap.exe: $exeMB MB" -ForegroundColor White
 Write-Host "  总大小:     $totalMB MB ($fileCnt 个文件)" -ForegroundColor White
 Write-Host "  位置:       $outDir\" -ForegroundColor White
 Write-Host "  分发包:     $zip ($zipMB MB)" -ForegroundColor White
-Write-Host "  关键资产:   ✓ dxgi.dll / frame_capture.addon / shaders / config" -ForegroundColor Green
+Write-Host "  关键资产:   ✓ dxgi.dll / UniCap64.dll+json / frame_capture.addon / shaders / config" -ForegroundColor Green
 Write-Host "`n分发: 直接发 unicap-$version.zip。" -ForegroundColor Cyan
 Write-Host "运行: $exe launch --help" -ForegroundColor Cyan

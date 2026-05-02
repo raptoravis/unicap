@@ -232,24 +232,53 @@ def _load_normal(path: Path) -> np.ndarray:
 
 # ─── HDF5 打包 ────────────────────────────────────────────────────────────────
 
-def pack(frames_dir: Path, inputs_path: Path, output_path: Path, include_depth: bool = True):
-    print(f"[SCAN] 扫描: {frames_dir}")
+def pack(frames_dir: Path, inputs_path: Path, output_path: Path,
+         include_depth: bool = True, include_normal: bool = False,
+         color: str = 'no-ui'):
+    """
+    color: 'no-ui' (默认) → BackBuffer.bmp 进 /color (--ui-mode no-ui 或 both 的 pre-UI 流)
+           'ui'           → BackBufferUI.bmp 优先 / fallback BackBuffer.bmp
+                            (--ui-mode ui 或 both 的 post-UI 流)
+    include_depth (默认 True): 写 /depth 数据集
+    include_normal (默认 False): 写 /normal 数据集
+    Pack 不做 UI mask（depth 在 id Tech 7 上分不开 HUD 与近景物体）。
+    要看 UI mask 效果用 main.py video --mask-ui 单独验证。
+    """
+    print(f"[SCAN] 扫描: {frames_dir}  (color={color}, depth={include_depth}, normal={include_normal})")
     mode, frames = scan_frames(frames_dir)
     n = len(frames)
     if n == 0:
         print("[ERROR] 未找到任何有效帧，退出")
         sys.exit(1)
-    if not include_depth and mode == 'triplet':
-        print("[SCAN] --no-depth: 跳过 /depth /normal 数据集与 UI mask")
-        mode = 'color'
-        for f in frames:
-            f['depth'] = None
-            f['normal'] = None
-    has_ui = any(f.get('bmp_ui') for f in frames)
-    print(f"[SCAN] 模式={mode}, 帧数={n}{'  (含 post-UI 流)' if has_ui else ''}")
 
-    # 读取第一帧确定分辨率
-    H, W = _load_bmp(frames[0]['bmp']).shape[:2]
+    # 选择 primary BMP 字段：no-ui = 'bmp' (BackBuffer); ui = 'bmp_ui' fallback 'bmp'
+    primary_key = 'bmp'  # default for color='no-ui'
+    if color == 'ui':
+        ui_count = sum(1 for f in frames if f.get('bmp_ui'))
+        if ui_count == n:
+            primary_key = 'bmp_ui'
+            print(f"[SCAN] --color ui: 使用 BackBufferUI.bmp ({ui_count}/{n} 帧)")
+        elif ui_count > 0:
+            print(f"[SCAN] --color ui: 仅 {ui_count}/{n} 帧有 BackBufferUI.bmp，"
+                  f"integrity 不全 → 退到 BackBuffer.bmp（假设 --ui-mode ui 采集）")
+        else:
+            print("[SCAN] --color ui: 无 BackBufferUI.bmp → 用 BackBuffer.bmp"
+                  "（假设此 session 是 --ui-mode ui 采集，BackBuffer.bmp = post-UI）")
+
+    # 数据集组合：color 必含；depth/normal 各自独立 opt-in/out
+    if mode == 'triplet':
+        if not include_depth and not include_normal:
+            print("[SCAN] --no-depth --no-normal: 仅 /color")
+            mode = 'color'
+        elif not include_depth:
+            print("[SCAN] --no-depth: 跳过 /depth")
+        elif not include_normal:
+            print("[SCAN] --no-normal: 跳过 /normal（默认）")
+    print(f"[SCAN] 模式={mode}, 帧数={n}")
+
+    # 读取第一帧（按 primary_key 选定的 BMP）确定分辨率
+    first_bmp = frames[0].get(primary_key) or frames[0]['bmp']
+    H, W = _load_bmp(first_bmp).shape[:2]
     print(f"[SCAN] 分辨率: {W}x{H}")
 
     print(f"[LOAD] 加载输入: {inputs_path}")
@@ -277,17 +306,15 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path, include_depth: 
         ds_mouse    = hf.create_dataset('mouse',       (n, 2),              dtype='int32',   chunks=(min(256, n), 2),    **_C)
         ds_gamepad  = hf.create_dataset('gamepad',     (n, GAMEPAD_DIM),    dtype='float32', chunks=(min(256, n), GAMEPAD_DIM), **_C)
 
+        ds_depth  = None
+        ds_normal = None
         if mode == 'triplet':
-            ds_depth  = hf.create_dataset('depth',  (n, H, W),    dtype='float32', chunks=(1, H, W),    **_C)
-            ds_normal = hf.create_dataset('normal', (n, H, W, 3), dtype='float32', chunks=(1, H, W, 3), **_C)
-
-        ds_color_ui = None
-        if has_ui:
-            ds_color_ui = hf.create_dataset('color_ui', (n, H, W, 3), dtype='uint8',
-                                            chunks=(1, H, W, 3), **_C)
+            if include_depth:
+                ds_depth  = hf.create_dataset('depth',  (n, H, W),    dtype='float32', chunks=(1, H, W),    **_C)
+            if include_normal:
+                ds_normal = hf.create_dataset('normal', (n, H, W, 3), dtype='float32', chunks=(1, H, W, 3), **_C)
 
         max_dt = 0.0
-        ui_masked_total = 0  # 累计被方案 A 遮罩的像素数（B 已遮罩的为 0，不计入）
         for i, frame in enumerate(frames):
             inp, dt_ms = nearest_input(frame['ts'], ts_list, inputs)
 
@@ -296,26 +323,15 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path, include_depth: 
                 inp = {'ts': 0, 'kb': [0] * 256, 'mouse': [0, 0], 'gamepad': None}
                 dt_ms = 0.0
 
-            color = _load_bmp(frame['bmp'])
+            bmp_path = frame.get(primary_key) or frame['bmp']
+            color_arr = _load_bmp(bmp_path)
 
-            if mode == 'triplet':
-                if frame['depth']:
-                    depth_arr = _load_depth(frame['depth'])
-                    # UI 像素在 UE4 Reverse-Z 中深度恒为 0.0（无深度写入）。
-                    # 方案 B（ReShade UIRemove.fx）在采集时已将其置黑 → 此处为 no-op。
-                    # 方案 B 未启用时，此处作为兜底将其置黑（方案 A）。
-                    ui_mask = depth_arr == 0.0
-                    masked = int(ui_mask.sum())
-                    if masked:
-                        color[ui_mask] = 0
-                        ui_masked_total += masked
-                    ds_depth[i] = depth_arr
-                if frame['normal']:
-                    ds_normal[i] = _load_normal(frame['normal'])
+            if ds_depth is not None and frame.get('depth'):
+                ds_depth[i] = _load_depth(frame['depth'])
+            if ds_normal is not None and frame.get('normal'):
+                ds_normal[i] = _load_normal(frame['normal'])
 
-            ds_color[i]     = color
-            if ds_color_ui is not None and frame.get('bmp_ui'):
-                ds_color_ui[i] = _load_bmp(frame['bmp_ui'])
+            ds_color[i]     = color_arr
             ds_frame_ts[i]  = frame['ts']
             ds_input_ts[i]  = inp['ts']
             ds_input_dt[i]  = float(dt_ms)
@@ -336,20 +352,18 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path, include_depth: 
         hf.attrs['fps_est']    = round(fps_est, 2)
         hf.attrs['created_at'] = datetime.datetime.now(UTC8).isoformat()
         hf.attrs['timezone']   = 'UTC+8 (frame filenames are local time)'
-        if mode == 'triplet':
-            avg_ui = ui_masked_total / n if n else 0
-            hf.attrs['ui_mask'] = 'depth==0 → black (fallback A; no-op if ReShade UIRemove.fx was active)'
-            hf.attrs['ui_mask_avg_px'] = round(avg_ui, 1)
+        hf.attrs['color']       = color           # 'no-ui' or 'ui'
+        hf.attrs['primary_bmp'] = primary_key     # 'bmp' or 'bmp_ui'
+        hf.attrs['has_depth']   = ds_depth is not None
+        hf.attrs['has_normal']  = ds_normal is not None
 
+    datasets = ['color']
+    if ds_depth  is not None: datasets.append('depth')
+    if ds_normal is not None: datasets.append('normal')
     size_mb = output_path.stat().st_size / 1024 / 1024
     print(f"[DONE] {output_path}  ({size_mb:.1f} MB)")
-    print(f"[DONE] 帧数={n}  分辨率={W}x{H}  fps≈{fps_est:.1f}  最大对齐误差={max_dt:.1f} ms")
-    if mode == 'triplet':
-        avg_ui = ui_masked_total / n if n else 0
-        if avg_ui > 0:
-            print(f"[MASK] 方案A兜底：平均每帧遮罩 {avg_ui:.0f} 个 UI 像素（B 已遮罩的不计入）")
-        else:
-            print(f"[MASK] 未发现 UI 像素（当前帧无 UI）")
+    print(f"[DONE] 帧数={n}  分辨率={W}x{H}  fps≈{fps_est:.1f}  最大对齐误差={max_dt:.1f} ms"
+          f"  color={color} (primary={primary_key})  datasets={'/'.join(datasets)}")
 
 
 # ─── 抽帧目视验证 ─────────────────────────────────────────────────────────────
