@@ -1,5 +1,5 @@
 // Minimal ReShade.fxh for unicap capture pipeline
-// Provides the standard bindings and macros required by DepthToAddon.fx and UIRemove.fx.
+// Provides the standard bindings and macros required by DepthToAddon.fx and BackBufferExport.fx.
 // The numeric macros (BUFFER_WIDTH, BUFFER_HEIGHT, RESHADE_DEPTH_*) are injected by the
 // ReShade runtime preprocessor; this file only provides the #define wrappers and declarations.
 

@@ -353,11 +353,13 @@ def _ensure_preset():
     CONFIG_DIR.mkdir(exist_ok=True)
     preset = CONFIG_DIR / "unicapPreset.ini"
     # CaptureStatus runs last so the indicator overlays the displayed backbuffer
-    # without affecting UIRemove_ColorTex (taken in UIRemove's first pass).
-    techniques = "DepthToAddon@DepthToAddon.fx,UIRemove@UIRemove.fx,CaptureStatus@CaptureStatus.fx"
+    # without affecting BackBufferExport_ColorTex (taken in BackBufferExport's first pass).
+    techniques = "DepthToAddon@DepthToAddon.fx,BackBufferExport@BackBufferExport.fx,CaptureStatus@CaptureStatus.fx"
     content = f"Techniques={techniques}\nTechniqueSorting={techniques}\n"
     existing = preset.read_text(encoding="utf-8") if preset.exists() else ""
-    if "CaptureStatus@CaptureStatus.fx" not in existing:
+    # Rewrite if missing CaptureStatus OR if it still references the legacy
+    # UIRemove name (renamed → BackBufferExport).
+    if "BackBufferExport@BackBufferExport.fx" not in existing:
         preset.write_text(content, encoding="utf-8")
 
 

@@ -21,7 +21,7 @@ Outputs to `dist/`:
 - `UniCap64.dll` — same DLL bytes as dxgi.dll，作 Vulkan implicit layer 用；`--api vulkan` 时通过 `VK_IMPLICIT_LAYER_PATH` env var 注入到游戏子进程（不修改游戏目录）
 - `UniCap64.json` — Vulkan layer manifest（源在 `reshade-addons/UniCap64.json`），库名 `VK_LAYER_unicap`
 - `frame_capture.addon` — capture addon (primary build output)；同时注册 `on_bind_rts_dsv`(DX) + `on_begin_render_pass`(DX12 enhanced + Vulkan)，单一二进制覆盖两条路径
-- `unicap-shaders/Shaders/*.fx` — DepthToAddon + UIRemove shaders (copied from `shaders/`)
+- `unicap-shaders/Shaders/*.fx` — DepthToAddon + BackBufferExport (legacy: UIRemove) shaders (copied from `shaders/`)
 
 Delete `build\` to force CMake reconfigure.
 
@@ -111,7 +111,7 @@ After a survey completes, Python writes the recommended skip to `fc_skip_count.t
 `shaders/` is the canonical runtime directory (pointed to by `EffectSearchPaths` in `unicap.ini`):
 
 - `DepthToAddon.fx` — exposes `DepthToAddon_ExportTex` / `DepthToAddon_DepthTex` / `DepthToAddon_NormalTex` texture variables that `frame_capture.cpp` reads
-- `UIRemove.fx` — restores the original BackBuffer to the swap chain after UIRemove_ColorTex capture
+- `BackBufferExport.fx` — passthrough copy of BackBuffer into `BackBufferExport_ColorTex` for the addon to read (post-UI capture path / both-mode). Does NOT mask UI despite the legacy "UIRemove" name it inherited.
 - `ReShade.fxh` — ReShade standard include
 
 `murchFX/Shaders/` is a sibling FX library (ChannelMixer, DoubleExposure, its own DepthToAddon copy). It is **not** what gets loaded at runtime.

@@ -95,8 +95,8 @@ add_custom_target(shaders ALL
         "${CMAKE_SOURCE_DIR}/shaders/DepthToAddon.fx"
         "${SHADER_DST}/DepthToAddon.fx"
     COMMAND ${CMAKE_COMMAND} -E copy
-        "${CMAKE_SOURCE_DIR}/shaders/UIRemove.fx"
-        "${SHADER_DST}/UIRemove.fx"
+        "${CMAKE_SOURCE_DIR}/shaders/BackBufferExport.fx"
+        "${SHADER_DST}/BackBufferExport.fx"
     COMMAND ${CMAKE_COMMAND} -E copy
         "${CMAKE_SOURCE_DIR}/shaders/CaptureStatus.fx"
         "${SHADER_DST}/CaptureStatus.fx"
@@ -114,6 +114,6 @@ install(FILES
 )
 install(FILES
     "${CMAKE_SOURCE_DIR}/dist/unicap-shaders/Shaders/DepthToAddon.fx"
-    "${CMAKE_SOURCE_DIR}/dist/unicap-shaders/Shaders/UIRemove.fx"
+    "${CMAKE_SOURCE_DIR}/dist/unicap-shaders/Shaders/BackBufferExport.fx"
     DESTINATION "${GAME_WIN64}/unicap-shaders/Shaders"
 )
