@@ -301,10 +301,14 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path, include_depth: 
             if mode == 'triplet':
                 if frame['depth']:
                     depth_arr = _load_depth(frame['depth'])
-                    # UI 像素在 UE4 Reverse-Z 中深度恒为 0.0（无深度写入）→ 此处置黑。
-                    # 注意：BackBufferExport.fx（旧名 UIRemove.fx）不做 UI mask，
-                    # 只是 BackBuffer 拷贝；真正的 UI mask 完全靠下面的 depth==0 判定。
-                    ui_mask = depth_arr == 0.0
+                    # DepthToAddon.fx 导出线性化 depth (0=near, 1=far)，已
+                    # 处理 reverse-Z flip。UE4/UE5/id Tech 7 都是 reverse-Z
+                    # → UI/sky 不写深度 → 经 flip+linearize 后 = 1.0。
+                    # 同时容许 forward-Z 引擎的 0.0 边界。
+                    # 注意：BackBufferExport.fx（旧名 UIRemove.fx）不做 UI
+                    # mask，只是 BackBuffer 拷贝；真正的 UI mask 完全靠这里
+                    # 的 depth 阈值判定。
+                    ui_mask = (depth_arr <= 0.0) | (depth_arr >= 0.999)
                     masked = int(ui_mask.sum())
                     if masked:
                         color[ui_mask] = 0
@@ -338,7 +342,7 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path, include_depth: 
         hf.attrs['timezone']   = 'UTC+8 (frame filenames are local time)'
         if mode == 'triplet':
             avg_ui = ui_masked_total / n if n else 0
-            hf.attrs['ui_mask'] = 'depth==0 → black (UE4 Reverse-Z UI marker)'
+            hf.attrs['ui_mask'] = 'depth<=0 or depth>=0.999 → black (reverse-Z linearized: UI/sky)'
             hf.attrs['ui_mask_avg_px'] = round(avg_ui, 1)
 
     size_mb = output_path.stat().st_size / 1024 / 1024
