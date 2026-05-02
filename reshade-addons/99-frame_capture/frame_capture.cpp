@@ -780,8 +780,11 @@ static void on_barrier(command_list* cmd_list, uint32_t count,
         if (rd.type != resource_type::texture_2d) continue;
         if (rd.texture.width < 1280) continue;  // full-frame heuristic
 
-        // Diagnostic log (first 30 capture-armed frames only — bounded spam).
-        if (s_cap_armed && s_barrier_diag_n < 30) {
+        // Diagnostic log: fire UNCONDITIONALLY for first 30 candidates that
+        // pass state+size filters. Captures DOOM Eternal etc. pipeline structure
+        // even outside survey/capture-armed windows. (s_cap_armed is unset
+        // during cmd-buffer recording — gating on it never fired.)
+        if (s_barrier_diag_n < 30) {
             s_barrier_diag_n++;
             char dmsg[200];
             sprintf_s(dmsg,
@@ -790,6 +793,21 @@ static void on_barrier(command_list* cmd_list, uint32_t count,
                 rd.texture.width, rd.texture.height, (int)rd.texture.format,
                 (unsigned)old_states[i], (unsigned)new_states[i]);
             reshade::log::message(reshade::log::level::info, dmsg);
+        }
+
+        // Format filter: only multi-channel COLOR formats decode_to_rgba8 knows
+        // about. r8_unorm (DOOM Eternal SSAO/mask) and other single-channel
+        // buffers happen at full screen res but aren't the scene RT we want.
+        switch (rd.texture.format) {
+        case format::r8g8b8a8_unorm: case format::r8g8b8a8_unorm_srgb:
+        case format::b8g8r8a8_unorm: case format::b8g8r8a8_unorm_srgb:
+        case format::b8g8r8x8_unorm: case format::b8g8r8x8_unorm_srgb:
+        case format::r10g10b10a2_unorm:
+        case format::r16g16b16a16_float:
+        case format::r11g11b10_float:
+            break;  // accepted
+        default:
+            continue;  // skip — not a scene color RT
         }
 
         bool should_record;
