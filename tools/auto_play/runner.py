@@ -117,7 +117,8 @@ class AutoPlayRunner:
             "vigem_ok" if self._backend.gamepad_available else "unavailable",
         )
         print(f"[AUTO-PLAY] driver={self._driver_name} profile={self._profile.name}"
-              f" gamepad={'vigem_ok' if self._backend.gamepad_available else 'unavailable'}")
+              f" gamepad={'vigem_ok' if self._backend.gamepad_available else 'unavailable'}",
+              flush=True)
 
         self._stop_evt.clear()
         self._driver.on_start()
@@ -150,7 +151,7 @@ class AutoPlayRunner:
         except Exception as e:
             log.warning("[AUTO-PLAY] backend close 异常: %s", e)
         log.info("[AUTO-PLAY] stop 完成 watchdog 触发=%d", self._watchdog.trigger_count)
-        print(f"[AUTO-PLAY] 停止；watchdog 触发 {self._watchdog.trigger_count} 次")
+        print(f"[AUTO-PLAY] 停止；watchdog 触发 {self._watchdog.trigger_count} 次", flush=True)
 
     @property
     def is_running(self) -> bool:

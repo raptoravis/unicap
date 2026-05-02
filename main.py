@@ -503,7 +503,7 @@ def cmd_launch(args):
     if args.ui_mode is None:
         args.ui_mode = "both" if getattr(args, "auto_play", False) else "no-ui"
         if getattr(args, "auto_play", False):
-            print(f"[AUTO-PLAY] --ui-mode 默认 both（bot/watchdog 看 post-UI BMP）")
+            print(f"[AUTO-PLAY] --ui-mode 默认 both（bot/watchdog 看 post-UI BMP）", flush=True)
 
     game_dir, game_exe, game_name, dataset_root, api = cmd_deploy(args)
 
@@ -653,7 +653,7 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path, just_
     video_out  = session_dir / "video.mp4"
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n[CAPTURE] 开始采集 (F9 停止) → {session_dir}")
+    print(f"\n[CAPTURE] 开始采集 (F9 停止) → {session_dir}", flush=True)
     if just_surveyed:
         time.sleep(0.5)  # let the post-survey skip pulse settle
 
@@ -676,7 +676,7 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path, just_
         if auto_play_runner is not None:
             auto_play_runner.stop()
         _set_state(game_dir, "idle")
-    print(f"[CAPTURE] 总耗时 {_fmt_dur(time.perf_counter() - t_cap)}")
+    print(f"[CAPTURE] 总耗时 {_fmt_dur(time.perf_counter() - t_cap)}", flush=True)
 
     if getattr(args, "video", True):
         t_video = time.perf_counter()
@@ -987,6 +987,16 @@ def cmd_pack(args):
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
+    # `uv run` pipes stdout — Python defaults to 4KB block buffering when
+    # stdout isn't a TTY, so [CAPTURE] / [AUTO-PLAY] state-transition prints
+    # only flush after the buffer fills (or process exit). Force line-buffering
+    # so users see output in real time.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        pass
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", action="version", version=f"unicap v{VERSION}")
     sub = parser.add_subparsers(dest="cmd", required=True)
