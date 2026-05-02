@@ -1,217 +1,204 @@
-# Handoff: Nuitka 打包 + 版本号 + survey 算法两次修复 + 渲染兼容性边界确认
+# Handoff: Vulkan 后端 + UE4 嵌套识别 + pack 重设计 + barrier mode 实验性退役
 
-**Generated**: 2026-05-02 00:50
+**Generated**: 2026-05-02 12:30
 **Branch**: master（与 origin/master 同步，working tree clean）
-**Status**: Done — FF7R + Batman AK 实机回归通过（用户原话"都完美"）；DOOM/Vulkan 系列确认 out-of-scope
+**Status**: Done — FF7R / Batman AK / DOOM Eternal 三游戏实机回归通过（用户原话"完美"），已 merge 到 master + push
 
 ## Goal
 
-把 Python 项目打包成 Windows exe，**提高破解成本**，**不包含 C/C++ 源码**。期间发现并修了 survey 算法的两个独立 bug，并标定了 unicap 当前架构的渲染 API 兼容性边界。
+把 unicap 从 DX-only 扩展到能跑 Vulkan-only 游戏（DOOM Eternal 等 id Tech 7），途中重新审视 pack 路径的 UI mask 设计，简化交互（删 F6），修一堆边角 bug。
 
 ## Completed
 
-### 打包 (commits `bc49c6d` / `4b036e4`)
-- [x] **Nuitka standalone** 打包：`scripts/build-exe.ps1` 一键脚本，产物 `dist-exe/unicap.exe` 57.6 MB + Python 运行时 + 资产文件夹 = 209.9 MB / 88 个文件
-- [x] **zip 分发包**：`unicap-{version}.zip` 78.1 MB，输出到项目根目录；zip 内顶层目录 = `unicap-{version}/`，解压不污染当前目录
-- [x] **版本号系统**：单一真相源 `pyproject.toml` 的 `[project].version`；`build-exe.ps1` 用 `tomllib` 读、写到 `--file-version` + 文件名；运行时 `main.py:_read_version()` 从 `ROOT/pyproject.toml` 读（onefile 之外的 standalone 路径生效）
-- [x] **banner**：`main()` 在 `parse_args()` 之后 print `unicap v{VERSION}`，保证 [启动] 前可见；`--help` / `--version` 不打 banner（argparse 提前 exit）；用 `flush=True` 解决 stdout buffered → stderr 先到的乱序
-- [x] **argparse prog 默认化**：源码模式自动 `usage: main.py`，打包后自动 `usage: unicap.exe`（删 `prog="unicap"` 写死）
-- [x] **C/C++ 源码不打入**：`reshade/`, `reshade-addons/`, `murchFX/`, `build/`, `CMakeLists.txt` 全部不在 `--include-data-dir` 内
+### Vulkan 后端支持 (commit `d842307`)
+- [x] **dist/UniCap64.{dll,json}** —— Vulkan implicit layer，DLL bytes 同 dxgi.dll（源 reshade_core MSBuild 产物），命名去 ReShade 品牌
+- [x] **HKCU\\Software\\Khronos\\Vulkan\\ImplicitLayers** 注册作主路径（Steam env-strip 兜底）
+- [x] **三层 cleanup**：atexit + signal handlers (SIGINT/SIGBREAK + Win32 SetConsoleCtrlHandler) + 启动时扫描 stale 残留
+- [x] **env vars 兜底**：VK_IMPLICIT_LAYER_PATH + VK_INSTANCE_LAYERS + VK_LAYER_PATH 三件套（loader 1.3.234+ 优先，老 loader fallback）
+- [x] **写 game_dir/unicap.ini** 重定向 `[INSTALL] BasePath` → `%TEMP%\unicap\` —— 绕过 ReShade `dll_main.cpp:131` 对非 d3d/dxgi 命名的强制配置存在性检查（被 Steam 剥光 RESHADE_BASE_PATH_OVERRIDE env var 时这是唯一通路）
+- [x] **--api {auto,dx,vulkan}** flag，auto 按 exe 名启发（含 `vk`/`vulkan` 子串 → vulkan）
+- [x] **DX 路径完全零回归**
 
-### 命名一致性 (commit `8cb27be`)
-- [x] `dist/reshade-shaders/` → `dist/unicap-shaders/`（CMakeLists 4 处 + CLAUDE.md 2 处 + scripts/build.ps1 1 处 + 物理 rename）
-- [x] 运行时无影响：`main.py` 的 `EffectSearchPaths` 用顶层 `ROOT/shaders`，从来不读 `dist/<...>-shaders/`
+### 关键工程改动
+- [x] **F8 一键流，删 F6** (commit `b27a062`)：F8 首次自动 survey；重 survey 删 `dataset/<game>/survey/recommended_skip.txt`
+- [x] **UIRemove.fx → BackBufferExport.fx** (commit `2818dfd`)：旧名误导（实际只做 BackBuffer 拷贝、不 mask UI）；texture/technique/preset 全同步重命名
+- [x] **staging recreation 加 fmt 比较** (commit `0713ba7`)：DOOM Eternal HDR↔LDR 帧间格式切换 driver hang 修复（FF7R/Batman 之前未暴露因为单一格式）
+- [x] **UE4 嵌套 exe 自动检测** (commit `717c1c1`)：launcher exe + Binaries\\Win64\\inner.exe 结构自动 walk down
+- [x] **pack 三个独立 flag** (commit `4c20bb4`)：`--color {no-ui,ui}` / `--depth` (默认开) / `--normal` (默认关)
+- [x] **video --mask-ui** (commit `6e32581` + `c2d8aca`)：用 depth EXR 在 video_masked.mp4 里 mask UI/sky 像素（depth==0|>=0.999），仅视觉验证用，不影响 BMPs/HDF5
 
-### 清理 (commit `5bbd312`)
-- [x] 删 `scripts/setup.ps1` —— 僵尸代码（`.gitmodules` 不存在 + `git submodule status` 为空，从未把依赖真正注册成 submodule）
-- [x] `tools/capture/config.py` 删 `REPO_ROOT`/`DIST_DIR`/`VENDOR_DIR` 死代码
-- [x] `build-exe.ps1` PSScriptAnalyzer lint 修复（unused `$nuitkaCheck`）
-
-### survey 算法修复 (commit `15076d2`)
-- [x] **FF7R 类管线 boundary bug**：旧代码 `largest = max(pairs)` 全局最大 diff 决定 special case，但首端"早期空场景→主渲染区"跳变可能比末端"UI 合成"跳变还大，导致 special case 判否、回到默认流程返回错的一侧（skip=1 含 UI 而非 skip=0 干净）。修：直接看 adjacent-to-zero 那对的 diff 是否远大于"中段稳定 diff"（`pairs[1:-1]` 排除两端 spike）的 median
-- [x] **Batman AK 类管线 total=1 fallback**：旧代码在 `total=1` 时无 boundary 可分析，直接 "帧数不足" 失败。修：自动写 `recommended_skip=0` + 警告用户检查 BMP 是否含 UI、若含则改 `--ui-mode ui`
-
-### 实机回归
-- [x] FF7R Remake：survey → skip=0、采集 video.mp4 8.7s/82 帧 ✓
-- [x] Batman AK：`total=1` fallback 命中 → skip=0、不含 UI ✓
+### 实机回归通过
+- [x] FF7R Remake (UE4 / DX12) — render-pass 模式 survey + capture
+- [x] Batman Arkham Knight (DX) — render-pass 模式
+- [x] DOOM Eternal (Vulkan) — `--ui-mode ui --color ui` 路径，HKCU layer 注入
 
 ## Not Yet Done
 
-- [ ] **暂无 unicap 主线遗留功能项**
-- [ ] (可选) Vulkan 支持：DOOM 2016/Eternal、Wolfenstein II/Youngblood、Quake Champions 等 id Software 游戏全是 Vulkan only，dxgi.dll 永远不会被加载（看 §Failed Approaches 第 3 条）
+- [ ] **暂无主线遗留任务**
+- [ ] (可选) `vulkan-support` 分支退役：用户合并后未清理本地 / origin remote 分支
+- [ ] (可选) UI mask 改善：DOOM Eternal HUD 是 3D 几何（depth ~0.001-0.01），depth 阈值分不开 HUD 与近景物体；当前 `--mask-ui` 只去 sky。要彻底干掉 HUD 需要 color-based + region-based 双重 mask（半小时工作，但用户决定 ML 模型自学忽略 HUD 即可，不做）
 
 ## Failed Approaches (Don't Repeat These)
 
-### 1. Nuitka onefile → Windows Defender 拦截
+### 1. 实验性 barrier mode (`on_barrier` hook) — DOOM Eternal compute pipeline 不稳定
 
-最初选 `--onefile`（合理：用户明确要"单 exe"）。Build 出来 main.exe 跑 `--help` 报：
+DOOM Eternal id Tech 7 用 compute shader 写 scene RT，**不走 render pass 模型** → 现有 `on_begin_render_pass` 只在 HUD 合成时触发，pre-UI scene RT 取不到。我尝试 hook `addon_event::barrier`，捕 `(render_target | unordered_access) → shader_resource` transition 那一刻 GPU copy。
 
-```
-Error, load DLL. ([Error 225] Operation did not complete successfully because the file contains a virus or potentially unwanted software.)
-```
+走过的弯路（每个都 commit 然后 revert）：
 
-`Get-MpThreatDetection` 显示拦截的是 Nuitka onefile bootloader 解压到 `%TEMP%\onefile_*\main.dll` 的那个 dll —— **不是** `dxgi.dll`（ReShade core）。这是 Nuitka onefile + LTO + 压缩组合的典型 AV 误报：加壳特征恰好和某些恶意软件签名重合。
+1. **wrong source state** (commit `bf51a5a`)：以为 event 在 trampoline 之前触发 → 用 old_state 做 barrier source。实际 `vulkan_hooks_command_list.cpp:939` 是先 trampoline 后 fire event → 资源已是 new_state。GPU 崩溃，DOOM 报"stopped working"。
+2. **加 UAV→SR transition** (commit `9c88f3b`)：扩 filter 接受 compute writes。但相关问题没解决。
+3. **format whitelist** (commit `283d0a0`)：第一次能采到 BMP 后发现是 r8_unorm（5%）= SSAO mask buffer，不是 scene RT。加白名单只接受多通道 color formats。
+4. **staging fmt mismatch** (commit `0713ba7`)：DOOM Eternal alternates r11g11b10_float (HDR) ↔ r8g8b8a8_unorm (LDR)，staging 不重建 → vkCmdCopyImage format mismatch → driver hang → 主菜单 freeze。
+5. **dry-run 验证 hook 本身没问题** (commit `7b8476f`)：跳过 GPU 操作只 log 候选。诊断显示每帧 2 个候选 (idx=0 HDR, idx=1 LDR)，hook 工作正常。
+6. **加上正确的 barrier sequence + 修 fmt 还是 freeze**：即使 SR 作 source、staging 加 fmt 比较，DOOM Eternal 依然 freeze。怀疑深层问题：id Tech 7 多线程 cmd-buffer recording + transient memory aliasing + 我们在 on_barrier 内部插入额外 cmd 干扰命令流。深度 Vulkan debug 半天到一天起，**收益 < 成本**。
+7. **revert (commit `6e32581`)**：保留独立改进（staging fmt fix, F6 删除, BackBufferExport 重命名），删除所有 barrier-specific 代码（on_barrier handler, FC_CaptureMode/FC_BarrierDryRun config, --capture-mode/--barrier-dry-run flags）。
 
-**改 standalone 后立刻 OK**：main.dll 留在 `unicap.dist/` 文件夹里，Defender 不再 path-scan，反破解强度无损（`unicap.exe` 仍是 Python→C→机器码的 Nuitka 产物）。
+**教训**：在 ReShade `addon_event::barrier` 内做 GPU copy 是反模式 —— 该 event 是事后通知（post-trampoline），且对 compute-heavy 引擎风险极大。下次想抓 compute write，应该 hook `addon_event::dispatch` 直接管命令录制阶段。
 
-> **教训**：反破解越狠（onefile + LTO + 压缩），AV 误报越高 —— 这是固有 trade-off。standalone 是"够用就好"的甜点。
+### 2. depth-based UI mask 在 pack 路径 — 引擎相关、效果不一致
 
-### 2. argparse `prog="unicap"` 写死
+最初方案：pack_hdf5 在打 HDF5 时按 depth==0 mask UI 像素置黑。结果发现：
 
-为了让打包后 `usage:` 行显示 "unicap"，第一次写 `parser = argparse.ArgumentParser(prog="unicap")`。结果用户期望 "unicap.exe"（带后缀）。
+- 旧代码用 `depth == 0.0`，但 DepthToAddon.fx 导出 LINEARIZED depth + reverse-Z flip → UI 像素其实在 1.0（far）端。**FF7R/Batman 之前的所有 HDF5 数据，理论上 ui_mask_avg_px 都是 0**（mask 没生效，但用户没发现）
+- 修成 `depth <= 0 | depth >= 0.999` 后，UE4 引擎能 mask UI（HUD 是 2D overlay，无深度）+ sky
+- **但 DOOM Eternal HUD 是真 3D 几何**（小三角面绘制在近平面 depth 0.001-0.01），depth 阈值分不开 HUD 和武器/手部 → mask 啥也抓不到
 
-正确做法：**删 `prog` 参数**，让 argparse 默认从 `os.path.basename(sys.argv[0])` 取——源码模式自动 `main.py`、打包后自动 `unicap.exe`。
+最终方案 (commit `4c20bb4`)：**pack 路径完全移除 UI mask**。HDF5 `/color` 是原 BMP 内容，`/depth` 完整保留。让消费方（训练管线）自己决定要不要 mask。`video --mask-ui` 仅作为视觉验证工具单独存在。
 
-> **教训**：argparse prog 默认行为已经是对的，写死 `prog="..."` 反而失去自动化。
+### 3. ali213 破解版 DOOM 2016 测试 — 本身就跑不起来
 
-### 3. Vulkan 游戏（DOOM 等）当前架构无解
+用户最初想用 DOOM 2016 (`E:\games\doom2016\DOOMx64vk.exe`) 测 Vulkan，结果发现：
+- 该游戏是 ali213 破解版（`ali213.bin` 文件特征 + `开始游戏.exe` 中文 launcher）
+- DOOMx64vk.exe 直接启动会秒退（破解 stub 没初始化）
+- 通过 `开始游戏.exe` 启动跑的是 DOOMx64.exe (DX11 渲染器) 而非 vk 版本
+- 这游戏 install 在用户机器上根本不在 Vulkan 模式下运行
 
-用户测了 DOOM Eternal (`DOOMEternalx64vk.exe`) + DOOM 2016 (`DOOMx64.exe`)，survey 全部 timeout "未收到探测帧"。
+**改用 DOOM Eternal (`E:\games\doom\DOOMEternalx64vk.exe`) 才有可测的 Vulkan target**。教训：先用 Process Explorer / tasklist 确认游戏进程实际在跑、加载了哪些模块，再下结论。
 
-**根因**：unicap 走 `dxgi.dll` proxy 路径（DXGI hook），但 id Tech 6/7 引擎（DOOM 系列、Wolfenstein II/Youngblood、Quake Champions）全部 **Vulkan only**：
-- DOOM 2016 (id Tech 6)：Vulkan / OpenGL
-- DOOM Eternal (id Tech 7)：Vulkan only ← **我前一轮回答错说"支持 DX12"，纠正过**
+### 4. UE4 嵌套结构 deploy 错位 — FF7R 临时退化
 
-Vulkan 完全不走 dxgi.dll，部署的 dxgi.dll 永远不被加载，ReShade 不初始化、addon 不启动、sidecar 文件不存在。
+某次 FF7R 测试时用户传了**外层 launcher path** 而不是内层 exe (`Intergrade\End\Binaries\Win64\ff7remake_.exe`)：
+- Python deploy dxgi.dll 到 launcher 旁的 `Intergrade\`
+- launcher 进程加载 dxgi.dll, 3 秒后退出
+- 实际 game 在 `End\Binaries\Win64\` 启动，加载该目录下自己的旧 dxgi.dll（5 月 1 日残留）
+- addon 读 sidecar 在 `End\Binaries\Win64\`，Python 写 sidecar 在 `Intergrade\` → 两侧目录不一致 → survey timeout
 
-**修复需要**：
-- ReShade Vulkan layer 部署机制（注册表 `HKLM\SOFTWARE\Khronos\Vulkan\ImplicitLayers` 或 `VK_INSTANCE_LAYERS` env），不是 dxgi.dll proxy
-- frame_capture.addon 在 Vulkan 后端的 hook 实现（v5 wrapper API 在 Vulkan 下行为不同，需单独验证）
-- 工作量评估：1-2 整天，建议另立分支 `vulkan-support`
-
-**当前规避**：用户跳过 id Software 游戏，专注 DX11/DX12 目标（FF7R / Batman AK 已验证）。
-
-### 4. onefile 路径生命周期问题（已绕开）
-
-onefile 模式下 Nuitka 把资产解压到 `%TEMP%\onefile_xxx\`，`Path(__file__).parent` 指向那里。但 main.py 在 `unicap.ini` 写的 `EffectSearchPaths` / `PresetPath` / `AddonPath` 是给 **game 进程的 dxgi.dll** 读的——main.py 退出后 onefile temp 被清，game 下次加载 shader 就失败。
-
-我加了一段 `_resolve_root()` 把资产从 temp sync 到 `%LOCALAPPDATA%\unicap\runtime\` 解决。**但是**因为后来改 standalone（见 #1），这段逻辑变成无意义复杂——standalone 下 `__file__` 直接指向 `unicap.dist/`，就是持久路径，不需要 sync。
-
-**最终代码**：删除整个 `_resolve_root()`，回到 `ROOT = Path(__file__).parent`（`main.py:48`）。一行注释说明 onefile 不被支持。
+修复 (commit `717c1c1`)：`_resolve_game_path` 加 `_ue4_nested_exe()` 检测，若 path 不在 Binaries 内但其下有 `**/Binaries/Win64/*.exe`，自动改用内层最大的 exe + 提示用户。
 
 ## Key Decisions
 
 | Decision | Rationale |
 |----------|-----------|
-| Nuitka standalone（不是 PyInstaller） | PyInstaller 把 `.py` 编成 `.pyc` 塞进 onefile，`pyinstxtractor` + `uncompyle6` 5 分钟还原 90%。Nuitka 翻译为 C 再 MSVC 编机器码，破解成本数量级提升 |
-| standalone 而非 onefile | onefile bootloader 解压 main.dll 到 temp 触发 Defender；standalone 反破解强度同等但 AV 友好 |
-| version 单一来源 = pyproject.toml | 单点修改自动反映到 file-version metadata + banner + zip 文件名 |
-| pyproject.toml 嵌入 unicap.dist/ | `--include-data-files=pyproject.toml=pyproject.toml`；运行时 `main.py:_read_version()` 用 `tomllib` 读，源码 / 打包模式同一逻辑 |
-| zip 内顶层目录 = `unicap-{version}/` | 解压不污染当前目录；用 `.NET ZipFile.CreateFromDirectory` + `includeBaseDirectory=true` 实现，比 `Compress-Archive` 快 |
-| build-exe.ps1 中间目录 `dist-exe-build/` 与最终 `dist-exe/` 分离 | Nuitka 默认产物在 `<output-dir>/main.dist/`，需 rename 步骤；分离避免 Nuitka 看到旧 main.dist 直接 reuse |
-| survey special case 看 adjacent-to-zero 而非 global max | 数据驱动决策：用户实测 FF7R 同一份代码两次跑结果不同（python=0、exe=1），定位为 "global max 在两端 spike 间易翻转" 的稳定性 bug |
-| Batman AK total=1 → 自动 skip=0 + 警告，**不直接报错** | 失败 hard-stop 让用户卡住；自动 fallback + 提示用户验证 BMP 让流程能跑下去 |
-| Vulkan 支持留作未来分支 | 工作量大；当前用户主要目标是 FF7R（DX12），DOOM 系列只是 nice-to-have |
+| Vulkan layer 走 HKCU 而非纯 env var | Steam 重启游戏时剥环境变量 → env-only 方案对 Steam 游戏静默失败。HKCU 不依赖 process tree env propagation |
+| DLL/manifest 命名 `UniCap64`（PascalCase） | 用户明确要求"去 ReShade 字样使用 UniCap"。匹配项目其他大写惯例（用户 PR 里的命名风格） |
+| Layer 注册带可靠 cleanup（atexit + signal + 启动 scan） | HKCU 是全局副作用，泄漏会让用户机器上**所有** Vulkan 程序都被这层 layer hook → 必须保证清理 |
+| 移除 pack 路径 depth-based UI mask | id Tech 7 的 HUD 是 3D 几何，depth 阈值方案失效；UE4 引擎 sky 误伤；引擎特定的 mask 不该在通用 pack 里硬编码 |
+| 保留 `video --mask-ui` 作为视觉验证 | 用户明确说想"看一眼 mask 效果"。video 路径是装饰性的、跟训练数据 pipeline 解耦，加进去无副作用 |
+| `--bmp` 改名 `--color` | 用户要求。语义更清晰（"哪种 color BMP 进 /color"），且与 `--ui-mode` 用语一致 |
+| `--depth` / `--normal` 拆成独立 flag | 之前 `--depth` 同时控制两个数据集是历史遗留；normal 默认关（很少用、占空间大） |
+| F8 删除 F6 hotkey | 用户：F8 已自动跑首次 survey，F6 完全冗余 |
+| revert 实验性 barrier mode | 见 Failed Approaches #1。深度 Vulkan debug 不值得；DOOM Eternal 通过 `--ui-mode ui` + 模型自学忽略 HUD 已可用 |
+| UE4 嵌套自动检测 | UE4 launcher 模式很常见，让用户被坑一次就够了 — auto-fix 比 documenting limitation 强 |
 
 ## Current State
 
 **Working**:
-- `dist-exe/unicap.exe` 57.6 MB，启动打 banner `unicap v1.0.0`
-- `unicap-1.0.0.zip` 78.1 MB（项目根，分发就用这个）
-- 源码模式 `uv run main.py launch ...` 行为同 exe（banner + version + auto prog）
-- FF7R / Batman AK survey + capture 全 OK
-- `--help` / `--version` / `launch --help` / `pack --help` / `video --help` 全 OK
+- master HEAD = `dbee142` (merge commit, 已 push)
+- FF7R / Batman AK 走 DX 路径（`--api auto` 默认 dx）：survey + capture + pack 全 OK
+- DOOM Eternal 走 Vulkan 路径（HKCU layer 自动注入），`--ui-mode ui --color ui` 推荐工作流
+- `dist/` 全部产物 up-to-date：`dxgi.dll`、`UniCap64.{dll,json}`、`frame_capture.addon`、`unicap-shaders/Shaders/*.fx`
+- `--mask-ui` 在 video 路径上正确 mask reverse-Z UI/sky 像素（DOOM Eternal 5% / FF7R 多少看场景）
+- 版本号 1.0.0 → 1.0.2
 
 **Broken**:
 - 无（unicap 主线全 OK）
 
-**Out of scope（设计边界）**:
-- Vulkan-only 游戏（DOOM 系列等）：dxgi.dll proxy 不被加载，全部 timeout
+**Out-of-scope（设计边界）**:
+- 含 ali213 / 类似破解 stub 的游戏：直接启动 inner exe 会秒退，需要走破解 launcher（unicap 无法干预）
+- DOOM 2016 这台机器装的破解版只跑 DX11 模式（DOOMx64vk.exe 启动失败），不能用来测 Vulkan
+- DOOM Eternal HUD 完全干净化：要 color/region-based mask（未做，用户决策）
 
-**Uncommitted Changes**: 无（working tree clean，所有改动已 push 到 origin/master）
+**Uncommitted Changes**: 无（working tree clean）
 
 ## Files to Know
 
 | File | Why It Matters |
 |------|----------------|
-| `scripts/build-exe.ps1` | 本会话核心新文件 — Nuitka standalone 打包 + zip。改 build flag / 嵌入资产 / 版本号逻辑都在这 |
-| `main.py` | `_read_version()` (L53-61) + `VERSION` 常量 + `main()` 顶部 banner（L674）+ argparse prog 默认 |
-| `tools/capture/survey.py` | 算法两次修复都在这；`_find_boundary()` (L122-131) 是 FF7R bug 修复点；`run()` 中 `total == 1` fallback (L274-285) 是 Batman bug |
-| `pyproject.toml` | **单一版本真相源**；改 `version` 自动传到所有出口 |
-| `.gitignore` | 加了 `dist-exe/` `dist-exe-build/` `unicap-*.zip` |
-| `CLAUDE.md` | `dist/reshade-shaders/` → `dist/unicap-shaders/` 改名后保持文档一致；其他基本不动 |
-| `dist/unicap-shaders/` | （rename 自 `reshade-shaders/`）shader 副本，CMake build 产物 + cmake install 部署目标。运行时 main.py 不读这里，读顶层 `shaders/` |
+| `main.py` | 主控制器；新增 `_resolve_api`/`_vk_register_layer`/`_vk_unregister_layer`/`_vk_clean_stale_entries`/`_ue4_nested_exe`/`_apply_ui_mask_bgr`；命令 launch/video/pack 的 argparse 都改 |
+| `tools/capture/pack_hdf5.py` | pack 函数签名 `pack(..., include_depth=True, include_normal=False, color='no-ui')`；移除 UI mask 逻辑 + /color_ui dataset |
+| `reshade-addons/UniCap64.json` | Vulkan layer manifest 源（自定义 `name=VK_LAYER_unicap`、`disable_environment=DISABLE_VK_LAYER_unicap_1`）；CMake install 拷到 dist/ |
+| `reshade-addons/99-frame_capture/frame_capture.cpp` | addon C++；这次只重命名（UIRemove → BackBufferExport）+ staging fmt fix。**没有** barrier hook（最终 revert 了） |
+| `shaders/BackBufferExport.fx` | 重命名自 UIRemove.fx；texture `BackBufferExport_ColorTex`；technique `BackBufferExport`；注释明确说"不做 UI mask 只是 BackBuffer 拷贝" |
+| `CMakeLists.txt` | reshade_core install step 同时产 dist/dxgi.dll + dist/UniCap64.dll + dist/UniCap64.json |
+| `scripts/build-exe.ps1` | 三处 UniCap64 文件 preflight + Nuitka include + final check |
+| `CLAUDE.md` | 文档同步：`--api`、`--mask-ui`、`--color`/`--depth`/`--normal`、F6 删除、UIRemove → BackBufferExport |
 
 ## Code Context
 
-### 版本号读取（main.py:53-61）
+### Vulkan layer 注册关键路径 (`main.py:204-280`)
 
 ```python
-def _read_version() -> str:
-    """Read [project].version from pyproject.toml. Source mode reads repo
-    pyproject.toml; packaged mode reads the copy embedded into unicap.dist/."""
-    try:
-        import tomllib
-        return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
-    except (ImportError, OSError, KeyError):
-        return "unknown"
+_VK_LAYER_REGKEY = r"Software\Khronos\Vulkan\ImplicitLayers"
+_vk_registered_value: str | None = None  # absolute manifest path; None = not registered
 
-VERSION = _read_version()
+def _vk_register_layer(manifest_path: Path) -> None:
+    """Register UniCap64.json under HKCU\\...\\ImplicitLayers (DWORD value=0 = enabled)."""
+    import winreg
+    global _vk_registered_value
+    value_name = str(manifest_path.resolve())
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _VK_LAYER_REGKEY, 0,
+                            winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE) as key:
+        winreg.SetValueEx(key, value_name, 0, winreg.REG_DWORD, 0)
+    _vk_registered_value = value_name
+    atexit.register(_vk_unregister_layer)
+    # SIGINT → KeyboardInterrupt (cmd_launch try/finally 接), SIGBREAK + Win32 console-close 单独 hook
+    signal.signal(signal.SIGINT, _vk_signal_cleanup)
+    signal.signal(signal.SIGBREAK, _vk_signal_cleanup)
+    _vk_install_console_handler()
 ```
 
-`ROOT = Path(__file__).parent`：源码模式 = repo 根；Nuitka standalone 模式 = `unicap.dist/`。两边都有 `pyproject.toml`（standalone 通过 `--include-data-files=pyproject.toml=pyproject.toml` 嵌入）。
-
-### main() 入口（main.py:670-678）
+### UE4 嵌套检测 (`main.py:166-180`)
 
 ```python
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--version", action="version", version=f"unicap v{VERSION}")
-    sub = parser.add_subparsers(dest="cmd", required=True)
-    # ... add subparsers
-    args = parser.parse_args()
-    print(f"unicap v{VERSION}", flush=True)  # banner — 在 [启动] 之前
-    {"launch": cmd_launch, "video": cmd_video, "pack": cmd_pack}[args.cmd](args)
+def _ue4_nested_exe(start_dir: Path) -> Path | None:
+    """UE4 has launcher exe + nested actual game at <Project>\\Binaries\\Win64\\<exe>."""
+    inner = [e for e in start_dir.glob("**/Binaries/Win64/*.exe")
+             if e.name.lower() not in _SKIP_EXE]
+    if not inner:
+        return None
+    return max(inner, key=lambda f: f.stat().st_size)
 ```
 
-**注意**：banner 在 `parse_args()` 之后；`flush=True` 必需（stdout block-buffered 时遇 `sys.exit(...)` stderr 会先到，banner 顺序错乱）。
-
-### survey FF7R 修复（survey.py:121-131）
+### pack 新签名 (`tools/capture/pack_hdf5.py:235`)
 
 ```python
-median_diff = all_diffs[len(all_diffs) // 2]
-adj_zero = next((p for p in pairs if p[1] == ordered[-1]), None)
-mid_diffs = sorted(d for _, _, d in pairs[1:-1]) if len(pairs) >= 3 else []
-mid_median = mid_diffs[len(mid_diffs) // 2] if mid_diffs else median_diff
-if adj_zero is not None and adj_zero[2] > 5.0 * max(mid_median, 1.0):
-    return ordered[-1]
+def pack(frames_dir: Path, inputs_path: Path, output_path: Path,
+         include_depth: bool = True, include_normal: bool = False,
+         color: str = 'no-ui'):
+    """
+    color: 'no-ui' (默认) → BackBuffer.bmp 进 /color
+           'ui'           → BackBufferUI.bmp 优先 / fallback BackBuffer.bmp
+    include_depth (默认 True): 写 /depth
+    include_normal (默认 False): 写 /normal
+    Pack 不做 UI mask（depth 在 id Tech 7 上分不开 HUD 与近景物体）。
+    """
 ```
 
-判断"紧挨 skip=0 那一对的 diff 是否远大于中段稳定差分的 median"，**不**看全局 max（旧 bug 的根因）。
-
-### survey Batman fallback（survey.py:274-285）
+### Vulkan loader env vars (`main.py:cmd_launch` 内)
 
 ```python
-if total == 1 and 0 in captured:
-    print("\n[SURVEY] 警告：该游戏仅 1 个非 BB pass，无法做 boundary 分析。")
-    print("         skip=0 是唯一可选值；pre-UI 帧能否采到取决于游戏管线。")
-    print("         建议：先打开 survey_skip_000_BackBuffer.bmp 检查是否含 UI；")
-    print("               若含 UI，请改用 --ui-mode ui（跳过 survey，直抓 BackBuffer）。")
-    rec_file = survey_dir / "recommended_skip.txt"
-    rec_file.write_text("0", encoding="utf-8")
-    return 0
-```
+if api == "vulkan":
+    cleaned = _vk_clean_stale_entries(VULKAN_LAYER_JSON)  # idempotent on previous crashes
+    if cleaned:
+        print(f"[VULKAN] 清理上次未释放的 {cleaned} 条注册表残留")
+    _vk_register_layer(VULKAN_LAYER_JSON)
 
-### build-exe.ps1 关键 flag
-
-```powershell
-& uv run python -m nuitka `
-    --standalone `              # 不是 onefile (AV 误报)
-    --lto=yes `                 # 函数边界模糊化
-    --remove-output `           # 删 .build/ 不留 .c
-    --output-dir=$buildDir `    # dist-exe-build/ (中间)
-    --output-filename=unicap.exe `
-    --include-package=tools `
-    --include-package=cv2 `
-    --include-package=h5py `
-    --include-package=numpy `
-    --include-data-dir=dist=dist `
-    --include-data-files=dist/dxgi.dll=dist/dxgi.dll `   # ⚠ --include-data-dir 默认排除 .dll，必须显式
-    --include-data-dir=shaders=shaders `
-    --include-data-dir=config=config `
-    --include-data-files=pyproject.toml=pyproject.toml ` # 给运行时 _read_version() 用
-    --file-version=$version `   # $version 来自 tomllib 读 pyproject.toml
-    ...
+    layer_dir = str(VULKAN_LAYER_JSON.parent)
+    env["VK_IMPLICIT_LAYER_PATH"] = layer_dir
+    env["VK_LAYER_PATH"] = layer_dir
+    env["VK_INSTANCE_LAYERS"] = VULKAN_LAYER_NAME
+    env.pop("DISABLE_VK_LAYER_unicap_1", None)  # disable_environment 是 presence-checked
 ```
 
 ## Resume Instructions
@@ -220,70 +207,76 @@ if total == 1 and 0 in captured:
 
 ```bash
 git status        # 应该 clean
-git log --oneline -5   # 最近 5 个 commit
-ls dist-exe/      # 应该存在 unicap.exe + 资产
-ls unicap-*.zip   # 应该有 unicap-1.0.0.zip
+git log --oneline -5
+ls dist/          # 应该有 dxgi.dll + UniCap64.dll + UniCap64.json + frame_capture.addon + unicap-shaders/
 ```
 
-如果都对，本次 handoff 工作已完成，无主动遗留任务。
+### 验证三游戏不退化
 
-### 怎么再 build
-
+DX 路径（auto api 检测）:
 ```powershell
-scripts\build-exe.ps1            # 增量 (ccache 几乎全命中，~5-7 min for link)
-scripts\build-exe.ps1 -Clean     # 全量重建 (清 Nuitka cache + dist-exe + dist-exe-build)
+uv run main.py launch --game-path "E:\games\ff7remake\3DMGAME_Final_Fantasy_VII_Remake.CHS.Green.part001\Final Fantasy VII Remake Intergrade\ff7remake.exe"
+# 期望: [提示] UE4 嵌套结构: 用内层 End\Binaries\Win64\ff7remake_.exe 而非启动器 ff7remake.exe
+# F8 → 自动 survey → 推 skip=0 → capture → video.mp4
 ```
 
-期望输出末尾：
-```
-构建成功 ✓
-  unicap.exe: ~57 MB
-  总大小:     ~210 MB (~88 个文件)
-  位置:       D:\dev\unicap.git\dist-exe\
-  分发包:     D:\dev\unicap.git\unicap-{version}.zip (~78 MB)
-  关键资产:   ✓ dxgi.dll / frame_capture.addon / shaders / config
+Vulkan 路径:
+```powershell
+uv run main.py launch --game-path "E:\games\doom\DOOMEternalx64vk.exe" --ui-mode ui
+# 期望: api=auto 检测出 vulkan (exe 名含 vk)
+# [VULKAN] HKCU 注册 layer manifest: D:\dev\unicap.git\dist\UniCap64.json
+# F8 → 立刻 capture (--ui-mode ui 不需 survey) → video.mp4 含 UI 成片
 ```
 
-### 升级版本
+打包训练数据:
+```powershell
+uv run main.py pack --game-dir "D:\unicap_output\DOOMEternalx64vk" --color ui
+# 期望: HDF5 /color = BackBuffer.bmp（含 UI 原图）, /depth 完整, 无 /normal
+```
 
-只改 `pyproject.toml` 的 `version = "X.Y.Z"`，所有出口（banner / `--version` / file metadata / zip 文件名）自动跟随。
+### 如果有人想再做 barrier mode
 
-### 如果要做 Vulkan 支持
+**别做**。看 §Failed Approaches #1。要继续这条路：
+1. 不要在 on_barrier 内做 GPU copy（事后通知 + 多线程 cmd buffer 干扰）
+2. 改用 `addon_event::dispatch` hook 直接管 compute write 命令录制
+3. 估计 1-2 整天 Vulkan debug + 验证；DOOM Eternal HUD 是 3D 几何**根本问题**仍然在，最终还得色彩或区域 mask 收尾
 
-新分支：`git checkout -b vulkan-support`。首要研究：
-1. ReShade Vulkan layer 怎么部署（注册表 ImplicitLayers 还是 env var）
-2. frame_capture.addon 的 v5 API 在 Vulkan 后端的 RT bind hook 行为
-3. survey 协议（sidecar 文件）需不需要改
+### 如果要清理 vulkan-support 分支
 
-测试游戏：`E:\games\doom2016\DOOMx64.exe`（用户已实测 timeout）。
+```bash
+git branch -d vulkan-support              # 本地
+git push origin --delete vulkan-support   # 远端
+```
+
+或者 `/schedule` 1 周后跑 background agent 自动做这事（前面我问过用户但没等到答复）。
 
 ## Setup Required
 
 无新增。沿用：
-- VS 2022 + MSBuild v143（用于 build.ps1 / Nuitka 后端）
-- `uv sync` 安装 Python deps（`opencv-python`, `h5py`, `numpy`, `nuitka>=4.0.8`）
-- `tools/capture/config.py` 的 `GAME_PATH`/`DATASET_ROOT`（机器特定）
+- VS 2022 + MSBuild v143
+- `uv sync` 安装 Python deps
+- `tools/capture/config.py` 默认 GAME_PATH 是 FF7R inner exe（`E:\games\ff7remake\End\Binaries\Win64\ff7remake_.exe`）—— 用户机器特定
 - 日志在 `%TEMP%\unicap\unicap.log{,1}`
 
 ## Edge Cases & Error Handling
 
 | 场景 | 当前行为 |
 |------|----------|
-| 游戏渲染管线 `total=1` (Batman AK) | 自动 skip=0 + 警告，不卡住 |
-| 游戏渲染管线 `total=0` 或读不到 fc_pass_total.txt | 报错"未读到 fc_pass_total.txt"，提示进入实际 3D 场景再 F6 |
-| FF7R 类两端 spike 在 boundary 算法 | 修后稳定（看 adjacent-to-zero vs 中段 median） |
-| Vulkan 游戏 (DOOM 等) | 静默 timeout 12 秒后报"未收到探测帧"——目前没识别 Vulkan exe 自动提示，要靠用户/dev 判断 |
-| Defender 拦截 onefile main.dll | **已绕开**：改 standalone |
-| `--help` / `--version` | argparse 提前 sys.exit，不打 banner |
-| 子命令业务出错 | banner 在错误前打印（`flush=True`） |
+| 用户传 UE4 launcher path 而非 inner exe | `_resolve_game_path` 自动 walk down 到 `Binaries\Win64\inner.exe` + 打印 [提示] |
+| Vulkan 游戏启动后 crash | atexit / signal cleanup 把 HKCU registry 清掉；下次启动 `_vk_clean_stale_entries` 还会再扫一次（冗余兜底） |
+| Vulkan 游戏被 Steam 重启 | env vars 被剥光不影响，HKCU 注册全局生效 |
+| 游戏目录下有旧 dxgi.dll 残留 | deploy 时 `_symlink_file` 会先 backup .bak 再覆盖 → 旧版会被新版替代 |
+| ali213 / 其他破解版 game | unicap 无法干预 launcher 启动逻辑，sticky stub 失败就是失败 |
+| pack 时 capture session 没 BackBufferUI.bmp 但用户传 --color ui | fallback 到 BackBuffer.bmp + 打印 "[SCAN] 无 BackBufferUI.bmp → 用 BackBuffer.bmp（假设此 session 是 --ui-mode ui 采集）" |
+| `--mask-ui` 在没 depth EXR 的 session 上 | `_apply_ui_mask_bgr` 返回 (img, -1)，原图保留 + 末尾报告 N 帧无 depth |
+| HDF5 packed `/normal` 默认关 | 旧代码默认开；旧脚本传 `--no-normal` 兼容（实际很少用，size 节省 ~1 倍） |
 
 ## Warnings
 
-- **CLAUDE.md 没更新本次会话改动** — 我只改了 reshade-shaders → unicap-shaders 那两行，但"Build" 段没提到 build-exe.ps1 / unicap.exe / zip。下次有时间该补一段"Distribution"或合并进"Build"
-- **dist-exe/ 是 build 产物** — 不入库 (`.gitignore` 已设)，但放心改
-- **dxgi.dll 必须显式 `--include-data-files`** —— Nuitka `--include-data-dir` 默认排除 .dll 文件（视为可执行依赖）。第一次 build 漏 dxgi.dll 就是这个坑
-- **`reshade/` `reshade-addons/` `murchFX/` 是本地独立 git repo，不是 submodule**（`.gitmodules` 不存在）。setup.ps1 已删，新人想 clone 这些得手动 git clone（或者补 submodule）
-- **Vulkan 游戏静默失败** — 没识别提示，看到 timeout 应先怀疑游戏渲染 API。识别方法：exe 名带 `vk` / `vulkan`（如 `DOOMEternalx64vk.exe`）或 id Tech 6/7 引擎
-- **id Tech 7 是 Vulkan only**（不是我前一轮误说的"支持 DX12"）——纠正过两次，认真记住
-- **unicap.exe 启动时不会加载 `%TEMP%\unicap\unicap.ini` 已有的 ROOT 配置** —— `_ensure_addon_enabled()` 每次 launch 都重写所有路径为当前 ROOT 下的资产，覆盖旧值。所以新 build 的 exe 跑起来会自动指自己的 `unicap.dist/`
+- **Vulkan layer HKCU 注册全局副作用** —— 如果 unicap.exe 异常 kill（任务管理器强结），cleanup 跑不完整。`_vk_clean_stale_entries` 启动时扫描兜底（按 manifest 绝对路径匹配，install-unique），但短时间内其他 Vulkan 程序仍会被这层 layer hook → 一般无害但要知道
+- **`addon_event::barrier` 是事后通知** (vulkan_hooks_command_list.cpp:939 trampoline 先于 invoke_addon_event) —— 想抓 transition 那一刻的资源状态时**不要**用 old_states[i]，资源已经是 new_states[i]
+- **DepthToAddon.fx 导出的是线性化 + reverse-Z flipped depth** —— UE4/UE5/id Tech 7 都是 reverse-Z，UI/sky 像素 depth = **1.0 不是 0.0**。pack_hdf5 之前的 `==0` 阈值在所有这些引擎上都是错的（之前 mask 0 px 但没人发现）
+- **DOOM Eternal HUD 是真 3D 几何**（小三角面在近平面 depth 0.001-0.01）—— depth 阈值方法分不开 HUD 和武器手部。要彻底 UI mask 必须用 color HSV 或 region 方案
+- **id Tech 7 多线程 cmd-buffer recording** —— 在 on_barrier 内 issue cmd_list->barrier()/copy_texture_region() 是反模式，DOOM Eternal 实测 freeze
 - 沿用上份 handoff warnings：reshade/source/ 改了必须 `-Rebuild`；旧 `unicap-*.{i,asm,cso}` cache 不会自动清；R10G10B10A2 swap chain 错色；NUM_WORKERS=2 constexpr
+- `dist-exe/` 目录是上次 `build-exe.ps1` 产物，可能含旧 UIRemove.fx / 旧 unicap.exe（v1.0.0），如要重新分发**重跑** `scripts\build-exe.ps1` 拿最新 1.0.2
