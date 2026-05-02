@@ -287,6 +287,15 @@ static format   s_last_non_bb_fmt  = format::unknown;
 // Previous frame's non-BB RT count — used by reverse-skip to hit the Nth-from-last pass.
 static uint32_t s_prev_non_bb_total = 0;
 
+// FC_CaptureMode (0=render_pass, default; 1=barrier). barrier mode hooks
+// resource transitions (render_target → shader_resource) for compute-based
+// engines (id Tech 7 etc.) where begin_render_pass fires too late (after HUD
+// composite). When mode=1, the on_bind_rts_dsv / on_begin_render_pass handlers
+// short-circuit and on_barrier owns capture exclusively.
+static uint32_t g_capture_mode       = 0;
+static uint32_t s_barrier_idx        = 0;   // qualifying barriers seen this frame
+static uint32_t s_prev_barrier_total = 0;   // last frame's qualifying barrier count
+
 // Survey mode: Python writes fc_skip_count.txt to sweep skip values at runtime.
 static bool     s_survey_mode  = false;
 
@@ -443,6 +452,7 @@ static void on_init_device(device*)
     reshade::get_config_value(nullptr, "ADDON", "FC_PreUICapture",   g_pre_ui_mode);
     reshade::get_config_value(nullptr, "ADDON", "FC_PreUISkipCount", g_pre_ui_skip);
     reshade::get_config_value(nullptr, "ADDON", "FC_BothCapture",    g_both_capture);
+    reshade::get_config_value(nullptr, "ADDON", "FC_CaptureMode",    g_capture_mode);
 }
 
 static void on_init_swapchain(swapchain* sw, bool /*resize*/)
@@ -528,6 +538,7 @@ static void on_bind_rts_dsv(command_list* cmd_list, uint32_t count,
                               const resource_view* rtvs, resource_view dsv)
 {
     if (!enableCapturing || !g_pre_ui_mode || s_pre_ui_captured) return;
+    if (g_capture_mode != 0) return;  // barrier mode owns capture
 
     if (dsv.handle != 0) {
         s_had_depth_pass = true;
@@ -633,6 +644,7 @@ static void on_begin_render_pass(command_list* cmd_list, uint32_t count,
                                   render_pass_flags /*flags*/)
 {
     if (!enableCapturing || !g_pre_ui_mode || s_pre_ui_captured) return;
+    if (g_capture_mode != 0) return;  // barrier mode owns capture
 
     bool has_dsv = (ds != nullptr && ds->view.handle != 0);
     if (has_dsv) { s_had_depth_pass = true; return; }
@@ -703,6 +715,63 @@ static void on_begin_render_pass(command_list* cmd_list, uint32_t count,
         cmd_list->copy_texture_region(s_last_non_bb_rt, 0, nullptr, g_pre_ui_staging, 0, nullptr);
         cmd_list->barrier(s_last_non_bb_rt, resource_usage::copy_source, resource_usage::shader_resource);
         s_pre_ui_captured = true;
+    }
+}
+
+// Barrier-driven capture path (FC_CaptureMode=1). For compute-based engines
+// (id Tech 7 / DOOM Eternal) where scene rendering happens via compute
+// dispatches and begin_render_pass only fires for HUD-composite passes.
+//
+// Heuristic: when the game transitions a full-frame, non-BB texture from
+// render_target → shader_resource, that's typically the moment scene
+// rendering completes and downstream passes (post-process / HUD composite)
+// will sample it. Capture BEFORE the transition while the resource is still
+// in render_target state — fc_copy_rt_at_bind issues the safe RT↔copy_source
+// barrier sequence.
+//
+// Skip math reuses the reverse-skip convention: skip=0 = LAST qualifying
+// barrier (closest to UI), skip=N = earlier passes.
+static void on_barrier(command_list* cmd_list, uint32_t count,
+                       const resource* resources,
+                       const resource_usage* old_states,
+                       const resource_usage* new_states)
+{
+    if (!enableCapturing || !g_pre_ui_mode || s_pre_ui_captured) return;
+    if (g_capture_mode != 1) return;  // only active in barrier mode
+    if (!s_had_depth_pass) return;    // wait until 3D scene started
+
+    device* dev = cmd_list->get_device();
+    for (uint32_t i = 0; i < count; i++) {
+        // Filter: render_target bit set in old, shader_resource bit set in new
+        bool is_rt_to_sr = ((uint32_t)(old_states[i] & resource_usage::render_target)) != 0 &&
+                           ((uint32_t)(new_states[i] & resource_usage::shader_resource)) != 0;
+        if (!is_rt_to_sr) continue;
+
+        if (resources[i].handle == 0) continue;
+        if (s_backbuffer_handles.count(resources[i].handle)) continue;  // skip BB
+
+        resource_desc rd = dev->get_resource_desc(resources[i]);
+        if (rd.type != resource_type::texture_2d) continue;
+        if (rd.texture.width < 1280) continue;  // full-frame heuristic
+
+        bool should_record;
+        if (g_pre_ui_skip == 0 || s_prev_barrier_total == 0) {
+            should_record = true;  // always-overwrite, last qualifying barrier wins
+        } else {
+            uint32_t target = (s_prev_barrier_total > g_pre_ui_skip)
+                              ? (s_prev_barrier_total - 1 - g_pre_ui_skip)
+                              : 0;
+            should_record = (s_barrier_idx == target);
+        }
+
+        if (should_record) {
+            if (fc_copy_rt_at_bind(cmd_list, dev, resources[i],
+                                   rd.texture.width, rd.texture.height, rd.texture.format)) {
+                s_pre_ui_captured = true;
+            }
+        }
+
+        s_barrier_idx++;
     }
 }
 
@@ -845,9 +914,15 @@ static void on_reshade_present(effect_runtime* runtime)
 
         // Survey housekeeping: pass-total signal must reach Python every frame
         // regardless of dedup, so Phase 1 of survey can read it.
-        if (s_survey_mode && s_no_dsv_non_bb > 0) {
-            std::ofstream tf(exe_fs.parent_path() / L"fc_pass_total.txt", std::ios::trunc);
-            tf << s_no_dsv_non_bb << '\n';
+        // In barrier mode (FC_CaptureMode=1), report the qualifying-barrier
+        // count instead of the render-pass count — survey then sweeps skip
+        // values against barrier transitions, not render passes.
+        {
+            uint32_t survey_total = (g_capture_mode == 1) ? s_barrier_idx : s_no_dsv_non_bb;
+            if (s_survey_mode && survey_total > 0) {
+                std::ofstream tf(exe_fs.parent_path() / L"fc_pass_total.txt", std::ios::trunc);
+                tf << survey_total << '\n';
+            }
         }
 
         // Survey-mode save dedup: write at most one BMP per distinct skip value.
@@ -1141,12 +1216,14 @@ reset_frame_state:
         reshade::log::message(reshade::log::level::info, dmsg);
     }
     // Reset per-frame pre-UI detection state so next frame starts clean.
-    s_prev_non_bb_total = s_no_dsv_non_bb;  // save for reverse-skip next frame
+    s_prev_non_bb_total  = s_no_dsv_non_bb;   // render-pass mode reverse-skip basis
+    s_prev_barrier_total = s_barrier_idx;     // barrier mode reverse-skip basis
     s_cap_armed       = false;
     s_had_depth_pass  = false;
     s_pre_ui_captured = false;
     s_no_dsv_bb_count = 0;
     s_no_dsv_non_bb   = 0;
+    s_barrier_idx     = 0;
     s_last_non_bb_rt  = { 0 };  // reset so stale handles don't carry over
 }
 
@@ -1264,6 +1341,7 @@ void register_addon_FC()
     reshade::register_event<reshade::addon_event::destroy_effect_runtime>(on_destroy_effect_runtime);
     reshade::register_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(on_bind_rts_dsv);
     reshade::register_event<reshade::addon_event::begin_render_pass>(on_begin_render_pass);
+    reshade::register_event<reshade::addon_event::barrier>(on_barrier);
     reshade::register_event<reshade::addon_event::reshade_present>(on_reshade_present);
     reshade::register_event<reshade::addon_event::reshade_begin_effects>(on_begin_render_effects);
 }
@@ -1279,6 +1357,7 @@ void unregister_addon_FC()
     reshade::unregister_event<reshade::addon_event::destroy_effect_runtime>(on_destroy_effect_runtime);
     reshade::unregister_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(on_bind_rts_dsv);
     reshade::unregister_event<reshade::addon_event::begin_render_pass>(on_begin_render_pass);
+    reshade::unregister_event<reshade::addon_event::barrier>(on_barrier);
     reshade::unregister_event<reshade::addon_event::reshade_present>(on_reshade_present);
     reshade::unregister_event<reshade::addon_event::reshade_begin_effects>(on_begin_render_effects);
 }

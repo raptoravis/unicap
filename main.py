@@ -2,9 +2,8 @@
 """
 unicap main controller — interactive in-game workflow.
 
-Hotkeys (game window must have focus):
-  F6  开始 survey（自动扫描 pre-UI skip）
-  F8  开始采集（如未 survey 过会先自动 survey）
+Hotkeys (GetAsyncKeyState polls globally — game window doesn't need focus):
+  F8  开始采集（首次自动 survey；重 survey: 删 dataset/<game>/survey/recommended_skip.txt）
   F9  停止当前 survey/采集
 
 Usage:
@@ -18,9 +17,9 @@ video / pack: 扫描 --game-dir 下所有采集会话（dataset-root/<game>/<tim
               为缺少 video.mp4 / dataset.h5 的会话生成；已存在则跳过。
 
 ui-mode:
-  no-ui    只输出 pre-UI 帧（默认；F6 survey 必需）
-  ui       只输出 post-UI BackBuffer 帧（不需 survey；F6 无效）
-  both     两路并行输出（pre-UI + post-UI；F6 survey 必需）
+  no-ui    只输出 pre-UI 帧（默认；F8 首次会自动 survey）
+  ui       只输出 post-UI BackBuffer 帧（不需 survey）
+  both     两路并行输出（pre-UI + post-UI；F8 首次会自动 survey）
 """
 
 import argparse
@@ -73,7 +72,7 @@ CAP_HEIGHT = 1080
 CAP_FPS    = 30
 SURVEY_FPS = 1.0   # Python wait cadence during survey sweep
 
-VK_F6, VK_F8, VK_F9 = 0x75, 0x77, 0x78
+VK_F8, VK_F9 = 0x77, 0x78
 _user32 = ctypes.WinDLL("user32")
 
 
@@ -307,10 +306,14 @@ def _resolve_api(api_arg: str, game_exe: Path) -> str:
 
 # ── unicap.ini / preset writers ───────────────────────────────────────────────
 
-def _ensure_addon_enabled(addon_dir: Path, pre_ui_skip: int = 0, ui_mode: str = "no-ui"):
-    """ui_mode: 'no-ui' (pre-UI only) | 'ui' (post-UI BB only) | 'both' (pre-UI + post-UI)."""
-    pre_ui_flag  = "0" if ui_mode == "ui" else "1"
-    both_flag    = "1" if ui_mode == "both" else "0"
+def _ensure_addon_enabled(addon_dir: Path, pre_ui_skip: int = 0, ui_mode: str = "no-ui",
+                          capture_mode: str = "render-pass"):
+    """ui_mode: 'no-ui' (pre-UI only) | 'ui' (post-UI BB only) | 'both' (pre-UI + post-UI).
+    capture_mode: 'render-pass' (default; bind_rts_dsv + begin_render_pass) |
+                  'barrier' (compute-engine path; on_barrier owns capture)."""
+    pre_ui_flag      = "0" if ui_mode == "ui" else "1"
+    both_flag        = "1" if ui_mode == "both" else "0"
+    capture_mode_int = "1" if capture_mode == "barrier" else "0"
     UNICAP_TEMP.mkdir(parents=True, exist_ok=True)
     ini = UNICAP_TEMP / "unicap.ini"
     cfg = configparser.RawConfigParser()
@@ -328,6 +331,7 @@ def _ensure_addon_enabled(addon_dir: Path, pre_ui_skip: int = 0, ui_mode: str = 
         ("ADDON", "FC_PreUICapture", pre_ui_flag),
         ("ADDON", "FC_PreUISkipCount", str(pre_ui_skip)),
         ("ADDON", "FC_BothCapture", both_flag),
+        ("ADDON", "FC_CaptureMode", capture_mode_int),
         ("GENERAL", "EffectSearchPaths", str(ROOT / "shaders")),
         ("GENERAL", "IntermediateCachePath", str(UNICAP_TEMP)),
         ("GENERAL", "TextureSearchPaths", str(ROOT / "shaders")),
@@ -413,7 +417,9 @@ def cmd_deploy(args):
     else:
         pre_ui_skip = 0
 
-    _ensure_addon_enabled(ADDON_BIN.parent, pre_ui_skip=pre_ui_skip, ui_mode=ui_mode)
+    capture_mode = getattr(args, "capture_mode", "render-pass")
+    _ensure_addon_enabled(ADDON_BIN.parent, pre_ui_skip=pre_ui_skip, ui_mode=ui_mode,
+                          capture_mode=capture_mode)
     _ensure_preset()
     return game_dir, game_exe, game_name, dataset_root, api
 
@@ -461,11 +467,11 @@ def cmd_launch(args):
         if ui_mode == "ui":
             print("│  F8  开始采集 post-UI BackBuffer（无需 survey）       │")
         elif ui_mode == "both":
-            print("│  F6  开始 survey（自动扫描无 UI 的 skip 值）          │")
-            print("│  F8  开始采集（pre-UI + post-UI 双流）                │")
+            print("│  F8  开始采集（首次自动 survey；pre-UI + post-UI）    │")
         else:
-            print("│  F6  开始 survey（自动扫描无 UI 的 skip 值）          │")
-            print("│  F8  开始采集（首次会先自动 survey）                  │")
+            print("│  F8  开始采集（首次自动 survey）                      │")
+        if ui_mode != "ui":
+            print("│  (重做 survey: 删 dataset/<game>/survey/recommended_skip.txt) │")
         print("│  F9  停止当前 survey 或采集                           │")
         print("│  Ctrl+C  退出 main.py（不会关闭游戏）                 │")
         print("└──────────────────────────────────────────────────────┘\n")
@@ -487,29 +493,19 @@ def _interactive_loop(args, game_dir: Path, game_name: str, dataset_root: Path):
 
     while True:
         _set_state(game_dir, "idle")
-        if needs_survey:
-            print("[等待] 按 F6 = survey   F8 = 采集   (Ctrl+C 退出)")
-            key = _wait_for_keys([VK_F6, VK_F8])
-        else:
-            print(f"[等待] 按 F8 = 采集（mode={ui_mode}，无需 survey）   (Ctrl+C 退出)")
-            key = _wait_for_keys([VK_F8])
+        suffix = "（首次自动 survey）" if needs_survey else f"（mode={ui_mode}，无需 survey）"
+        print(f"[等待] 按 F8 = 采集 {suffix}   F9 = 停止   (Ctrl+C 退出)")
+        _wait_for_keys([VK_F8])
 
-        if key == VK_F6:
-            if not needs_survey:
-                print(f"[F6] mode={ui_mode}，本模式不需要 survey，已忽略")
+        ran_survey = False
+        if needs_survey and _load_recommended_skip(dataset_root, game_name) is None:
+            print("[F8] 未检测到 survey 推荐值，先自动 survey…")
+            ok = _run_survey(args, game_dir, game_name, dataset_root)
+            ran_survey = True
+            if not ok:
+                print("[F8] survey 未完成，已取消采集。再次按 F8 重试")
                 continue
-            _run_survey(args, game_dir, game_name, dataset_root)
-
-        elif key == VK_F8:
-            ran_survey = False
-            if needs_survey and _load_recommended_skip(dataset_root, game_name) is None:
-                print("[F8] 未检测到 survey 推荐值，先自动 survey…")
-                ok = _run_survey(args, game_dir, game_name, dataset_root)
-                ran_survey = True
-                if not ok:
-                    print("[F8] survey 未完成，已取消采集。再次按 F8 重试")
-                    continue
-            _run_capture(args, game_dir, game_name, dataset_root, just_surveyed=ran_survey)
+        _run_capture(args, game_dir, game_name, dataset_root, just_surveyed=ran_survey)
 
 
 def _run_survey(args, game_dir: Path, game_name: str, dataset_root: Path) -> bool:
@@ -546,7 +542,8 @@ def _run_survey(args, game_dir: Path, game_name: str, dataset_root: Path) -> boo
 
     # Persist recommendation to ini for next deploy
     _ensure_addon_enabled(ADDON_BIN.parent, pre_ui_skip=recommended,
-                          ui_mode=getattr(args, "ui_mode", "no-ui"))
+                          ui_mode=getattr(args, "ui_mode", "no-ui"),
+                          capture_mode=getattr(args, "capture_mode", "render-pass"))
 
     # Make the new skip take effect immediately in the running game:
     # one-shot survey-mode write so the addon picks up `recommended`,
@@ -849,6 +846,9 @@ def main():
                    help="输出: no-ui=只 pre-UI（默认）, ui=只 post-UI BB（无需 survey）, both=双流")
     p.add_argument("--api", choices=["auto", "dx", "vulkan"], default="auto",
                    help="渲染后端: auto=按 exe 名启发（默认）, dx=DXGI proxy, vulkan=Vulkan layer")
+    p.add_argument("--capture-mode", choices=["render-pass", "barrier"], default="render-pass",
+                   help="pre-UI 触发点: render-pass=DX 经典 (bind_rts/begin_render_pass), "
+                        "barrier=compute-engine (id Tech 7 / DOOM Eternal 类，hook RT→SR transition)")
     p.add_argument("--vk-debug", action="store_true",
                    help="Vulkan: 启用 VK_LOADER_DEBUG=layer，写到 %%TEMP%%\\unicap\\vk_loader.log")
     p.add_argument("--hints", action=argparse.BooleanOptionalAction, default=True,
