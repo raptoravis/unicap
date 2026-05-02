@@ -48,9 +48,9 @@ uv run main.py pack   --game-dir DIR [--no-depth]  # pack frames + inputs → HD
 
 | mode | survey 需求 | output BMPs                            | HDF5                  |
 | ---- | --------- | -------------------------------------- | --------------------- |
-| `no-ui` (default) | F8 首次自动跑 | `<ts> BackBuffer.bmp` (pre-UI)         | `/color` (--bmp no-ui) |
-| `ui`              | 不需要       | `<ts> BackBuffer.bmp` (post-UI BB)     | `/color` (--bmp ui)   |
-| `both`            | F8 首次自动跑 | both `BackBuffer.bmp` + `BackBufferUI.bmp` | `/color` 由 --bmp 选 |
+| `no-ui` (default) | F8 首次自动跑 | `<ts> BackBuffer.bmp` (pre-UI)         | `/color` (--color no-ui) |
+| `ui`              | 不需要       | `<ts> BackBuffer.bmp` (post-UI BB)     | `/color` (--color ui)   |
+| `both`            | F8 首次自动跑 | both `BackBuffer.bmp` + `BackBufferUI.bmp` | `/color` 由 --color 选 |
 
 The addon is driven by two ini keys: `FC_PreUICapture` (1 = scene RT, 0 = post-UI BB) and `FC_BothCapture` (1 = also dump post-UI BMP alongside scene RT). `_ensure_addon_enabled` writes both based on `--ui-mode`.
 
@@ -89,7 +89,12 @@ Settings (`FC_EnableCapture`, `FC_ExportDepth`, `FC_PreUICapture`, `FC_PreUISkip
 
 `--mask-ui`（同时存在于 `launch` 和 `video` 子命令）从 sibling DepthBuffer.exr 读深度，把 `depth <= 0 OR depth >= 0.999` 的像素（reverse-Z 下的 UI/sky）在颜色帧上置黑后再编码 → 生成 `video_masked.mp4`（与 `video.mp4` 并存，不替换）。**注意**：DepthToAddon.fx 导出已 reverse-Z flip + 线性化，所以 UE4/UE5/id Tech 7 都是 sky/UI 像素 = 1.0 不是 0.0。**id Tech 7 (DOOM Eternal) HUD 是真 3D 几何**（小三角面绘制在近平面），depth mask 抓不到 → 现实使用上 mask 主要干掉 sky，HUD 靠模型自学忽略。
 
-`pack` 子命令的 `--bmp {no-ui,ui}`（默认 no-ui）选哪种 BMP 进 `/color`：no-ui=BackBuffer.bmp，ui=BackBufferUI.bmp 优先（不存在 fallback BackBuffer.bmp）。Pack **不再**做 depth-based UI mask（引擎相关、效果差），HDF5 里 `/color` 是原图，`/depth` 完整保留。
+`pack` 子命令的三个独立 flag：
+- `--color {no-ui,ui}`（默认 no-ui）：哪种 BMP 进 `/color`。no-ui = BackBuffer.bmp；ui = BackBufferUI.bmp 优先（不存在 fallback BackBuffer.bmp）。
+- `--depth` / `--no-depth`（默认开）：是否打包 `/depth` 数据集。
+- `--normal` / `--no-normal`（默认**关**）：是否打包 `/normal` 数据集（占空间大且常常用不到）。
+
+Pack **不再**做 depth-based UI mask（DOOM Eternal 等 id Tech 7 的 HUD 是真 3D 几何，depth 阈值分不开 HUD 和近景；UE4 sky 误伤）。`/color` 永远是原 BMP 内容。要看 mask 效果走 `video --mask-ui` 单独验证（解耦）。
 
 **Important:** `frame_capture.cpp` includes headers from `reshade-addons/deps/reshade/include` (v5 wrapper API). Do not change this include path — the addon's exported symbols target the v5 ABI and remain compatible with `dist/dxgi.dll` built from the 6.7.3.16 source.
 

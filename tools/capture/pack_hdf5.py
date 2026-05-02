@@ -233,18 +233,18 @@ def _load_normal(path: Path) -> np.ndarray:
 # ─── HDF5 打包 ────────────────────────────────────────────────────────────────
 
 def pack(frames_dir: Path, inputs_path: Path, output_path: Path,
-         include_depth: bool = True, bmp: str = 'no-ui'):
+         include_depth: bool = True, include_normal: bool = False,
+         color: str = 'no-ui'):
     """
-    bmp: 'no-ui' (默认) → 把 BackBuffer.bmp 作为 /color；适用于 --ui-mode no-ui
-                           或 --ui-mode both 采集（pre-UI / 干净 scene RT）。
-         'ui'           → 把 BackBufferUI.bmp 作为 /color（不存在则 fallback
-                           BackBuffer.bmp，假设 --ui-mode ui 采集）。post-UI
-                           帧含 HUD —— 模型自学忽略。
-    Pack 不再做基于 depth 的 UI mask（DOOM Eternal 等 id Tech 引擎 HUD 是真 3D
-    几何，depth 阈值分不开 HUD 和近景物体；UE4 的 mask 对 sky 反而有用但会误
-    伤场景）。要 mask 用 main.py video --mask-ui 生成 video_masked.mp4 验证。
+    color: 'no-ui' (默认) → BackBuffer.bmp 进 /color (--ui-mode no-ui 或 both 的 pre-UI 流)
+           'ui'           → BackBufferUI.bmp 优先 / fallback BackBuffer.bmp
+                            (--ui-mode ui 或 both 的 post-UI 流)
+    include_depth (默认 True): 写 /depth 数据集
+    include_normal (默认 False): 写 /normal 数据集
+    Pack 不做 UI mask（depth 在 id Tech 7 上分不开 HUD 与近景物体）。
+    要看 UI mask 效果用 main.py video --mask-ui 单独验证。
     """
-    print(f"[SCAN] 扫描: {frames_dir}  (bmp={bmp})")
+    print(f"[SCAN] 扫描: {frames_dir}  (color={color}, depth={include_depth}, normal={include_normal})")
     mode, frames = scan_frames(frames_dir)
     n = len(frames)
     if n == 0:
@@ -252,25 +252,28 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path,
         sys.exit(1)
 
     # 选择 primary BMP 字段：no-ui = 'bmp' (BackBuffer); ui = 'bmp_ui' fallback 'bmp'
-    primary_key = 'bmp'  # default for bmp='no-ui'
-    if bmp == 'ui':
+    primary_key = 'bmp'  # default for color='no-ui'
+    if color == 'ui':
         ui_count = sum(1 for f in frames if f.get('bmp_ui'))
         if ui_count == n:
             primary_key = 'bmp_ui'
-            print(f"[SCAN] --bmp ui: 使用 BackBufferUI.bmp ({ui_count}/{n} 帧)")
+            print(f"[SCAN] --color ui: 使用 BackBufferUI.bmp ({ui_count}/{n} 帧)")
         elif ui_count > 0:
-            print(f"[SCAN] --bmp ui: 仅 {ui_count}/{n} 帧有 BackBufferUI.bmp，"
-                  f"frame integrity 不全 → 退到 BackBuffer.bmp（假设 --ui-mode ui 采集）")
+            print(f"[SCAN] --color ui: 仅 {ui_count}/{n} 帧有 BackBufferUI.bmp，"
+                  f"integrity 不全 → 退到 BackBuffer.bmp（假设 --ui-mode ui 采集）")
         else:
-            print("[SCAN] --bmp ui: 无 BackBufferUI.bmp → 用 BackBuffer.bmp"
+            print("[SCAN] --color ui: 无 BackBufferUI.bmp → 用 BackBuffer.bmp"
                   "（假设此 session 是 --ui-mode ui 采集，BackBuffer.bmp = post-UI）")
 
-    if not include_depth and mode == 'triplet':
-        print("[SCAN] --no-depth: 跳过 /depth /normal 数据集")
-        mode = 'color'
-        for f in frames:
-            f['depth'] = None
-            f['normal'] = None
+    # 数据集组合：color 必含；depth/normal 各自独立 opt-in/out
+    if mode == 'triplet':
+        if not include_depth and not include_normal:
+            print("[SCAN] --no-depth --no-normal: 仅 /color")
+            mode = 'color'
+        elif not include_depth:
+            print("[SCAN] --no-depth: 跳过 /depth")
+        elif not include_normal:
+            print("[SCAN] --no-normal: 跳过 /normal（默认）")
     print(f"[SCAN] 模式={mode}, 帧数={n}")
 
     # 读取第一帧（按 primary_key 选定的 BMP）确定分辨率
@@ -303,9 +306,13 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path,
         ds_mouse    = hf.create_dataset('mouse',       (n, 2),              dtype='int32',   chunks=(min(256, n), 2),    **_C)
         ds_gamepad  = hf.create_dataset('gamepad',     (n, GAMEPAD_DIM),    dtype='float32', chunks=(min(256, n), GAMEPAD_DIM), **_C)
 
+        ds_depth  = None
+        ds_normal = None
         if mode == 'triplet':
-            ds_depth  = hf.create_dataset('depth',  (n, H, W),    dtype='float32', chunks=(1, H, W),    **_C)
-            ds_normal = hf.create_dataset('normal', (n, H, W, 3), dtype='float32', chunks=(1, H, W, 3), **_C)
+            if include_depth:
+                ds_depth  = hf.create_dataset('depth',  (n, H, W),    dtype='float32', chunks=(1, H, W),    **_C)
+            if include_normal:
+                ds_normal = hf.create_dataset('normal', (n, H, W, 3), dtype='float32', chunks=(1, H, W, 3), **_C)
 
         max_dt = 0.0
         for i, frame in enumerate(frames):
@@ -317,15 +324,14 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path,
                 dt_ms = 0.0
 
             bmp_path = frame.get(primary_key) or frame['bmp']
-            color = _load_bmp(bmp_path)
+            color_arr = _load_bmp(bmp_path)
 
-            if mode == 'triplet':
-                if frame['depth']:
-                    ds_depth[i] = _load_depth(frame['depth'])
-                if frame['normal']:
-                    ds_normal[i] = _load_normal(frame['normal'])
+            if ds_depth is not None and frame.get('depth'):
+                ds_depth[i] = _load_depth(frame['depth'])
+            if ds_normal is not None and frame.get('normal'):
+                ds_normal[i] = _load_normal(frame['normal'])
 
-            ds_color[i]     = color
+            ds_color[i]     = color_arr
             ds_frame_ts[i]  = frame['ts']
             ds_input_ts[i]  = inp['ts']
             ds_input_dt[i]  = float(dt_ms)
@@ -346,13 +352,18 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path,
         hf.attrs['fps_est']    = round(fps_est, 2)
         hf.attrs['created_at'] = datetime.datetime.now(UTC8).isoformat()
         hf.attrs['timezone']   = 'UTC+8 (frame filenames are local time)'
-        hf.attrs['bmp']         = bmp           # 'no-ui' or 'ui'
-        hf.attrs['primary_bmp'] = primary_key   # 'bmp' or 'bmp_ui'
+        hf.attrs['color']       = color           # 'no-ui' or 'ui'
+        hf.attrs['primary_bmp'] = primary_key     # 'bmp' or 'bmp_ui'
+        hf.attrs['has_depth']   = ds_depth is not None
+        hf.attrs['has_normal']  = ds_normal is not None
 
+    datasets = ['color']
+    if ds_depth  is not None: datasets.append('depth')
+    if ds_normal is not None: datasets.append('normal')
     size_mb = output_path.stat().st_size / 1024 / 1024
     print(f"[DONE] {output_path}  ({size_mb:.1f} MB)")
     print(f"[DONE] 帧数={n}  分辨率={W}x{H}  fps≈{fps_est:.1f}  最大对齐误差={max_dt:.1f} ms"
-          f"  bmp={bmp} (primary={primary_key})")
+          f"  color={color} (primary={primary_key})  datasets={'/'.join(datasets)}")
 
 
 # ─── 抽帧目视验证 ─────────────────────────────────────────────────────────────
