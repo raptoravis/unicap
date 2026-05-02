@@ -9,6 +9,7 @@ unicap-*.zip
 .claude/settings.local.json
 __pycache__
 config/
+.env
 
 # 二进制/大文件：本地保留，不入库
 # vendor/installers/

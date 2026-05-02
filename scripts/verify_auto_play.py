@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from tools.auto_play import (  # noqa: E402
-    Action, AutoPlayRunner, GameProfile, InputBackend, KeepAliveDriver,
+    Action, AutoPlayRunner, InputBackend, KeepAliveDriver,
     Observation, VLMDriver, load_profile,
 )
 from tools.auto_play.keep_alive import step_to_actions  # noqa: E402
@@ -156,20 +156,92 @@ def cap_keep_alive() -> None:
     check("keep_alive.M2 序列循环（cursor reset）", drv._cursor < len(drv._seq))
 
 
-def cap_vlm_placeholder() -> None:
+def cap_vlm_driver() -> None:
+    """C-layer: VLMDriver constructs cheaply (no env check), reads VLM_API_KEY
+    / VLM_BASE_URL / VLM_MODEL from env (or .env loaded at import), exposes
+    cost log + decision_period_s, and raises BudgetExhausted on first call
+    when VLM_API_KEY is absent so the runner can fall back to keep-alive.
+    `--vlm-base-url` / `--vlm-model` override env values."""
+    import os as _os
+    from tools.auto_play.vlm_driver import BudgetExhausted
+
     profile = load_profile("_default", fallback=False)
+
+    drv = VLMDriver(profile, budget_per_hour=10)
+    check("vlm_driver.M1 构造成功（不需要 env 变量）", isinstance(drv, VLMDriver))
+    check("vlm_driver.M2 decision_period_s 合理",
+          0.2 <= drv.decision_period_s <= 5.0, f"{drv.decision_period_s}")
+    cost = drv.get_cost_log()
+    check("vlm_driver.M3 cost_log 含 max_calls_per_hour + base_url + model",
+          cost.get("max_calls_per_hour") == 10
+          and "base_url" in cost
+          and "model" in cost,
+          str(cost))
+
+    drv2 = create_driver("vlm", profile, budget_per_hour=5)
+    check("vlm_driver.M4 factory 返回 VLMDriver", isinstance(drv2, VLMDriver))
+
+    # Constructor kwargs override env at construction time
+    drv3 = VLMDriver(
+        profile,
+        api_key="ctor-override-key",
+        base_url="https://example.test/v1",
+        model="my-custom-vlm",
+        budget_per_hour=5,
+    )
+    check("vlm_driver.M5 base_url + model kwarg 覆盖 env",
+          drv3.base_url == "https://example.test/v1"
+          and drv3.model_name == "my-custom-vlm",
+          f"base_url={drv3.base_url} model={drv3.model_name}")
+    # api_key override is private (not exposed via property to discourage
+    # logging), but we can verify it took by ensuring _ensure_client doesn't
+    # raise on the missing-env path — the key check should be satisfied by
+    # the override, only failing later on the openai SDK call. Since we
+    # don't make a real call, we just verify the override path doesn't
+    # raise BudgetExhausted with VLM_API_KEY in the message.
+    saved_key = _os.environ.pop("VLM_API_KEY", None)
     try:
-        VLMDriver(profile)
-        check("vlm_driver.M2 构造时 raise", False, "未 raise")
-    except NotImplementedError as e:
-        msg = str(e)
-        check("vlm_driver.M2 错误信息含 G-005 引用",
-              "G-005" in msg or "G-006" in msg, msg[:80])
+        try:
+            drv3._ensure_client()
+        except BudgetExhausted as e:
+            if "VLM_API_KEY" in str(e):
+                check("vlm_driver.M5b api_key kwarg 覆盖空 env", False, str(e)[:80])
+            else:
+                # Some other error (no SDK / network) — that's fine, override worked
+                check("vlm_driver.M5b api_key kwarg 覆盖空 env", True)
+        else:
+            check("vlm_driver.M5b api_key kwarg 覆盖空 env", True)
+    finally:
+        if saved_key is not None:
+            _os.environ["VLM_API_KEY"] = saved_key
+
+    # Lazy validation — clear VLM_API_KEY (and optionally VLM_MODEL),
+    # next_actions on a non-empty frames_dir raises BudgetExhausted.
+    saved_key = _os.environ.pop("VLM_API_KEY", None)
+    saved_model = _os.environ.pop("VLM_MODEL", None)
     try:
-        create_driver("vlm", profile)
-        check("vlm_driver.M3 factory 报 NotImplementedError", False)
-    except NotImplementedError:
-        check("vlm_driver.M3 factory 报 NotImplementedError", True)
+        with tempfile.TemporaryDirectory() as td:
+            d = VLMDriver(profile, frames_dir=Path(td))
+            # Seed a fake BMP so _read_latest_frame returns non-None,
+            # forcing the code path past the frame check.
+            bmp = Path(td) / "0001 BackBuffer.bmp"
+            cv2.imwrite(str(bmp), np.zeros((720, 1280, 3), dtype=np.uint8))
+            time.sleep(0.6)  # mtime > 500ms guard
+            try:
+                d.next_actions(Observation(timestamp=time.monotonic(), profile=profile))
+                check("vlm_driver.M6 缺 VLM_API_KEY → BudgetExhausted", False)
+            except BudgetExhausted as e:
+                msg = str(e)
+                check(
+                    "vlm_driver.M6 缺 VLM_API_KEY → BudgetExhausted",
+                    "VLM_API_KEY" in msg,
+                    msg[:120],
+                )
+    finally:
+        if saved_key is not None:
+            _os.environ["VLM_API_KEY"] = saved_key
+        if saved_model is not None:
+            _os.environ["VLM_MODEL"] = saved_model
 
 
 def cap_watchdog() -> None:
@@ -288,26 +360,41 @@ def integ_main_cli_help() -> None:
 # ── E2E offline ─────────────────────────────────────────────────────────────
 
 
-def e2e_3_vlm_driver_error() -> None:
-    """E2E-3: --driver vlm 直接报错退出，stderr 含 G-005 / G-006 引用."""
-    proc = subprocess.run(
-        [sys.executable, str(ROOT / "main.py"), "launch",
-         "--game-path", str(ROOT / "main.py"),  # invalid exe — will fail _resolve_game_path
-         "--auto-play", "--driver", "vlm"],
-        capture_output=True, text=True, cwd=str(ROOT), encoding="utf-8",
-        errors="replace", timeout=15,
-    )
-    out = (proc.stdout or "") + (proc.stderr or "")
-    # We expect to fail before driver path because game-path is invalid.
-    # Test the driver-error path directly by constructing it instead:
+def e2e_3_vlm_driver_budget_fallback() -> None:
+    """E2E-3: 缺 VLM_API_KEY 时 VLMDriver 抛 BudgetExhausted；runner 必须能
+    catch 该异常完成 fallback 而不是终止 capture。"""
+    import os as _os
+    from tools.auto_play.vlm_driver import BudgetExhausted
+
     profile = load_profile("_default", fallback=False)
+
+    saved_key = _os.environ.pop("VLM_API_KEY", None)
+    saved_model = _os.environ.pop("VLM_MODEL", None)
     try:
-        VLMDriver(profile)
-        check("E2E-3 VLMDriver 构造报错", False)
-    except NotImplementedError as e:
-        msg = str(e)
-        check("E2E-3 错误信息指向 G-005/G-006",
-              "G-005" in msg and "G-006" in msg, msg[:120])
+        with tempfile.TemporaryDirectory() as td:
+            d = VLMDriver(profile, frames_dir=Path(td))
+            bmp = Path(td) / "0001 BackBuffer.bmp"
+            cv2.imwrite(str(bmp), np.zeros((720, 1280, 3), dtype=np.uint8))
+            time.sleep(0.6)
+            raised = False
+            detail = ""
+            try:
+                d.next_actions(Observation(timestamp=time.monotonic(),
+                                           profile=profile))
+            except BudgetExhausted as e:
+                detail = str(e)[:120]
+                raised = "VLM_API_KEY" in detail
+            check("E2E-3 缺 VLM_API_KEY → BudgetExhausted (runner 可降级)",
+                  raised, detail)
+    finally:
+        if saved_key is not None:
+            _os.environ["VLM_API_KEY"] = saved_key
+        if saved_model is not None:
+            _os.environ["VLM_MODEL"] = saved_model
+
+    # runner.create_driver 接受 vlm 不报错（lazy 验证，便于 fallback 路径走通）
+    drv = create_driver("vlm", profile, budget_per_hour=10)
+    check("E2E-3 create_driver('vlm') 不再 raise", isinstance(drv, VLMDriver))
 
 
 def e2e_4_vigem_fallback() -> None:
@@ -368,13 +455,13 @@ def main() -> int:
     run("Capability: profile",      cap_profile)
     run("Capability: input_backend", cap_input_backend)
     run("Capability: keep_alive",   cap_keep_alive)
-    run("Capability: vlm placeholder", cap_vlm_placeholder)
+    run("Capability: vlm_driver",   cap_vlm_driver)
     run("Capability: watchdog",     cap_watchdog)
     run("Capability: runner",       cap_runner)
     run("Integration: shared step_to_actions", integ_step_to_actions_shared)
     run("Integration: factory typo", integ_factory_typo_rejected)
     run("Integration: main CLI",     integ_main_cli_help)
-    run("E2E-3: VLMDriver 错误",     e2e_3_vlm_driver_error)
+    run("E2E-3: VLM 预算/key fallback", e2e_3_vlm_driver_budget_fallback)
     run("E2E-4: ViGEm 降级",         e2e_4_vigem_fallback)
     run("E2E-5: watchdog log",      e2e_5_watchdog_trigger_logging)
 

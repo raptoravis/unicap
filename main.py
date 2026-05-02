@@ -422,12 +422,14 @@ def _start_auto_play(args, frames_dir: Path, game_exe_stem: str):
             profile=profile,
             frames_dir=frames_dir,
             debug=getattr(args, "auto_play_debug", False),
+            vlm_api_key=getattr(args, "vlm_api_key", None) or None,
+            vlm_base_url=getattr(args, "vlm_base_url", None) or None,
+            vlm_model=getattr(args, "vlm_model", None) or None,
             vlm_budget_per_hour=getattr(args, "vlm_budget_per_hour", 60),
-            vlm_budget_total_usd=getattr(args, "vlm_budget_total_usd", 5.0),
         )
         runner.start()
     except NotImplementedError as e:
-        # VLMDriver 占位时构造即抛
+        # 兜底：未来若新 driver 占位（如 Gemini provider 未接），构造时抛此异常
         print(f"[AUTO-PLAY] {e}")
         sys.exit(2)
     except Exception as e:
@@ -1036,15 +1038,23 @@ def main():
     p.add_argument("--auto-play", action="store_true",
                    help="启用自动玩游戏 bot（capture 期间持续注入输入；F9 停止时一并停）")
     p.add_argument("--driver", choices=["keep-alive", "vlm"], default="keep-alive",
-                   help="auto-play driver: keep-alive=哑 bot（默认）, vlm=VLM 大脑（C 层占位，未实现）")
+                   help="auto-play driver: keep-alive=哑 bot（默认）, "
+                        "vlm=OpenAI-compatible 视觉大脑（需 .env 设 VLM_API_KEY / "
+                        "VLM_BASE_URL / VLM_MODEL；预算耗尽自动降级 keep-alive）")
+    p.add_argument("--vlm-api-key", default=None,
+                   help="覆盖 .env 的 VLM_API_KEY（一次性测试用；注意：会留 "
+                        "shell history / process list 痕迹，常态请用 .env）")
+    p.add_argument("--vlm-base-url", default=None,
+                   help="覆盖 .env 的 VLM_BASE_URL（如 "
+                        "https://dashscope.aliyuncs.com/compatible-mode/v1）")
+    p.add_argument("--vlm-model", default=None,
+                   help="覆盖 .env 的 VLM_MODEL（如 qwen-vl-plus / kimi-k2.6 / gpt-4o-mini）")
     p.add_argument("--profile", default="",
                    help="auto-play profile 名 (profiles/<name>.yaml)；不传则按 exe 名 fuzzy match，回落 _default")
     p.add_argument("--auto-play-debug", action="store_true",
                    help="auto-play 详细 log（每次注入都打到 auto_play.log）")
     p.add_argument("--vlm-budget-per-hour", type=int, default=60,
-                   help="VLM driver 每小时调用上限（C 层用，本 release 占位）")
-    p.add_argument("--vlm-budget-total-usd", type=float, default=5.0,
-                   help="VLM driver 单次 session 累计花费上限 USD（C 层用，本 release 占位）")
+                   help="VLM driver 每小时调用上限（默认 60；耗尽自动降级 keep-alive）")
 
     p = sub.add_parser("video", help="批量生成游戏目录下所有缺失的 video.mp4 / video_ui.mp4")
     p.add_argument("--game-dir", default="", metavar="DIR",

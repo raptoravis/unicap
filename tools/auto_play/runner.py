@@ -15,7 +15,7 @@ from tools.auto_play.driver import BotDriver, Observation
 from tools.auto_play.input_backend import InputBackend
 from tools.auto_play.keep_alive import KeepAliveDriver
 from tools.auto_play.profile import GameProfile
-from tools.auto_play.vlm_driver import VLMDriver
+from tools.auto_play.vlm_driver import BudgetExhausted, VLMDriver
 from tools.auto_play.watchdog import StaticFrameWatchdog
 
 if TYPE_CHECKING:
@@ -30,11 +30,15 @@ def create_driver(
     profile: GameProfile,
     *,
     seed: int | None = None,
-    provider: str = "anthropic",
+    api_key: str | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
     budget_per_hour: int = 60,
-    budget_total_usd: float = 5.0,
+    frames_dir: Path | None = None,
 ) -> BotDriver:
-    """Factory: 'keep-alive' uses seed only; 'vlm' uses provider + budget kwargs.
+    """Factory: 'keep-alive' uses seed only; 'vlm' reads VLM_API_KEY /
+    VLM_BASE_URL / VLM_MODEL from env, with `api_key=` / `base_url=` /
+    `model=` kwargs as optional one-shot overrides.
 
     Other kwargs raise TypeError at the call site rather than being silently
     swallowed — caller must adapt to driver-specific args.
@@ -44,9 +48,11 @@ def create_driver(
     if name == "vlm":
         return VLMDriver(
             profile,
-            provider=provider,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
             budget_per_hour=budget_per_hour,
-            budget_total_usd=budget_total_usd,
+            frames_dir=frames_dir,
         )
     raise ValueError(f"未知 driver: {name!r} (支持: keep-alive, vlm)")
 
@@ -74,8 +80,10 @@ class AutoPlayRunner:
         profile: GameProfile,
         frames_dir: Path,
         debug: bool = False,
+        vlm_api_key: str | None = None,
+        vlm_base_url: str | None = None,
+        vlm_model: str | None = None,
         vlm_budget_per_hour: int = 60,
-        vlm_budget_total_usd: float = 5.0,
         log_path: Path | None = None,
     ) -> None:
         self._profile = profile
@@ -96,8 +104,11 @@ class AutoPlayRunner:
         else:
             self._driver = create_driver(
                 driver_name, profile,
+                api_key=vlm_api_key,
+                base_url=vlm_base_url,
+                model=vlm_model,
                 budget_per_hour=vlm_budget_per_hour,
-                budget_total_usd=vlm_budget_total_usd,
+                frames_dir=frames_dir,
             )
         self._watchdog = StaticFrameWatchdog(
             frames_dir=frames_dir, profile=profile, input_backend=self._backend,
@@ -170,6 +181,25 @@ class AutoPlayRunner:
                 obs = Observation(timestamp=t0, profile=self._profile, frame_bgr=None)
                 actions = self._driver.next_actions(obs) or []
                 consecutive_errors = 0
+            except BudgetExhausted as e:
+                # G-006: budget exhausted (or VLM client init failed) — swap
+                # to KeepAliveDriver and continue. Capture must keep running.
+                log.warning(
+                    "[AUTO-PLAY] VLM 预算耗尽 (%s) — 降级到 KeepAliveDriver", e,
+                )
+                print(
+                    f"[AUTO-PLAY] VLM 预算耗尽: {e} — 降级到 KeepAliveDriver",
+                    flush=True,
+                )
+                try:
+                    self._driver.on_stop()
+                except Exception:
+                    log.exception("[AUTO-PLAY] vlm driver.on_stop 异常")
+                self._driver = KeepAliveDriver(self._profile)
+                self._driver_name = "keep-alive"
+                self._driver.on_start()
+                period = max(0.05, self._driver.decision_period_s)
+                continue
             except Exception:
                 log.exception("[AUTO-PLAY] driver.next_actions 异常 — 续 5s 重试")
                 consecutive_errors += 1

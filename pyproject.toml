@@ -1,6 +1,6 @@
 [project]
 name = "unicap"
-version = "1.0.2"
+version = "1.0.3"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -14,6 +14,14 @@ dependencies = [
 [project.optional-dependencies]
 auto-play = [
     "vgamepad",  # ViGEm Bus driver wrapper; soft-import in InputBackend
+]
+auto-play-vlm = [
+    "vgamepad",
+    # Single OpenAI-compatible SDK covers Qwen / Kimi / OpenAI / local Ollama
+    # via VLM_BASE_URL override.
+    "openai>=1.50",
+    # Loads .env file (VLM_API_KEY / VLM_BASE_URL / VLM_MODEL) at module import.
+    "python-dotenv>=1.0",
 ]
 
 [dependency-groups]

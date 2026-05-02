@@ -176,7 +176,11 @@ uv run main.py launch --game-path "...DOOMEternalx64vk.exe" --ui-mode ui --auto-
 |------|------|
 | `--auto-play` | 启用 bot；F9 停止 capture 时 bot 一并停 |
 | `--driver keep-alive` | A 层哑 bot（默认） — 按 profile 序列循环出输入 |
-| `--driver vlm` | C 层 VLM 大脑 — **本 release 占位未实现**（构造时报错指向 G-005/G-006） |
+| `--driver vlm` | C 层视觉大脑 — 看 BackBuffer 出动作 JSON；从 `.env` 读 `VLM_API_KEY` / `VLM_BASE_URL` / `VLM_MODEL`（OpenAI-compat 端点）；缺 key 自动降级 keep-alive |
+| `--vlm-api-key KEY` | 一次性覆盖 `VLM_API_KEY`（注意会进 shell history / process list） |
+| `--vlm-base-url URL` | 覆盖 `.env` 的 `VLM_BASE_URL` |
+| `--vlm-model NAME` | 覆盖 `.env` 的 `VLM_MODEL` |
+| `--vlm-budget-per-hour N` | VLM 每小时调用上限（默认 60；耗尽降级 keep-alive） |
 | `--profile NAME` | `profiles/<NAME>.yaml`；不传则 exe 名 fuzzy match |
 | `--auto-play-debug` | 详细 log（每次注入打到 `%TEMP%/unicap/auto_play.log`） |
 
@@ -189,11 +193,31 @@ uv run main.py launch --game-path "...DOOMEternalx64vk.exe" --ui-mode ui --auto-
 - `tools/auto_play/keep_alive.py` — `KeepAliveDriver` + 公共 `step_to_actions(profile, step, rng)`（watchdog 复用）
 - `tools/auto_play/watchdog.py` — `StaticFrameWatchdog` 后台线程；连续静帧 → profile 声明的 recovery 序列
 - `tools/auto_play/runner.py` — `AutoPlayRunner` 编排 driver + watchdog + lifecycle，集成在 `_run_capture` 的 finally
-- `tools/auto_play/vlm_driver.py` — C 层占位，构造抛 NotImplementedError
+- `tools/auto_play/vlm_driver.py` — C 层 VLMDriver：纯 OpenAI-compat 路径，从 `.env` 读 `VLM_API_KEY` / `VLM_BASE_URL` / `VLM_MODEL`（`python-dotenv` 在 import 时自动 `load_dotenv()`）；JSON 输出走 `response_format={"type":"json_object"}` + 客户端结构校验；每帧 BMP→JPEG→base64；`BudgetExhausted` 触发 runner 降级 keep-alive
 
 **Profile 接入新游戏**：复制 `profiles/_default.yaml` → 改 `controls` + `keep_alive.sequence` + `vlm.game_instructions` → 跑 30 分钟测；详见 `profiles/README.md`。
 
 **ViGEm 软依赖**：装 `pip install "unicap[auto-play]"` 启用虚拟手柄；不装时 `InputBackend` 自动 fallback 到键鼠 + warn 一次。需先装 [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases) 内核驱动。
+
+**VLM driver (C 层) 配置**：
+
+VLMDriver 是个**纯 OpenAI-compatible 客户端**，三个 env var 决定指向哪家：
+
+```bash
+VLM_API_KEY=sk-...
+VLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+VLM_MODEL=qwen-vl-plus
+```
+
+写到项目根的 `.env` 文件即可（`.env.example` 已含 Qwen / Kimi / OpenAI / 本地 Ollama 四份模板，复制改值）；`python-dotenv` 在 `vlm_driver.py` import 时自动 `load_dotenv()`，无需手动 source。`.env` 已加入 `.gitignore`。
+
+装依赖：`pip install "unicap[auto-play-vlm]"`（含 `openai>=1.50` + `python-dotenv>=1.0`）。
+
+切端点：改 `.env`，或一次性 `--vlm-base-url ... --vlm-model ...` 命令行覆盖（不动 `.env`）。
+
+`VLM_API_KEY` / `VLM_MODEL` / `openai` SDK 缺失时 VLMDriver **不在构造时报错**（lazy 验证），首次 `next_actions` 抛 `BudgetExhausted` → runner 自动降级 `KeepAliveDriver`，capture 不中断。每次 VLM call 写一行 `[VLM-COST] call#N t=Xs in=I out=O cache_r=Cr` 到 `%TEMP%/unicap/auto_play.log`；`cache_r` 来自 `usage.prompt_tokens_details.cached_tokens`（OpenAI 2024 schema，Qwen / Kimi / OpenAI / 大多 OpenAI-compat 都返这个字段）。安全网：`--vlm-budget-per-hour`（默认 60 calls/h）耗尽即降级 keep-alive。
+
+注意：DeepSeek 的 chat completion API 当前不支持图像输入（确认 2026-05-02），故不能直接拿来当 `VLM_BASE_URL`；未来 DeepSeek 加 vision 直接换 base_url + model 即可。
 
 **反作弊 / Steam**：unicap 不绕反作弊（profile 作者自负风险）；Steam 重启游戏不影响 SendInput（OS 级注入，与 env vars 无关）。
 
