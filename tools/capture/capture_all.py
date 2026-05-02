@@ -131,7 +131,7 @@ def run(fps: int = 30, duration=None, frames_dir: Path = None, inputs_out: Path 
                 stop.set()
                 break
             now = time.perf_counter()
-            if now - last_print >= 1.4:
+            if now - last_print >= 14.0:
                 count = sum(1 for _ in frames_dir.glob("*BackBuffer.bmp"))
                 if count != last_count:
                     print(f"[CAPTURE] {elapsed:6.1f}s / {count} 帧", flush=True)
