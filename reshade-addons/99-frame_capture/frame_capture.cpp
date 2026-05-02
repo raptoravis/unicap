@@ -512,7 +512,8 @@ static bool fc_copy_rt_at_bind(command_list* cmd_list, device* dev,
                                 resource rt, uint32_t w, uint32_t h, format fmt)
 {
     if (!g_pre_ui_staging.handle ||
-        g_pre_ui_staging_w != w || g_pre_ui_staging_h != h) {
+        g_pre_ui_staging_w != w || g_pre_ui_staging_h != h ||
+        g_pre_ui_staging_fmt != fmt) {
         if (g_pre_ui_staging.handle) dev->destroy_resource(g_pre_ui_staging);
         g_pre_ui_staging = { 0 };
         resource_desc sd(w, h, 1, 1, fmt, 1,
@@ -614,7 +615,8 @@ static void on_bind_rts_dsv(command_list* cmd_list, uint32_t count,
     bool safe_last_rt = (g_pre_ui_skip == 0 || s_prev_non_bb_total == 0);
     if (s_last_non_bb_rt.handle != 0 && s_had_depth_pass && safe_last_rt) {
         if (!g_pre_ui_staging.handle ||
-            g_pre_ui_staging_w != s_last_non_bb_w || g_pre_ui_staging_h != s_last_non_bb_h) {
+            g_pre_ui_staging_w != s_last_non_bb_w || g_pre_ui_staging_h != s_last_non_bb_h ||
+            g_pre_ui_staging_fmt != s_last_non_bb_fmt) {
             if (g_pre_ui_staging.handle) dev->destroy_resource(g_pre_ui_staging);
             g_pre_ui_staging = { 0 };
             resource_desc sd(s_last_non_bb_w, s_last_non_bb_h, 1, 1,
@@ -706,7 +708,8 @@ static void on_begin_render_pass(command_list* cmd_list, uint32_t count,
     bool safe_last_rt = (g_pre_ui_skip == 0 || s_prev_non_bb_total == 0);
     if (s_last_non_bb_rt.handle != 0 && s_had_depth_pass && safe_last_rt) {
         if (!g_pre_ui_staging.handle ||
-            g_pre_ui_staging_w != s_last_non_bb_w || g_pre_ui_staging_h != s_last_non_bb_h) {
+            g_pre_ui_staging_w != s_last_non_bb_w || g_pre_ui_staging_h != s_last_non_bb_h ||
+            g_pre_ui_staging_fmt != s_last_non_bb_fmt) {
             if (g_pre_ui_staging.handle) dev->destroy_resource(g_pre_ui_staging);
             g_pre_ui_staging = { 0 };
             resource_desc sd(s_last_non_bb_w, s_last_non_bb_h, 1, 1,
@@ -835,7 +838,8 @@ static void on_barrier(command_list* cmd_list, uint32_t count,
             // firing addon_event::barrier — so by the time we run, the resource
             // is ALREADY in new_states[i] (which has shader_resource bit).
             if (!g_pre_ui_staging.handle ||
-                g_pre_ui_staging_w != rd.texture.width || g_pre_ui_staging_h != rd.texture.height) {
+                g_pre_ui_staging_w != rd.texture.width || g_pre_ui_staging_h != rd.texture.height ||
+                g_pre_ui_staging_fmt != rd.texture.format) {
                 if (g_pre_ui_staging.handle) dev->destroy_resource(g_pre_ui_staging);
                 g_pre_ui_staging = { 0 };
                 resource_desc sd(rd.texture.width, rd.texture.height, 1, 1, rd.texture.format, 1,
