@@ -34,6 +34,7 @@ uv run main.py launch                           # primary flow: deploy + launch 
 uv run main.py launch --ui-mode ui              # capture post-UI BackBuffer only (no survey)
 uv run main.py launch --ui-mode both            # both pre-UI and post-UI streams (needs survey)
 uv run main.py launch --api vulkan              # Vulkan-only games (DOOM 2016/Eternal etc.)
+uv run main.py launch --auto-play               # auto-play bot 持续注入输入（无人值守采集）
 uv run main.py video  --game-dir DIR            # encode frames → MP4 (post-hoc, batch)
 uv run main.py pack   --game-dir DIR [--no-depth]  # pack frames + inputs → HDF5 (post-hoc, batch)
 ```
@@ -156,6 +157,47 @@ The addon handles all timing and frame output; `capture_all.py` only records inp
 1. `reshade_core` (ExternalProject, MSBuild) → `dist/dxgi.dll` (unused)
 2. `frame_capture` (shared library, MSVC, CXX17) → `dist/frame_capture.addon`
 3. `shaders` (custom target, always runs) → copies `.fx` files to `dist/unicap-shaders/Shaders/`
+
+### 自动玩游戏（auto-play）— 无人值守采集
+
+`--auto-play` 让 bot 在 capture 期间持续注入输入（移动、转向、攻击），实现长时间无人值守采集。两层架构 + 4 个内置 profile + 通用 OS 级输入注入。
+
+```powershell
+# 通宵采集（A 层 keep-alive bot，无 API 费用）
+uv run main.py launch --auto-play --profile ff7r
+
+# 多游戏：profile 不指定时按 exe 名 fuzzy match，匹配不到回落 _default
+uv run main.py launch --game-path "...DOOMEternalx64vk.exe" --ui-mode ui --auto-play
+```
+
+| flag | 含义 |
+|------|------|
+| `--auto-play` | 启用 bot；F9 停止 capture 时 bot 一并停 |
+| `--driver keep-alive` | A 层哑 bot（默认） — 按 profile 序列循环出输入 |
+| `--driver vlm` | C 层 VLM 大脑 — **本 release 占位未实现**（构造时报错指向 G-005/G-006） |
+| `--profile NAME` | `profiles/<NAME>.yaml`；不传则 exe 名 fuzzy match |
+| `--auto-play-debug` | 详细 log（每次注入打到 `%TEMP%/unicap/auto_play.log`） |
+
+**注入通路**：bot 的 input 走 OS 级 SendInput（键鼠）+ ViGEm（虚拟手柄，软依赖）。`capture_all._thread_input` 用 `GetKeyboardState`/`XInput` 采集，自然录到 `inputs.jsonl` — **bot 输入与人类输入无差别**。
+
+**架构**：
+- `tools/auto_play/driver.py` — `BotDriver` ABC + `Action` / `Observation` 数据契约
+- `tools/auto_play/input_backend.py` — SendInput + vgamepad，单 Lock 串行化所有注入
+- `tools/auto_play/profile.py` — YAML schema 校验；F8/F9 强制 `reserved_keys`
+- `tools/auto_play/keep_alive.py` — `KeepAliveDriver` + 公共 `step_to_actions(profile, step, rng)`（watchdog 复用）
+- `tools/auto_play/watchdog.py` — `StaticFrameWatchdog` 后台线程；连续静帧 → profile 声明的 recovery 序列
+- `tools/auto_play/runner.py` — `AutoPlayRunner` 编排 driver + watchdog + lifecycle，集成在 `_run_capture` 的 finally
+- `tools/auto_play/vlm_driver.py` — C 层占位，构造抛 NotImplementedError
+
+**Profile 接入新游戏**：复制 `profiles/_default.yaml` → 改 `controls` + `keep_alive.sequence` + `vlm.game_instructions` → 跑 30 分钟测；详见 `profiles/README.md`。
+
+**ViGEm 软依赖**：装 `pip install "unicap[auto-play]"` 启用虚拟手柄；不装时 `InputBackend` 自动 fallback 到键鼠 + warn 一次。需先装 [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases) 内核驱动。
+
+**反作弊 / Steam**：unicap 不绕反作弊（profile 作者自负风险）；Steam 重启游戏不影响 SendInput（OS 级注入，与 env vars 无关）。
+
+**长时不睡眠**：`--auto-play` 自动调 `SetThreadExecutionState(ES_CONTINUOUS|ES_DISPLAY|ES_SYSTEM)` 阻止系统睡眠/锁屏。
+
+**验证**：`uv run python scripts/verify_auto_play.py` 跑 38 个 capability + integration + 离线 E2E 检查；live-game E2E（30min FF7R + 新游戏接入）需 sponsor 实机。
 
 ## Dataset output layout
 

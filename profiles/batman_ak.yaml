@@ -1,0 +1,55 @@
+name: batman_ak
+description: |
+  Batman: Arkham Knight — DX11。
+  动作潜入：WASD + 鼠标视角 + LMB 普通攻击 + RMB 反击 + Space 抓钩/披风滑翔 + E 互动。
+
+controls:
+  move_forward: W
+  move_back: S
+  move_left: A
+  move_right: D
+  turn_axis: mouse
+  attack: mouse_left
+  counter: mouse_right    # 自定义
+  interact: E
+  jump: SPACE             # 也用作披风滑翔
+
+reserved_keys: [F8, F9]
+
+input:
+  prefer_gamepad: false
+  mouse_sensitivity: 1.0
+
+keep_alive:
+  period_s: 0.9
+  sequence:
+    - {action: move_forward, duration_ms: 3000}
+    - {action: turn,         duration_ms: 700, payload: {direction: random, magnitude: 0.6}}
+    - {action: move_forward, duration_ms: 2500}
+    - {action: jump,         duration_ms: 200}     # 滑翔
+    - {action: move_forward, duration_ms: 1500}
+    - {action: turn,         duration_ms: 500, payload: {direction: random, magnitude: 0.8}}
+    - {action: attack,       duration_ms: 250}
+    - {action: attack,       duration_ms: 250}
+    - {action: interact,     duration_ms: 200}
+    - {action: wait,         duration_ms: 700}
+  recovery:
+    - {action: press_key, payload: {vk: ESC}, duration_ms: 100}
+    - {action: wait, duration_ms: 400}
+    - {action: press_key, payload: {vk: ESC}, duration_ms: 100}
+    - {action: press_key, payload: {vk: SPACE}, duration_ms: 100}
+    - {action: turn, duration_ms: 800, payload: {direction: random, magnitude: 1.0}}
+
+watchdog:
+  sample_period_s: 5.0
+  static_diff_threshold: 0.01
+  consecutive_static_required: 2
+
+vlm:
+  game_instructions: |
+    Batman: Arkham Knight (Unreal Engine 3 fork / DX11). Open-world action.
+    WASD moves Batman; mouse turns camera. Left-click attacks; right-click
+    counters. Space launches grapple/cape glide. E interacts.
+    Goal: explore Gotham; keep moving; engage thugs as encountered.
+    Avoid the Riddler trophy menus. ESC exits menus.
+  frame_subsample_long_edge: 512

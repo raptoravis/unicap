@@ -1,0 +1,52 @@
+name: _default
+description: |
+  通用 fallback profile — 适用于大多数 FPS / 第三人称 / 动作游戏。
+  WASD 移动 + 鼠标视角 + 空格跳 + E 互动 + 鼠标左键攻击。
+  接入新游戏时复制本文件改 controls 即可。
+
+controls:
+  move_forward: W
+  move_back: S
+  move_left: A
+  move_right: D
+  turn_axis: mouse        # mouse | gamepad_rstick
+  attack: mouse_left
+  interact: E
+  jump: SPACE
+
+reserved_keys: [F8, F9]   # F8/F9 强制保留（unicap 自身热键）
+
+input:
+  prefer_gamepad: false
+  mouse_sensitivity: 1.0
+
+keep_alive:
+  period_s: 0.8
+  sequence:
+    - {action: move_forward, duration_ms: 3000}
+    - {action: turn,         duration_ms: 600,  payload: {direction: random, magnitude: 0.6}}
+    - {action: move_forward, duration_ms: 2500}
+    - {action: interact,     duration_ms: 200}
+    - {action: turn,         duration_ms: 800,  payload: {direction: random, magnitude: 1.0}}
+    - {action: attack,       duration_ms: 250}
+    - {action: jump,         duration_ms: 100}
+    - {action: wait,         duration_ms: 600}
+  recovery:
+    - {action: press_key, payload: {vk: ESC}, duration_ms: 100}
+    - {action: wait, duration_ms: 500}
+    - {action: press_key, payload: {vk: ESC}, duration_ms: 100}
+    - {action: press_key, payload: {vk: SPACE}, duration_ms: 100}
+    - {action: turn, duration_ms: 800, payload: {direction: random, magnitude: 1.0}}
+
+watchdog:
+  sample_period_s: 5.0
+  static_diff_threshold: 0.01    # 平均像素 diff（归一化 0-1）
+  consecutive_static_required: 2
+
+vlm:
+  game_instructions: |
+    Generic action game. WASD moves the character relative to the camera.
+    Mouse aims/looks. Left-click attacks. E interacts. Space jumps.
+    Goal: keep the character moving in the world; explore and engage simple enemies.
+    Avoid menus and cutscenes.
+  frame_subsample_long_edge: 512

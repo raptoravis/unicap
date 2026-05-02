@@ -1,0 +1,56 @@
+name: ff7r
+description: |
+  Final Fantasy VII Remake / Intergrade — UE4，DX12。
+  KB+M 配置：WASD 跑动 + 鼠标视角 + 鼠标左键攻击 + Space 闪避 + E 互动。
+  FF7R 的 cinematic 模式很常见，watchdog 触发率会偏高 — 正常现象。
+
+controls:
+  move_forward: W
+  move_back: S
+  move_left: A
+  move_right: D
+  turn_axis: mouse
+  attack: mouse_left
+  interact: E
+  jump: SPACE             # FF7R 不支持跳，但 keep_alive sequence 不调用
+
+reserved_keys: [F8, F9]
+
+input:
+  prefer_gamepad: false
+  mouse_sensitivity: 0.8
+
+keep_alive:
+  period_s: 1.0
+  sequence:
+    - {action: move_forward, duration_ms: 4000}
+    - {action: turn,         duration_ms: 600, payload: {direction: random, magnitude: 0.5}}
+    - {action: move_forward, duration_ms: 3000}
+    - {action: interact,     duration_ms: 200}
+    - {action: turn,         duration_ms: 700, payload: {direction: random, magnitude: 0.8}}
+    - {action: attack,       duration_ms: 250}
+    - {action: attack,       duration_ms: 250}
+    - {action: wait,         duration_ms: 800}
+    - {action: move_forward, duration_ms: 2000}
+  recovery:
+    # FF7R cutscene/对话用 ENTER 或 X(=mouse left in KB) 跳过
+    - {action: press_key, payload: {vk: ENTER}, duration_ms: 100}
+    - {action: wait, duration_ms: 400}
+    - {action: press_key, payload: {vk: ESC}, duration_ms: 100}
+    - {action: press_key, payload: {vk: ESC}, duration_ms: 100}
+    - {action: turn, duration_ms: 800, payload: {direction: random, magnitude: 1.0}}
+
+watchdog:
+  sample_period_s: 6.0
+  static_diff_threshold: 0.008
+  consecutive_static_required: 3   # FF7R cutscene 多 — 不要太敏感
+
+vlm:
+  game_instructions: |
+    Final Fantasy VII Remake (UE4 / DX12). Action-RPG. WASD moves Cloud relative
+    to camera. Mouse turns the camera. Left-click is basic attack (combos by
+    repeated clicks). E interacts with NPCs/objects. ESC opens menu.
+    Goal: explore the current area; engage simple enemies; do NOT enter major
+    story choices. If a cutscene or "press X to advance" appears, hit Enter
+    to skip. Avoid permanent decisions (don't pick story options).
+  frame_subsample_long_edge: 512

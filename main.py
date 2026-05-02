@@ -396,6 +396,56 @@ def _symlink_file(src: Path, dst: Path):
         shutil.copy2(src, dst)
 
 
+# ── Auto-play (optional) ──────────────────────────────────────────────────────
+
+def _start_auto_play(args, frames_dir: Path, game_exe_stem: str):
+    """Spawn AutoPlayRunner if --auto-play; otherwise return None.
+    Caller is responsible for runner.stop() in the capture finally block."""
+    if not getattr(args, "auto_play", False):
+        return None
+    try:
+        from tools.auto_play import AutoPlayRunner, load_profile
+    except Exception as e:
+        print(f"[AUTO-PLAY] 模块加载失败：{e} — 关闭 auto-play 续 capture")
+        return None
+
+    profile_name = getattr(args, "profile", "") or game_exe_stem
+    try:
+        profile = load_profile(profile_name, fallback=True)
+    except Exception as e:
+        print(f"[AUTO-PLAY] profile 加载失败：{e} — 关闭 auto-play 续 capture")
+        return None
+
+    try:
+        runner = AutoPlayRunner(
+            driver_name=getattr(args, "driver", "keep-alive"),
+            profile=profile,
+            frames_dir=frames_dir,
+            debug=getattr(args, "auto_play_debug", False),
+            vlm_budget_per_hour=getattr(args, "vlm_budget_per_hour", 60),
+            vlm_budget_total_usd=getattr(args, "vlm_budget_total_usd", 5.0),
+        )
+        runner.start()
+    except NotImplementedError as e:
+        # VLMDriver 占位时构造即抛
+        print(f"[AUTO-PLAY] {e}")
+        sys.exit(2)
+    except Exception as e:
+        print(f"[AUTO-PLAY] runner 启动失败：{e} — 关闭 auto-play 续 capture")
+        return None
+    # Prevent system sleep / display blanking during long unattended capture
+    try:
+        ES_CONTINUOUS = 0x80000000
+        ES_SYSTEM_REQUIRED = 0x00000001
+        ES_DISPLAY_REQUIRED = 0x00000002
+        ctypes.windll.kernel32.SetThreadExecutionState(
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED,
+        )
+    except (AttributeError, OSError):
+        pass
+    return runner
+
+
 # ── Subcommand: deploy ────────────────────────────────────────────────────────
 
 def cmd_deploy(args):
@@ -599,6 +649,8 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path, just_
     if just_surveyed:
         time.sleep(0.5)  # let the post-survey skip pulse settle
 
+    auto_play_runner = _start_auto_play(args, frames_dir, game_exe_stem=game_name)
+
     t_cap = time.perf_counter()
     stop_event = threading.Event()
     quit_watcher = _spawn_f9_watcher(stop_event)
@@ -613,6 +665,8 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path, just_
         )
     finally:
         quit_watcher.set()
+        if auto_play_runner is not None:
+            auto_play_runner.stop()
         _set_state(game_dir, "idle")
     print(f"[CAPTURE] 总耗时 {_fmt_dur(time.perf_counter() - t_cap)}")
 
@@ -952,6 +1006,18 @@ def main():
                         "ui = BackBufferUI.bmp 优先")
     p.add_argument("--normal", action="store_true",
                    help="--pack 时同时打包 /normal（默认不打包）")
+    p.add_argument("--auto-play", action="store_true",
+                   help="启用自动玩游戏 bot（capture 期间持续注入输入；F9 停止时一并停）")
+    p.add_argument("--driver", choices=["keep-alive", "vlm"], default="keep-alive",
+                   help="auto-play driver: keep-alive=哑 bot（默认）, vlm=VLM 大脑（C 层占位，未实现）")
+    p.add_argument("--profile", default="",
+                   help="auto-play profile 名 (profiles/<name>.yaml)；不传则按 exe 名 fuzzy match，回落 _default")
+    p.add_argument("--auto-play-debug", action="store_true",
+                   help="auto-play 详细 log（每次注入都打到 auto_play.log）")
+    p.add_argument("--vlm-budget-per-hour", type=int, default=60,
+                   help="VLM driver 每小时调用上限（C 层用，本 release 占位）")
+    p.add_argument("--vlm-budget-total-usd", type=float, default=5.0,
+                   help="VLM driver 单次 session 累计花费上限 USD（C 层用，本 release 占位）")
 
     p = sub.add_parser("video", help="批量生成游戏目录下所有缺失的 video.mp4 / video_ui.mp4")
     p.add_argument("--game-dir", default="", metavar="DIR",

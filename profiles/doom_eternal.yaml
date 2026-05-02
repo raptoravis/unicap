@@ -1,0 +1,58 @@
+name: doom_eternal
+description: |
+  DOOM Eternal — id Tech 7，Vulkan。
+  Twitchy FPS：WASD + 鼠标视角 + LMB 射击 + Shift 冲刺 + Space 跳/双跳 + E 互动。
+  HUD 是 3D 几何，watchdog depth-mask 不能去掉它（已知限制，模型自学忽略）。
+
+controls:
+  move_forward: W
+  move_back: S
+  move_left: A
+  move_right: D
+  turn_axis: mouse
+  attack: mouse_left
+  interact: E
+  jump: SPACE
+  dash: SHIFT             # 自定义控制
+
+reserved_keys: [F8, F9]
+
+input:
+  prefer_gamepad: false
+  mouse_sensitivity: 1.5  # DOOM 默认灵敏度高
+
+keep_alive:
+  period_s: 0.6           # DOOM 节奏快，决策周期短一些
+  sequence:
+    - {action: move_forward, duration_ms: 1500}
+    - {action: turn,         duration_ms: 400, payload: {direction: random, magnitude: 1.0}}
+    - {action: attack,       duration_ms: 300}
+    - {action: turn,         duration_ms: 300, payload: {direction: random, magnitude: 0.5}}
+    - {action: jump,         duration_ms: 100}
+    - {action: move_forward, duration_ms: 1200}
+    - {action: attack,       duration_ms: 200}
+    - {action: press_key,    payload: {vk: SHIFT}, duration_ms: 200}  # dash
+    - {action: turn,         duration_ms: 500, payload: {direction: random, magnitude: 1.0}}
+    - {action: attack,       duration_ms: 400}
+  recovery:
+    - {action: press_key, payload: {vk: ESC}, duration_ms: 100}
+    - {action: wait, duration_ms: 400}
+    - {action: press_key, payload: {vk: ESC}, duration_ms: 100}
+    - {action: press_key, payload: {vk: SPACE}, duration_ms: 100}
+    - {action: turn, duration_ms: 600, payload: {direction: random, magnitude: 1.0}}
+
+watchdog:
+  sample_period_s: 4.0
+  static_diff_threshold: 0.015
+  consecutive_static_required: 2
+
+vlm:
+  game_instructions: |
+    DOOM Eternal (id Tech 7 / Vulkan). Fast-paced FPS. WASD moves; mouse
+    looks/aims. Left-click fires. Space jumps (double-jump in air). Shift
+    dashes. E performs glory-kill or interacts.
+    Goal: keep moving and shooting; never stand still. The HUD is 3D geometry
+    drawn at near-plane (depth ~0.001-0.01) — ignore it.
+    Avoid menus and the level-end stats screen. If you see a stats screen, hit
+    Space to continue.
+  frame_subsample_long_edge: 512
