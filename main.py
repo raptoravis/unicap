@@ -306,16 +306,10 @@ def _resolve_api(api_arg: str, game_exe: Path) -> str:
 
 # ── unicap.ini / preset writers ───────────────────────────────────────────────
 
-def _ensure_addon_enabled(addon_dir: Path, pre_ui_skip: int = 0, ui_mode: str = "no-ui",
-                          capture_mode: str = "render-pass", barrier_dry_run: bool = False):
-    """ui_mode: 'no-ui' (pre-UI only) | 'ui' (post-UI BB only) | 'both' (pre-UI + post-UI).
-    capture_mode: 'render-pass' (default; bind_rts_dsv + begin_render_pass) |
-                  'barrier' (compute-engine path; on_barrier owns capture).
-    barrier_dry_run: barrier mode logs candidates but skips GPU copy (debug)."""
-    pre_ui_flag      = "0" if ui_mode == "ui" else "1"
-    both_flag        = "1" if ui_mode == "both" else "0"
-    capture_mode_int = "1" if capture_mode == "barrier" else "0"
-    dry_run_int      = "1" if barrier_dry_run else "0"
+def _ensure_addon_enabled(addon_dir: Path, pre_ui_skip: int = 0, ui_mode: str = "no-ui"):
+    """ui_mode: 'no-ui' (pre-UI only) | 'ui' (post-UI BB only) | 'both' (pre-UI + post-UI)."""
+    pre_ui_flag  = "0" if ui_mode == "ui" else "1"
+    both_flag    = "1" if ui_mode == "both" else "0"
     UNICAP_TEMP.mkdir(parents=True, exist_ok=True)
     ini = UNICAP_TEMP / "unicap.ini"
     cfg = configparser.RawConfigParser()
@@ -333,8 +327,6 @@ def _ensure_addon_enabled(addon_dir: Path, pre_ui_skip: int = 0, ui_mode: str = 
         ("ADDON", "FC_PreUICapture", pre_ui_flag),
         ("ADDON", "FC_PreUISkipCount", str(pre_ui_skip)),
         ("ADDON", "FC_BothCapture", both_flag),
-        ("ADDON", "FC_CaptureMode", capture_mode_int),
-        ("ADDON", "FC_BarrierDryRun", dry_run_int),
         ("GENERAL", "EffectSearchPaths", str(ROOT / "shaders")),
         ("GENERAL", "IntermediateCachePath", str(UNICAP_TEMP)),
         ("GENERAL", "TextureSearchPaths", str(ROOT / "shaders")),
@@ -420,10 +412,7 @@ def cmd_deploy(args):
     else:
         pre_ui_skip = 0
 
-    capture_mode = getattr(args, "capture_mode", "render-pass")
-    barrier_dry_run = getattr(args, "barrier_dry_run", False)
-    _ensure_addon_enabled(ADDON_BIN.parent, pre_ui_skip=pre_ui_skip, ui_mode=ui_mode,
-                          capture_mode=capture_mode, barrier_dry_run=barrier_dry_run)
+    _ensure_addon_enabled(ADDON_BIN.parent, pre_ui_skip=pre_ui_skip, ui_mode=ui_mode)
     _ensure_preset()
     return game_dir, game_exe, game_name, dataset_root, api
 
@@ -546,9 +535,7 @@ def _run_survey(args, game_dir: Path, game_name: str, dataset_root: Path) -> boo
 
     # Persist recommendation to ini for next deploy
     _ensure_addon_enabled(ADDON_BIN.parent, pre_ui_skip=recommended,
-                          ui_mode=getattr(args, "ui_mode", "no-ui"),
-                          capture_mode=getattr(args, "capture_mode", "render-pass"),
-                          barrier_dry_run=getattr(args, "barrier_dry_run", False))
+                          ui_mode=getattr(args, "ui_mode", "no-ui"))
 
     # Make the new skip take effect immediately in the running game:
     # one-shot survey-mode write so the addon picks up `recommended`,
@@ -605,6 +592,10 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path, just_
     if getattr(args, "video", True):
         t_video = time.perf_counter()
         _make_video(frames_dir, video_out, fps=0, glob_pat="*BackBuffer.bmp")
+        # --mask-ui: 额外生成 video_masked.mp4
+        if getattr(args, "mask_ui", False):
+            _make_video(frames_dir, session_dir / "video_masked.mp4", fps=0,
+                        glob_pat="*BackBuffer.bmp", mask_ui=True)
         # "both" mode: 也生成 post-UI 视频
         if any(frames_dir.glob("*BackBufferUI.bmp")):
             _make_video(frames_dir, session_dir / "video_ui.mp4", fps=0,
@@ -657,9 +648,40 @@ def _estimate_fps(bmps: list[Path]) -> float | None:
     return (len(bmps) - 1) * 1000.0 / (t1 - t0)
 
 
+def _depth_path_for(bmp: Path) -> Path:
+    """Sibling depth EXR for a BMP. Filename pattern:
+       '<exe> <date> <time> <ms> BackBuffer.bmp'
+       '<exe> <date> <time> <ms> DepthBuffer.exr'  (matched on suffix swap)"""
+    name = bmp.name
+    if name.endswith(" BackBuffer.bmp"):
+        return bmp.with_name(name[:-len(" BackBuffer.bmp")] + " DepthBuffer.exr")
+    if name.endswith(" BackBufferUI.bmp"):
+        return bmp.with_name(name[:-len(" BackBufferUI.bmp")] + " DepthBuffer.exr")
+    return bmp.with_suffix(".exr")  # fallback
+
+
+def _apply_ui_mask_bgr(img_bgr, depth_exr: Path) -> tuple:
+    """Mask UI pixels (depth==0 in UE4 reverse-Z / id Tech) → black.
+    Returns (img, mask_count). If depth missing/unreadable, returns img unchanged + -1."""
+    import cv2
+    if not depth_exr.is_file():
+        return img_bgr, -1
+    d = cv2.imread(str(depth_exr), cv2.IMREAD_UNCHANGED)
+    if d is None:
+        return img_bgr, -1
+    if d.ndim == 3:
+        d = d[:, :, 0]
+    if d.shape != img_bgr.shape[:2]:
+        return img_bgr, -1  # resolution mismatch — bail rather than corrupt
+    ui_mask = (d == 0.0)
+    img_bgr[ui_mask] = 0
+    return img_bgr, int(ui_mask.sum())
+
+
 def _make_video(frames_dir: Path, output: Path, fps: float = 0,
-                glob_pat: str = "*BackBuffer.bmp"):
-    """fps=0 时按文件名时间戳自动估算实际采集 fps，避免快进/慢放。"""
+                glob_pat: str = "*BackBuffer.bmp", mask_ui: bool = False):
+    """fps=0 时按文件名时间戳自动估算实际采集 fps，避免快进/慢放。
+    mask_ui=True 时读 sibling DepthBuffer.exr，把 depth==0 的 UI 像素置黑后再编码。"""
     import cv2
 
     bmps = sorted(frames_dir.glob(glob_pat))
@@ -686,6 +708,21 @@ def _make_video(frames_dir: Path, output: Path, fps: float = 0,
     output.parent.mkdir(parents=True, exist_ok=True)
 
     progress_step = max(int(round(fps)), 1)
+    masked_total = 0
+    no_depth = 0
+
+    def _read_frame(bmp_path: Path):
+        nonlocal masked_total, no_depth
+        img = cv2.imread(str(bmp_path))
+        if img is None:
+            return None
+        if mask_ui:
+            img, n = _apply_ui_mask_bgr(img, _depth_path_for(bmp_path))
+            if n < 0:
+                no_depth += 1
+            else:
+                masked_total += n
+        return img
 
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg:
@@ -702,7 +739,7 @@ def _make_video(frames_dir: Path, output: Path, fps: float = 0,
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         ok = True
         for i, bmp in enumerate(bmps):
-            img = cv2.imread(str(bmp))
+            img = _read_frame(bmp)
             if img is not None:
                 if (w_enc, h_enc) != (w, h):
                     img = img[:h_enc, :w_enc]
@@ -722,14 +759,21 @@ def _make_video(frames_dir: Path, output: Path, fps: float = 0,
     else:
         writer = cv2.VideoWriter(str(output), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
         for i, bmp in enumerate(bmps):
-            img = cv2.imread(str(bmp))
+            img = _read_frame(bmp)
             if img is not None:
                 writer.write(img)
             if (i + 1) % progress_step == 0:
                 print(f"[VIDEO] {i + 1}/{len(bmps)} 帧", flush=True)
         writer.release()
 
-    print(f"[VIDEO] 完成：{len(bmps)} 帧 @ {fps}fps → {output}")
+    if mask_ui:
+        avg_px = masked_total / max(len(bmps) - no_depth, 1)
+        msg = f"，UI mask 平均 {avg_px:.0f} px/帧"
+        if no_depth:
+            msg += f"（{no_depth} 帧无 depth EXR，原图保留）"
+        print(f"[VIDEO] 完成：{len(bmps)} 帧 @ {fps}fps → {output}{msg}")
+    else:
+        print(f"[VIDEO] 完成：{len(bmps)} 帧 @ {fps}fps → {output}")
 
 
 def cmd_video(args):
@@ -747,18 +791,22 @@ def cmd_video(args):
     if not sessions:
         sys.exit(f"[错误] 在 {game_dir} 下未找到任何采集会话（缺少 <ts>/frames/）")
 
-    print(f"[VIDEO] 找到 {len(sessions)} 个会话（{game_dir}）")
+    print(f"[VIDEO] 找到 {len(sessions)} 个会话（{game_dir}）"
+          + ("  [mask-ui]" if args.mask_ui else ""))
     made = skipped = failed = 0
     t_total = time.perf_counter()
     for sess in sessions:
         frames = sess / "frames"
         # 主流：BackBuffer
-        targets = [(sess / "video.mp4", "*BackBuffer.bmp")]
+        targets = [(sess / "video.mp4", "*BackBuffer.bmp", False)]
+        # masked variant: 仅在 --mask-ui 时生成（独立文件，不覆盖 video.mp4）
+        if args.mask_ui:
+            targets.append((sess / "video_masked.mp4", "*BackBuffer.bmp", True))
         # post-UI 流（both 模式才存在）
         if any(frames.glob("*BackBufferUI.bmp")):
-            targets.append((sess / "video_ui.mp4", "*BackBufferUI.bmp"))
+            targets.append((sess / "video_ui.mp4", "*BackBufferUI.bmp", False))
 
-        for out, pat in targets:
+        for out, pat, mask in targets:
             if out.exists():
                 print(f"[SKIP] {sess.name}/{out.name}（已存在, {out.stat().st_size/1024/1024:.1f} MB）")
                 skipped += 1
@@ -766,7 +814,7 @@ def cmd_video(args):
             print(f"\n[VIDEO] {sess.name}/{out.name} ←")
             t0 = time.perf_counter()
             try:
-                _make_video(frames, out, args.fps, glob_pat=pat)
+                _make_video(frames, out, args.fps, glob_pat=pat, mask_ui=mask)
             except Exception as e:
                 elapsed = time.perf_counter() - t0
                 print(f"[ERROR] {sess.name}/{out.name} 失败：{e}  耗时 {_fmt_dur(elapsed)}")
@@ -851,17 +899,14 @@ def main():
                    help="输出: no-ui=只 pre-UI（默认）, ui=只 post-UI BB（无需 survey）, both=双流")
     p.add_argument("--api", choices=["auto", "dx", "vulkan"], default="auto",
                    help="渲染后端: auto=按 exe 名启发（默认）, dx=DXGI proxy, vulkan=Vulkan layer")
-    p.add_argument("--capture-mode", choices=["render-pass", "barrier"], default="render-pass",
-                   help="pre-UI 触发点: render-pass=DX 经典 (bind_rts/begin_render_pass), "
-                        "barrier=compute-engine (id Tech 7 / DOOM Eternal 类，hook RT→SR transition)")
-    p.add_argument("--barrier-dry-run", action="store_true",
-                   help="barrier 模式调试: 只记录 candidate transitions 到 unicap.log, 不做 GPU copy")
     p.add_argument("--vk-debug", action="store_true",
                    help="Vulkan: 启用 VK_LOADER_DEBUG=layer，写到 %%TEMP%%\\unicap\\vk_loader.log")
     p.add_argument("--hints", action=argparse.BooleanOptionalAction, default=True,
                    help="显示控制台 + addon overlay 操作提示（默认开启）")
     p.add_argument("--video", action=argparse.BooleanOptionalAction, default=True,
                    help="F9 停止采集后生成 video.mp4（默认开启；--no-video 跳过）")
+    p.add_argument("--mask-ui", action="store_true",
+                   help="同时生成 video_masked.mp4：depth==0 像素置黑（UE4/id Tech UI mask）")
     p.add_argument("--pack", action="store_true",
                    help="F9 停止采集后立即打包 HDF5（默认不打包）")
 
@@ -870,6 +915,8 @@ def main():
                    help="dataset-root 下的游戏目录（其下含 <YYYYMMDD_HHMMSS>/frames/ 子目录）")
     p.add_argument("--fps", type=float, default=0,
                    help="编码 fps；默认 0 = 从 BMP 文件名时间戳自动估算（推荐）")
+    p.add_argument("--mask-ui", action="store_true",
+                   help="额外生成 video_masked.mp4：用 sibling DepthBuffer.exr 的 depth==0 把 UI 像素置黑（适用于 --ui-mode ui 采集 + UE4/id Tech 引擎）")
 
     p = sub.add_parser("pack", help="批量打包游戏目录下所有采集会话；已有 dataset.h5 跳过")
     p.add_argument("--game-dir", default="", metavar="DIR",

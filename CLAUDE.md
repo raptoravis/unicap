@@ -20,7 +20,7 @@ Outputs to `dist/`:
 - `dxgi.dll` — ReShade core (DX10/11/12 / DXGI proxy)，built from `reshade/` source；`--api dx`(默认) 时由 `cmd_deploy` symlink 到游戏目录（无 Windows 开发者模式时退化为 copy）
 - `UniCap64.dll` — same DLL bytes as dxgi.dll，作 Vulkan implicit layer 用；`--api vulkan` 时通过 `VK_IMPLICIT_LAYER_PATH` env var 注入到游戏子进程（不修改游戏目录）
 - `UniCap64.json` — Vulkan layer manifest（源在 `reshade-addons/UniCap64.json`），库名 `VK_LAYER_unicap`
-- `frame_capture.addon` — capture addon (primary build output)；注册三个 capture hook：`on_bind_rts_dsv`(DX 经典) + `on_begin_render_pass`(DX12 enhanced + Vulkan render pass) + `on_barrier`(compute-engine fallback)，由 `FC_CaptureMode` 选哪条独占
+- `frame_capture.addon` — capture addon (primary build output)；注册 `on_bind_rts_dsv`(DX 经典) + `on_begin_render_pass`(DX12 enhanced + Vulkan render pass) 两条 capture 路径
 - `unicap-shaders/Shaders/*.fx` — DepthToAddon + BackBufferExport (legacy: UIRemove) shaders (copied from `shaders/`)
 
 Delete `build\` to force CMake reconfigure.
@@ -40,9 +40,7 @@ uv run main.py pack   --game-dir DIR [--no-depth]  # pack frames + inputs → HD
 
 `--api` 默认 `auto`（按 exe 名启发：含 `vk`/`vulkan` 子串 → vulkan，否则 dx）。DOOM 2016 之类 exe 名不带 vk 标记的 Vulkan-only 游戏必须显式 `--api vulkan`，否则走 DX 路径会在 F8 自动 survey 时静默 timeout。
 
-`--capture-mode` 选 pre-UI 捕获的 hook 点：
-- `render-pass`（默认）：hook `bind_render_targets_and_depth_stencil` (DX) + `begin_render_pass` (DX12 enhanced + Vulkan)。FF7R / Batman AK 等传统管线适用。
-- `barrier`：hook `addon_event::barrier`，捕获 RT→SR transition 那一刻的 scene RT。**用于 compute-based 引擎（id Tech 7 / DOOM Eternal），那里 begin_render_pass 只在 HUD 合成时才触发，pre-UI scene 取不到**。
+**id Tech 7 / DOOM Eternal 类 compute-based 引擎**：`begin_render_pass` 只在 HUD 合成时触发，render-pass 路径取不到干净 pre-UI scene。我们尝试过 `on_barrier` hook 路线但 DOOM Eternal 实测 freeze（多线程 cmd-buffer recording + transient memory aliasing 风险大）。**实用方案**：`--ui-mode ui` 抓 post-UI BackBuffer，配合深度图后处理（depth==0 = UI 像素 → 置黑），见下方 `--mask-ui`。
 
 **Vulkan 部署机制**：不修改游戏目录，通过游戏子进程的 env vars 注入：`VK_IMPLICIT_LAYER_PATH=<dist>` (loader ≥1.3.234 优先) + `VK_INSTANCE_LAYERS=VK_LAYER_unicap` + `VK_LAYER_PATH=<dist>` (老 loader fallback)。Layer DLL = `dist/UniCap64.dll`，manifest = `dist/UniCap64.json`（源 `reshade-addons/UniCap64.json`，重命名 + 自定义 layer name 以去 ReShade 品牌）。**全部副作用都在子进程范围内**，unicap 主进程退出后无残留（不写注册表）。
 
@@ -83,14 +81,13 @@ ReShade addon compiled to `frame_capture.addon`. It captures at `FC_TargetFPS` u
 
 **Standard path**: `runtime->capture_screenshot()` saves BackBuffer as BMP directly.
 
-**Pre-UI path** (`FC_PreUICapture=1`): Two mutually-exclusive sub-paths chosen by `FC_CaptureMode`:
+**Pre-UI path** (`FC_PreUICapture=1`): Hooks `on_bind_rts_dsv` (DX classic) + `on_begin_render_pass` (DX12 enhanced + Vulkan render pass). Reverse-skip math: `target = (prev_total - 1 - FC_PreUISkipCount)` selects the Nth-from-last non-BB no-DSV pass within the frame. That RT's color is GPU-copied to `g_pre_ui_staging`. `on_reshade_present` decodes `g_pre_ui_staging` to RGBA8 (handling `r16g16b16a16_float` HDR via half-float → Reinhard → sRGB) and saves as BMP.
 
-- `FC_CaptureMode=0` (default, `--capture-mode render-pass`): Hooks `on_bind_rts_dsv` (DX classic) + `on_begin_render_pass` (DX12 enhanced + Vulkan render pass). Reverse-skip math: `target = (prev_total - 1 - FC_PreUISkipCount)` selects the Nth-from-last non-BB no-DSV pass within the frame. That RT's color is GPU-copied to `g_pre_ui_staging`.
-- `FC_CaptureMode=1` (`--capture-mode barrier`): Hooks `on_barrier` and watches for `render_target → shader_resource` transitions on full-frame, non-BB textures. The transition fires when scene rendering completes and a downstream pass (post-process / HUD) is about to sample it — capture the resource BEFORE the transition while it's still in `render_target` state. **Use this for compute-based engines (id Tech 7 / DOOM Eternal) where `begin_render_pass` only fires for HUD-composite passes**, so the render-pass path can't see pre-UI scene RT.
+Settings (`FC_EnableCapture`, `FC_ExportDepth`, `FC_PreUICapture`, `FC_PreUISkipCount`, `FC_TargetFPS`, `FC_BothCapture`) are read from `%TEMP%\unicap\unicap.ini` via `config_get_value`. `FC_BothCapture=1` 让 addon 同时落 pre-UI BMP + post-UI `BackBufferUI.bmp`（驱动 `--ui-mode both`）。
 
-In both cases, `on_reshade_present` decodes `g_pre_ui_staging` to RGBA8 (handling `r16g16b16a16_float` HDR via half-float → Reinhard → sRGB) and saves as BMP.
+### `--mask-ui` (post-process UI mask)
 
-Settings (`FC_EnableCapture`, `FC_ExportDepth`, `FC_PreUICapture`, `FC_PreUISkipCount`, `FC_TargetFPS`, `FC_BothCapture`, `FC_CaptureMode`) are read from `%TEMP%\unicap\unicap.ini` via `config_get_value`. `FC_BothCapture=1` 让 addon 同时落 pre-UI BMP + post-UI `BackBufferUI.bmp`（驱动 `--ui-mode both`）。`FC_CaptureMode` 由 `--capture-mode` 写入。
+`--mask-ui`（同时存在于 `launch` 和 `video` 子命令）从 sibling DepthBuffer.exr 读深度，把 `depth == 0` 的像素在颜色帧上置黑后再编码 → 生成 `video_masked.mp4`（与 `video.mp4` 并存，不替换）。前提：`FC_ExportDepth=1`（默认开启）+ 引擎用 reverse-Z（UE4/id Tech 都是）→ UI 像素深度为 0。在 `pack_hdf5.py` HDF5 打包路径上同样的逻辑早已存在（`/color` 已 mask）。
 
 **Important:** `frame_capture.cpp` includes headers from `reshade-addons/deps/reshade/include` (v5 wrapper API). Do not change this include path — the addon's exported symbols target the v5 ABI and remain compatible with `dist/dxgi.dll` built from the 6.7.3.16 source.
 

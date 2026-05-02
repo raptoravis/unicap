@@ -287,15 +287,6 @@ static format   s_last_non_bb_fmt  = format::unknown;
 // Previous frame's non-BB RT count — used by reverse-skip to hit the Nth-from-last pass.
 static uint32_t s_prev_non_bb_total = 0;
 
-// FC_CaptureMode (0=render_pass, default; 1=barrier). barrier mode hooks
-// resource transitions (render_target → shader_resource) for compute-based
-// engines (id Tech 7 etc.) where begin_render_pass fires too late (after HUD
-// composite). When mode=1, the on_bind_rts_dsv / on_begin_render_pass handlers
-// short-circuit and on_barrier owns capture exclusively.
-static uint32_t g_capture_mode       = 0;
-static bool     g_barrier_dry_run    = false;  // FC_BarrierDryRun: log candidates, no copy
-static uint32_t s_barrier_idx        = 0;   // qualifying barriers seen this frame
-static uint32_t s_prev_barrier_total = 0;   // last frame's qualifying barrier count
 
 // Survey mode: Python writes fc_skip_count.txt to sweep skip values at runtime.
 static bool     s_survey_mode  = false;
@@ -453,8 +444,6 @@ static void on_init_device(device*)
     reshade::get_config_value(nullptr, "ADDON", "FC_PreUICapture",   g_pre_ui_mode);
     reshade::get_config_value(nullptr, "ADDON", "FC_PreUISkipCount", g_pre_ui_skip);
     reshade::get_config_value(nullptr, "ADDON", "FC_BothCapture",    g_both_capture);
-    reshade::get_config_value(nullptr, "ADDON", "FC_CaptureMode",    g_capture_mode);
-    reshade::get_config_value(nullptr, "ADDON", "FC_BarrierDryRun",  g_barrier_dry_run);
 }
 
 static void on_init_swapchain(swapchain* sw, bool /*resize*/)
@@ -542,15 +531,10 @@ static void on_bind_rts_dsv(command_list* cmd_list, uint32_t count,
 {
     if (!enableCapturing || !g_pre_ui_mode || s_pre_ui_captured) return;
 
-    // Set s_had_depth_pass BEFORE mode check — barrier mode also depends on it
-    // as its "3D scene started" gate.
     if (dsv.handle != 0) {
         s_had_depth_pass = true;
         return;
     }
-
-    if (g_capture_mode != 0) return;  // barrier mode owns the rest of capture
-
     // No depth stencil bound.  Only interesting after we've seen 3D geometry.
     if (!s_had_depth_pass || count == 0) return;
 
@@ -653,13 +637,8 @@ static void on_begin_render_pass(command_list* cmd_list, uint32_t count,
 {
     if (!enableCapturing || !g_pre_ui_mode || s_pre_ui_captured) return;
 
-    // Set s_had_depth_pass BEFORE mode check — barrier mode also depends on it
-    // as its "3D scene started" gate.
     bool has_dsv = (ds != nullptr && ds->view.handle != 0);
     if (has_dsv) { s_had_depth_pass = true; return; }
-
-    if (g_capture_mode != 0) return;  // barrier mode owns the rest of capture
-
     if (!s_had_depth_pass || count == 0) return;
 
     device* dev = cmd_list->get_device();
@@ -728,141 +707,6 @@ static void on_begin_render_pass(command_list* cmd_list, uint32_t count,
         cmd_list->copy_texture_region(s_last_non_bb_rt, 0, nullptr, g_pre_ui_staging, 0, nullptr);
         cmd_list->barrier(s_last_non_bb_rt, resource_usage::copy_source, resource_usage::shader_resource);
         s_pre_ui_captured = true;
-    }
-}
-
-// Barrier-driven capture path (FC_CaptureMode=1). For compute-based engines
-// (id Tech 7 / DOOM Eternal) where scene rendering happens via compute
-// dispatches and begin_render_pass only fires for HUD-composite passes.
-//
-// Heuristic: when the game transitions a full-frame, non-BB texture from
-// render_target → shader_resource, that's typically the moment scene
-// rendering completes and downstream passes (post-process / HUD composite)
-// will sample it. Capture BEFORE the transition while the resource is still
-// in render_target state — fc_copy_rt_at_bind issues the safe RT↔copy_source
-// barrier sequence.
-//
-// Skip math reuses the reverse-skip convention: skip=0 = LAST qualifying
-// barrier (closest to UI), skip=N = earlier passes.
-// Diagnostic: when capture is armed and we're in barrier mode + survey, log
-// every qualifying barrier we see for the first 30 frames. Helps understand
-// what the game's pipeline looks like (id Tech 7 / DOOM Eternal etc.).
-static uint32_t s_barrier_diag_n = 0;
-
-// Re-entry guard: our cmd_list->barrier() calls below cause vkCmdPipelineBarrier
-// to fire on_barrier recursively. Filter normally rejects the recursion (our own
-// SR↔copy_source barriers don't match the write→SR filter), but the guard makes
-// it explicit and protects against any future filter changes.
-static thread_local bool tl_in_on_barrier = false;
-
-static void on_barrier(command_list* cmd_list, uint32_t count,
-                       const resource* resources,
-                       const resource_usage* old_states,
-                       const resource_usage* new_states)
-{
-    if (tl_in_on_barrier) return;
-    if (!enableCapturing || !g_pre_ui_mode || s_pre_ui_captured) return;
-    if (g_capture_mode != 1) return;  // only active in barrier mode
-    if (!s_had_depth_pass) return;    // wait until 3D scene started
-
-    device* dev = cmd_list->get_device();
-    for (uint32_t i = 0; i < count; i++) {
-        if (s_pre_ui_captured) break;  // already captured this frame, stop scanning
-
-        // Filter: any "writable" old state (render_target OR unordered_access for
-        // compute writes) → any state with shader_resource bit set. id Tech 7 et
-        // al. write scene RT via compute → barrier is UAV→SR, not RT→SR.
-        const resource_usage write_states = resource_usage::render_target |
-                                            resource_usage::unordered_access;
-        bool is_write_to_sr = ((uint32_t)(old_states[i] & write_states)) != 0 &&
-                              ((uint32_t)(new_states[i] & resource_usage::shader_resource)) != 0;
-        if (!is_write_to_sr) continue;
-
-        if (resources[i].handle == 0) continue;
-        if (s_backbuffer_handles.count(resources[i].handle)) continue;  // skip BB
-
-        resource_desc rd = dev->get_resource_desc(resources[i]);
-        if (rd.type != resource_type::texture_2d) continue;
-        if (rd.texture.width < 1280) continue;  // full-frame heuristic
-
-        // Diagnostic log: fire UNCONDITIONALLY for first 30 candidates that
-        // pass state+size filters. Captures DOOM Eternal etc. pipeline structure
-        // even outside survey/capture-armed windows. (s_cap_armed is unset
-        // during cmd-buffer recording — gating on it never fired.)
-        if (s_barrier_diag_n < 30) {
-            s_barrier_diag_n++;
-            char dmsg[200];
-            sprintf_s(dmsg,
-                "FC: barrier #%u idx=%u %ux%u fmt=%d old=0x%x new=0x%x",
-                s_barrier_diag_n, s_barrier_idx,
-                rd.texture.width, rd.texture.height, (int)rd.texture.format,
-                (unsigned)old_states[i], (unsigned)new_states[i]);
-            reshade::log::message(reshade::log::level::info, dmsg);
-        }
-
-        // Format filter: only multi-channel COLOR formats decode_to_rgba8 knows
-        // about. r8_unorm (DOOM Eternal SSAO/mask) and other single-channel
-        // buffers happen at full screen res but aren't the scene RT we want.
-        switch (rd.texture.format) {
-        case format::r8g8b8a8_unorm: case format::r8g8b8a8_unorm_srgb:
-        case format::b8g8r8a8_unorm: case format::b8g8r8a8_unorm_srgb:
-        case format::b8g8r8x8_unorm: case format::b8g8r8x8_unorm_srgb:
-        case format::r10g10b10a2_unorm:
-        case format::r16g16b16a16_float:
-        case format::r11g11b10_float:
-            break;  // accepted
-        default:
-            continue;  // skip — not a scene color RT
-        }
-
-        bool should_record;
-        if (g_pre_ui_skip == 0 || s_prev_barrier_total == 0) {
-            should_record = true;  // always-overwrite, last qualifying barrier wins
-        } else {
-            uint32_t target = (s_prev_barrier_total > g_pre_ui_skip)
-                              ? (s_prev_barrier_total - 1 - g_pre_ui_skip)
-                              : 0;
-            should_record = (s_barrier_idx == target);
-        }
-
-        // DIAGNOSTIC-ONLY MODE (FC_BarrierDryRun=1): log candidates but do
-        // NOT issue copy. Use this to understand pipeline structure without
-        // risking GPU hang / freeze from incorrect barrier sequence.
-        if (g_barrier_dry_run) {
-            s_barrier_idx++;
-            continue;
-        }
-
-        if (should_record) {
-            // CRITICAL: vulkan_hooks_command_list.cpp:939 calls trampoline BEFORE
-            // firing addon_event::barrier — so by the time we run, the resource
-            // is ALREADY in new_states[i] (which has shader_resource bit).
-            if (!g_pre_ui_staging.handle ||
-                g_pre_ui_staging_w != rd.texture.width || g_pre_ui_staging_h != rd.texture.height ||
-                g_pre_ui_staging_fmt != rd.texture.format) {
-                if (g_pre_ui_staging.handle) dev->destroy_resource(g_pre_ui_staging);
-                g_pre_ui_staging = { 0 };
-                resource_desc sd(rd.texture.width, rd.texture.height, 1, 1, rd.texture.format, 1,
-                                 memory_heap::gpu_to_cpu, resource_usage::copy_dest);
-                if (dev->create_resource(sd, nullptr, resource_usage::copy_dest, &g_pre_ui_staging)) {
-                    g_pre_ui_staging_w   = rd.texture.width;
-                    g_pre_ui_staging_h   = rd.texture.height;
-                    g_pre_ui_staging_fmt = rd.texture.format;
-                } else {
-                    reshade::log::message(reshade::log::level::error,
-                        "FC: failed to create scene RT staging (barrier path)");
-                    continue;
-                }
-            }
-            tl_in_on_barrier = true;
-            cmd_list->barrier(resources[i], resource_usage::shader_resource, resource_usage::copy_source);
-            cmd_list->copy_texture_region(resources[i], 0, nullptr, g_pre_ui_staging, 0, nullptr);
-            cmd_list->barrier(resources[i], resource_usage::copy_source, resource_usage::shader_resource);
-            tl_in_on_barrier = false;
-            s_pre_ui_captured = true;
-        }
-
-        s_barrier_idx++;
     }
 }
 
@@ -1005,15 +849,9 @@ static void on_reshade_present(effect_runtime* runtime)
 
         // Survey housekeeping: pass-total signal must reach Python every frame
         // regardless of dedup, so Phase 1 of survey can read it.
-        // In barrier mode (FC_CaptureMode=1), report the qualifying-barrier
-        // count instead of the render-pass count — survey then sweeps skip
-        // values against barrier transitions, not render passes.
-        {
-            uint32_t survey_total = (g_capture_mode == 1) ? s_barrier_idx : s_no_dsv_non_bb;
-            if (s_survey_mode && survey_total > 0) {
-                std::ofstream tf(exe_fs.parent_path() / L"fc_pass_total.txt", std::ios::trunc);
-                tf << survey_total << '\n';
-            }
+        if (s_survey_mode && s_no_dsv_non_bb > 0) {
+            std::ofstream tf(exe_fs.parent_path() / L"fc_pass_total.txt", std::ios::trunc);
+            tf << s_no_dsv_non_bb << '\n';
         }
 
         // Survey-mode save dedup: write at most one BMP per distinct skip value.
@@ -1307,14 +1145,12 @@ reset_frame_state:
         reshade::log::message(reshade::log::level::info, dmsg);
     }
     // Reset per-frame pre-UI detection state so next frame starts clean.
-    s_prev_non_bb_total  = s_no_dsv_non_bb;   // render-pass mode reverse-skip basis
-    s_prev_barrier_total = s_barrier_idx;     // barrier mode reverse-skip basis
+    s_prev_non_bb_total = s_no_dsv_non_bb;  // save for reverse-skip next frame
     s_cap_armed       = false;
     s_had_depth_pass  = false;
     s_pre_ui_captured = false;
     s_no_dsv_bb_count = 0;
     s_no_dsv_non_bb   = 0;
-    s_barrier_idx     = 0;
     s_last_non_bb_rt  = { 0 };  // reset so stale handles don't carry over
 }
 
@@ -1432,7 +1268,6 @@ void register_addon_FC()
     reshade::register_event<reshade::addon_event::destroy_effect_runtime>(on_destroy_effect_runtime);
     reshade::register_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(on_bind_rts_dsv);
     reshade::register_event<reshade::addon_event::begin_render_pass>(on_begin_render_pass);
-    reshade::register_event<reshade::addon_event::barrier>(on_barrier);
     reshade::register_event<reshade::addon_event::reshade_present>(on_reshade_present);
     reshade::register_event<reshade::addon_event::reshade_begin_effects>(on_begin_render_effects);
 }
@@ -1448,7 +1283,6 @@ void unregister_addon_FC()
     reshade::unregister_event<reshade::addon_event::destroy_effect_runtime>(on_destroy_effect_runtime);
     reshade::unregister_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(on_bind_rts_dsv);
     reshade::unregister_event<reshade::addon_event::begin_render_pass>(on_begin_render_pass);
-    reshade::unregister_event<reshade::addon_event::barrier>(on_barrier);
     reshade::unregister_event<reshade::addon_event::reshade_present>(on_reshade_present);
     reshade::unregister_event<reshade::addon_event::reshade_begin_effects>(on_begin_render_effects);
 }
