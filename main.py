@@ -661,8 +661,15 @@ def _depth_path_for(bmp: Path) -> Path:
 
 
 def _apply_ui_mask_bgr(img_bgr, depth_exr: Path) -> tuple:
-    """Mask UI pixels (depth==0 in UE4 reverse-Z / id Tech) → black.
-    Returns (img, mask_count). If depth missing/unreadable, returns img unchanged + -1."""
+    """Mask UI pixels → black. Returns (img, mask_count). -1 = depth missing.
+
+    DepthToAddon.fx exports LINEARIZED depth (0=near, 1=far). Modern engines
+    (UE4/UE5/id Tech 7) use reverse-Z so cleared / no-depth-write pixels (UI
+    overlays + skybox) end up at 1.0 after linearization. Some forward-Z
+    engines might leave UI at 0.0; keep both branches for safety.
+
+    Empirical (DOOM Eternal 2026-05-02 capture): ~5% pixels at d>=0.999, all
+    HUD + sky. ~0 pixels at exactly 0.0."""
     import cv2
     if not depth_exr.is_file():
         return img_bgr, -1
@@ -673,7 +680,7 @@ def _apply_ui_mask_bgr(img_bgr, depth_exr: Path) -> tuple:
         d = d[:, :, 0]
     if d.shape != img_bgr.shape[:2]:
         return img_bgr, -1  # resolution mismatch — bail rather than corrupt
-    ui_mask = (d == 0.0)
+    ui_mask = (d <= 0.0) | (d >= 0.999)
     img_bgr[ui_mask] = 0
     return img_bgr, int(ui_mask.sum())
 
