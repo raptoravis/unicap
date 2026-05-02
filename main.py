@@ -163,13 +163,38 @@ _SKIP_EXE = {
 }
 
 
+def _ue4_nested_exe(start_dir: Path) -> Path | None:
+    """UE4 has a launcher exe + nested actual game at <Project>\\Binaries\\Win64\\.
+    If start_dir contains such a structure, return the largest inner exe; else None.
+    Without this, deploy puts dxgi.dll next to the launcher (which exits in 3s),
+    while the actual game loads its own (often stale) dxgi.dll from inner dir →
+    addon reads/writes sidecars at inner dir, Python at launcher dir, mismatch."""
+    inner = [e for e in start_dir.glob("**/Binaries/Win64/*.exe")
+             if e.name.lower() not in _SKIP_EXE]
+    if not inner:
+        return None
+    return max(inner, key=lambda f: f.stat().st_size)
+
+
 def _resolve_game_path(path_str: str):
     p = Path(path_str)
     if p.is_file():
         if p.suffix.lower() != ".exe":
             sys.exit(f"[错误] --game-path 指定的文件不是 .exe：{p}")
+        # UE4 nested check: launcher exe sits ABOVE Binaries\Win64\ subtree.
+        # If we're not already inside Binaries dir, look for inner exe.
+        if "binaries" not in str(p.parent).lower():
+            inner = _ue4_nested_exe(p.parent)
+            if inner is not None and inner != p:
+                print(f"[提示] UE4 嵌套结构：用内层 {inner.relative_to(p.parent)}"
+                      f" 而非启动器 {p.name}")
+                return inner.parent, inner
         return p.parent, p
     if p.is_dir():
+        inner = _ue4_nested_exe(p)
+        if inner is not None and "binaries" not in str(p).lower():
+            print(f"[提示] UE4 嵌套结构：使用 {inner.relative_to(p)}")
+            return inner.parent, inner
         candidates = [f for f in p.glob("*.exe") if f.name.lower() not in _SKIP_EXE]
         if not candidates:
             sys.exit(f"[错误] 在 {p} 中未找到可执行文件")
@@ -388,7 +413,8 @@ def cmd_deploy(args):
         if dst_dll.exists() and not dst_dll.is_symlink() and not bak.exists():
             shutil.copy2(dst_dll, bak)
         _symlink_file(DXGI_DLL, dst_dll)
-        print(f"[DEPLOY] api=dx  → dxgi.dll proxy 部署到 {game_dir}")
+        # print(f"[DEPLOY] api=dx  → dxgi.dll proxy 部署到 {game_dir}")
+        pass
     else:
         # Vulkan: drop a 2-line redirect ini into game_dir. ReShade's dll_main
         # reads <game_dir>/unicap.ini's [INSTALL] BasePath as the HIGHEST-priority
@@ -400,7 +426,8 @@ def cmd_deploy(args):
         redirect_ini.write_text(
             f"[INSTALL]\nBasePath={UNICAP_TEMP}\n", encoding="utf-8"
         )
-        print(f"[DEPLOY] api=vulkan  → 写入 {redirect_ini}（base path 重定向到 {UNICAP_TEMP}）")
+        # print(f"[DEPLOY] api=vulkan  → 写入 {redirect_ini}（base path 重定向到 {UNICAP_TEMP}）")
+        pass
 
     dataset_root_arg = getattr(args, "dataset_root", "") or ""
     dataset_root = Path(dataset_root_arg) if dataset_root_arg else DATASET_ROOT
