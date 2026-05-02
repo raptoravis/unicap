@@ -739,6 +739,11 @@ static void on_begin_render_pass(command_list* cmd_list, uint32_t count,
 //
 // Skip math reuses the reverse-skip convention: skip=0 = LAST qualifying
 // barrier (closest to UI), skip=N = earlier passes.
+// Diagnostic: when capture is armed and we're in barrier mode + survey, log
+// every qualifying barrier we see for the first 30 frames. Helps understand
+// what the game's pipeline looks like (id Tech 7 / DOOM Eternal etc.).
+static uint32_t s_barrier_diag_n = 0;
+
 static void on_barrier(command_list* cmd_list, uint32_t count,
                        const resource* resources,
                        const resource_usage* old_states,
@@ -750,10 +755,14 @@ static void on_barrier(command_list* cmd_list, uint32_t count,
 
     device* dev = cmd_list->get_device();
     for (uint32_t i = 0; i < count; i++) {
-        // Filter: render_target bit set in old, shader_resource bit set in new
-        bool is_rt_to_sr = ((uint32_t)(old_states[i] & resource_usage::render_target)) != 0 &&
-                           ((uint32_t)(new_states[i] & resource_usage::shader_resource)) != 0;
-        if (!is_rt_to_sr) continue;
+        // Filter: any "writable" old state (render_target OR unordered_access for
+        // compute writes) → any state with shader_resource bit set. id Tech 7 et
+        // al. write scene RT via compute → barrier is UAV→SR, not RT→SR.
+        const resource_usage write_states = resource_usage::render_target |
+                                            resource_usage::unordered_access;
+        bool is_write_to_sr = ((uint32_t)(old_states[i] & write_states)) != 0 &&
+                              ((uint32_t)(new_states[i] & resource_usage::shader_resource)) != 0;
+        if (!is_write_to_sr) continue;
 
         if (resources[i].handle == 0) continue;
         if (s_backbuffer_handles.count(resources[i].handle)) continue;  // skip BB
@@ -761,6 +770,18 @@ static void on_barrier(command_list* cmd_list, uint32_t count,
         resource_desc rd = dev->get_resource_desc(resources[i]);
         if (rd.type != resource_type::texture_2d) continue;
         if (rd.texture.width < 1280) continue;  // full-frame heuristic
+
+        // Diagnostic log (first 30 capture-armed frames only — bounded spam).
+        if (s_cap_armed && s_barrier_diag_n < 30) {
+            s_barrier_diag_n++;
+            char dmsg[200];
+            sprintf_s(dmsg,
+                "FC: barrier #%u idx=%u %ux%u fmt=%d old=0x%x new=0x%x",
+                s_barrier_diag_n, s_barrier_idx,
+                rd.texture.width, rd.texture.height, (int)rd.texture.format,
+                (unsigned)old_states[i], (unsigned)new_states[i]);
+            reshade::log::message(reshade::log::level::info, dmsg);
+        }
 
         bool should_record;
         if (g_pre_ui_skip == 0 || s_prev_barrier_total == 0) {
@@ -773,8 +794,35 @@ static void on_barrier(command_list* cmd_list, uint32_t count,
         }
 
         if (should_record) {
-            if (fc_copy_rt_at_bind(cmd_list, dev, resources[i],
-                                   rd.texture.width, rd.texture.height, rd.texture.format)) {
+            // Source state may be render_target OR unordered_access. fc_copy_rt_at_bind
+            // assumes render_target (issues RT↔copy_source barrier). For UAV source we
+            // need a different barrier sequence — issue inline here.
+            if ((uint32_t)(old_states[i] & resource_usage::render_target) != 0) {
+                if (fc_copy_rt_at_bind(cmd_list, dev, resources[i],
+                                       rd.texture.width, rd.texture.height, rd.texture.format)) {
+                    s_pre_ui_captured = true;
+                }
+            } else {
+                // UAV source (compute write). Allocate staging like fc_copy_rt_at_bind.
+                if (!g_pre_ui_staging.handle ||
+                    g_pre_ui_staging_w != rd.texture.width || g_pre_ui_staging_h != rd.texture.height) {
+                    if (g_pre_ui_staging.handle) dev->destroy_resource(g_pre_ui_staging);
+                    g_pre_ui_staging = { 0 };
+                    resource_desc sd(rd.texture.width, rd.texture.height, 1, 1, rd.texture.format, 1,
+                                     memory_heap::gpu_to_cpu, resource_usage::copy_dest);
+                    if (dev->create_resource(sd, nullptr, resource_usage::copy_dest, &g_pre_ui_staging)) {
+                        g_pre_ui_staging_w   = rd.texture.width;
+                        g_pre_ui_staging_h   = rd.texture.height;
+                        g_pre_ui_staging_fmt = rd.texture.format;
+                    } else {
+                        reshade::log::message(reshade::log::level::error,
+                            "FC: failed to create scene RT staging (UAV barrier path)");
+                        continue;
+                    }
+                }
+                cmd_list->barrier(resources[i], resource_usage::unordered_access, resource_usage::copy_source);
+                cmd_list->copy_texture_region(resources[i], 0, nullptr, g_pre_ui_staging, 0, nullptr);
+                cmd_list->barrier(resources[i], resource_usage::copy_source, resource_usage::unordered_access);
                 s_pre_ui_captured = true;
             }
         }
