@@ -109,24 +109,31 @@ class StaticFrameWatchdog:
                 consecutive_static = 0
 
     def _read_latest_bmp(self) -> np.ndarray | None:
+        """Prefer BackBufferUI.bmp (post-UI, has HUD/menus) when --ui-mode={ui,both}.
+        Fall back to BackBuffer.bmp under --ui-mode=no-ui or pre-UI-only sessions.
+        Watchdog needs to see UI to detect 'Game Over' / pause menus / static HUD."""
         if not self._frames_dir.is_dir():
             return None
-        latest_mtime = -1.0
-        latest_path: Path | None = None
-        # iterdir is faster than glob('*.bmp') for large dirs since we filter
-        # by suffix manually instead of constructing fnmatch state
+        latest_ui_mtime = -1.0
+        latest_ui_path: Path | None = None
+        latest_bb_mtime = -1.0
+        latest_bb_path: Path | None = None
         for p in self._frames_dir.iterdir():
             if not p.name.endswith(".bmp"):
-                continue
-            if "BackBufferUI" in p.name:
                 continue
             try:
                 m = p.stat().st_mtime
             except OSError:
                 continue
-            if m > latest_mtime:
-                latest_mtime = m
-                latest_path = p
+            if "BackBufferUI" in p.name:
+                if m > latest_ui_mtime:
+                    latest_ui_mtime = m
+                    latest_ui_path = p
+            else:
+                if m > latest_bb_mtime:
+                    latest_bb_mtime = m
+                    latest_bb_path = p
+        latest_path = latest_ui_path if latest_ui_path is not None else latest_bb_path
         if latest_path is None:
             return None
         try:

@@ -163,12 +163,14 @@ The addon handles all timing and frame output; `capture_all.py` only records inp
 `--auto-play` 让 bot 在 capture 期间持续注入输入（移动、转向、攻击），实现长时间无人值守采集。两层架构 + 4 个内置 profile + 通用 OS 级输入注入。
 
 ```powershell
-# 通宵采集（A 层 keep-alive bot，无 API 费用）
+# 通宵采集（A 层 keep-alive bot，无 API 费用；--ui-mode 自动 = both）
 uv run main.py launch --auto-play --profile ff7r
 
 # 多游戏：profile 不指定时按 exe 名 fuzzy match，匹配不到回落 _default
 uv run main.py launch --game-path "...DOOMEternalx64vk.exe" --ui-mode ui --auto-play
 ```
+
+**`--auto-play` 自动把 `--ui-mode` 设为 `both`**（不传 `--ui-mode` 时）— 这样 watchdog / 未来 VLM driver 能看到 post-UI BMP 上的 HUD/菜单/死亡画面信息，做出更靠谱的 recovery 决策。同时 `BackBuffer.bmp`(pre-UI 净场景) 仍正常落盘给 ML 训练用。要保持 `no-ui` 单流：显式 `--auto-play --ui-mode no-ui`（watchdog 退化到看 pre-UI BMP，状态识别能力差）。
 
 | flag | 含义 |
 |------|------|

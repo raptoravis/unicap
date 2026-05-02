@@ -497,6 +497,14 @@ def cmd_deploy(args):
 # ── Subcommand: launch (interactive) ──────────────────────────────────────────
 
 def cmd_launch(args):
+    # Resolve --ui-mode default: 'both' under --auto-play (bot/watchdog need
+    # post-UI BMP for HUD / menus / death screens), else 'no-ui' (pre-UI clean
+    # scene RT). cmd_deploy reads args.ui_mode so resolve before deploying.
+    if args.ui_mode is None:
+        args.ui_mode = "both" if getattr(args, "auto_play", False) else "no-ui"
+        if getattr(args, "auto_play", False):
+            print(f"[AUTO-PLAY] --ui-mode 默认 both（bot/watchdog 看 post-UI BMP）")
+
     game_dir, game_exe, game_name, dataset_root, api = cmd_deploy(args)
 
     print(f"\n[启动] {game_exe}  (api={api})")
@@ -987,8 +995,9 @@ def main():
     p.add_argument("--game-path", default=str(GAME_PATH))
     p.add_argument("--game-name", default="", help="游戏名（输出路径第一级，默认从 exe 推导）")
     p.add_argument("--dataset-root", default="", metavar="PATH")
-    p.add_argument("--ui-mode", choices=["no-ui", "ui", "both"], default="no-ui",
-                   help="输出: no-ui=只 pre-UI（默认）, ui=只 post-UI BB（无需 survey）, both=双流")
+    p.add_argument("--ui-mode", choices=["no-ui", "ui", "both"], default=None,
+                   help="输出: no-ui=只 pre-UI（无 --auto-play 时默认）, ui=只 post-UI BB（无需 survey）,"
+                        " both=双流（--auto-play 时默认 — bot/watchdog 看 post-UI 才有 HUD/菜单信息）")
     p.add_argument("--api", choices=["auto", "dx", "vulkan"], default="auto",
                    help="渲染后端: auto=按 exe 名启发（默认）, dx=DXGI proxy, vulkan=Vulkan layer")
     p.add_argument("--vk-debug", action="store_true",
