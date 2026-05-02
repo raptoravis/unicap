@@ -503,7 +503,7 @@ def cmd_launch(args):
     if args.ui_mode is None:
         args.ui_mode = "both" if getattr(args, "auto_play", False) else "no-ui"
         if getattr(args, "auto_play", False):
-            print(f"[AUTO-PLAY] --ui-mode 默认 both（bot/watchdog 看 post-UI BMP）", flush=True)
+            print("[AUTO-PLAY] --ui-mode 默认 both（bot/watchdog 看 post-UI BMP）", flush=True)
 
     game_dir, game_exe, game_name, dataset_root, api = cmd_deploy(args)
 
@@ -533,7 +533,11 @@ def cmd_launch(args):
             log_file = str(UNICAP_TEMP / "vk_loader.log")
             env["VK_LOADER_LOG_FILE"] = log_file
             print(f"[VULKAN] VK_LOADER_DEBUG enabled → {log_file}")
-    subprocess.Popen([str(game_exe)], cwd=str(game_dir), env=env)
+    proc = subprocess.Popen([str(game_exe)], cwd=str(game_dir), env=env)
+
+    if getattr(args, "force_borderless", True):
+        from tools.window_manager import force_borderless_async
+        force_borderless_async(proc.pid, exe_basename=game_exe.name, timeout_s=30.0)
 
     _set_hints_flag(game_dir, args.hints)
     _set_state(game_dir, "idle")
@@ -691,7 +695,7 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path, just_
                         glob_pat="*BackBufferUI.bmp")
         print(f"[VIDEO] 总耗时 {_fmt_dur(time.perf_counter() - t_video)}")
     else:
-        print(f"[VIDEO] --no-video 跳过；待会儿运行：")
+        print("[VIDEO] --no-video 跳过；待会儿运行：")
         print(f"        uv run main.py video \"{dataset_root / game_name}\"")
 
     print(f"[会话] {session_dir}")
@@ -708,7 +712,7 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path, just_
             print(f"[PACK] 失败：{e}")
         print(f"[PACK] 总耗时 {_fmt_dur(time.perf_counter() - t_pack)}")
     else:
-        print(f"[PACK] launch 默认不打包（加 --pack 可即时打包），待会儿运行：")
+        print("[PACK] launch 默认不打包（加 --pack 可即时打包），待会儿运行：")
         print(f"       uv run main.py pack \"{dataset_root / game_name}\"")
 
 
@@ -1014,6 +1018,10 @@ def main():
                    help="Vulkan: 启用 VK_LOADER_DEBUG=layer，写到 %%TEMP%%\\unicap\\vk_loader.log")
     p.add_argument("--hints", action=argparse.BooleanOptionalAction, default=True,
                    help="显示控制台 + addon overlay 操作提示（默认开启）")
+    p.add_argument("--force-borderless", action=argparse.BooleanOptionalAction, default=True,
+                   help="启动后把游戏窗口强制 borderless 撑满显示器（默认开启）— "
+                        "避免 DXGI fullscreen-exclusive 让 DWM 暂停 console 渲染；"
+                        "--no-force-borderless 保留游戏自己的窗口模式")
     p.add_argument("--video", action=argparse.BooleanOptionalAction, default=True,
                    help="F9 停止采集后生成 video.mp4（默认开启；--no-video 跳过）")
     p.add_argument("--mask-ui", action="store_true",
@@ -1044,7 +1052,8 @@ def main():
     p.add_argument("--fps", type=float, default=0,
                    help="编码 fps；默认 0 = 从 BMP 文件名时间戳自动估算（推荐）")
     p.add_argument("--mask-ui", action="store_true",
-                   help="额外生成 video_masked.mp4：用 sibling DepthBuffer.exr 的 depth==0 把 UI 像素置黑（适用于 --ui-mode ui 采集 + UE4/id Tech 引擎）")
+                   help="额外生成 video_masked.mp4：用 sibling DepthBuffer.exr 的 depth==0 "
+                        "把 UI 像素置黑（适用于 --ui-mode ui 采集 + UE4/id Tech 引擎）")
 
     p = sub.add_parser("pack", help="批量打包游戏目录下所有采集会话；已有 dataset.h5 跳过")
     p.add_argument("--game-dir", default="", metavar="DIR",

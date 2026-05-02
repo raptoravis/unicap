@@ -199,6 +199,8 @@ uv run main.py launch --game-path "...DOOMEternalx64vk.exe" --ui-mode ui --auto-
 
 **长时不睡眠**：`--auto-play` 自动调 `SetThreadExecutionState(ES_CONTINUOUS|ES_DISPLAY|ES_SYSTEM)` 阻止系统睡眠/锁屏。
 
+**避免全屏独占冻结 console**：`launch` 默认 `--force-borderless`（`tools/window_manager.py`）。游戏启动后异步等其窗口出现（30s timeout），用 `SetWindowLongPtrW(GWL_STYLE, WS_POPUP|WS_VISIBLE)` + `SetWindowPos` 撑满显示器；DXGI 因 style 变化自动从 fullscreen-exclusive transition 到 windowed fullscreen — 视觉上跟全屏一致，但 DWM 不再暂停 unicap console 的渲染（按 F8/F9 后 [CAPTURE]/[AUTO-PLAY]/[WATCHDOG] print 实时显示，不用 alt-tab 才补全）。窗口匹配先按 Popen 返回的 pid，找不到 fallback 按 exe basename（FF7R 等 launcher→game PID handoff 场景的兜底）。`--no-force-borderless` 关掉。
+
 **验证**：`uv run python scripts/verify_auto_play.py` 跑 38 个 capability + integration + 离线 E2E 检查；live-game E2E（30min FF7R + 新游戏接入）需 sponsor 实机。
 
 ## Dataset output layout
