@@ -538,12 +538,16 @@ static void on_bind_rts_dsv(command_list* cmd_list, uint32_t count,
                               const resource_view* rtvs, resource_view dsv)
 {
     if (!enableCapturing || !g_pre_ui_mode || s_pre_ui_captured) return;
-    if (g_capture_mode != 0) return;  // barrier mode owns capture
 
+    // Set s_had_depth_pass BEFORE mode check — barrier mode also depends on it
+    // as its "3D scene started" gate.
     if (dsv.handle != 0) {
         s_had_depth_pass = true;
         return;
     }
+
+    if (g_capture_mode != 0) return;  // barrier mode owns the rest of capture
+
     // No depth stencil bound.  Only interesting after we've seen 3D geometry.
     if (!s_had_depth_pass || count == 0) return;
 
@@ -644,10 +648,14 @@ static void on_begin_render_pass(command_list* cmd_list, uint32_t count,
                                   render_pass_flags /*flags*/)
 {
     if (!enableCapturing || !g_pre_ui_mode || s_pre_ui_captured) return;
-    if (g_capture_mode != 0) return;  // barrier mode owns capture
 
+    // Set s_had_depth_pass BEFORE mode check — barrier mode also depends on it
+    // as its "3D scene started" gate.
     bool has_dsv = (ds != nullptr && ds->view.handle != 0);
     if (has_dsv) { s_had_depth_pass = true; return; }
+
+    if (g_capture_mode != 0) return;  // barrier mode owns the rest of capture
+
     if (!s_had_depth_pass || count == 0) return;
 
     device* dev = cmd_list->get_device();
