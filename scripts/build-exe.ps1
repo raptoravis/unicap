@@ -26,7 +26,6 @@ $ErrorActionPreference = "Stop"
 $root      = Split-Path $PSScriptRoot -Parent
 $outDir    = Join-Path $root "dist-exe"
 $buildDir  = Join-Path $root "dist-exe-build"   # Nuitka 中间产物
-$distDir   = Join-Path $root "dist"
 $mainPy    = Join-Path $root "main.py"
 $pyproject = Join-Path $root "pyproject.toml"
 
