@@ -17,8 +17,10 @@ scripts\build.ps1 -Rebuild # force-rebuild ReShade core too
 
 Outputs to `dist/`:
 
-- `dxgi.dll` — ReShade core (DX12/DXGI proxy)，built from `reshade/` source；由 `main.py launch` (cmd_deploy) symlink 到游戏目录（无 Windows 开发者模式时退化为 copy）
-- `frame_capture.addon` — capture addon (primary build output)
+- `dxgi.dll` — ReShade core (DX10/11/12 / DXGI proxy)，built from `reshade/` source；`--api dx`(默认) 时由 `cmd_deploy` symlink 到游戏目录（无 Windows 开发者模式时退化为 copy）
+- `UniCap64.dll` — same DLL bytes as dxgi.dll，作 Vulkan implicit layer 用；`--api vulkan` 时通过 `VK_IMPLICIT_LAYER_PATH` env var 注入到游戏子进程（不修改游戏目录）
+- `UniCap64.json` — Vulkan layer manifest（源在 `reshade-addons/UniCap64.json`），库名 `VK_LAYER_unicap`
+- `frame_capture.addon` — capture addon (primary build output)；同时注册 `on_bind_rts_dsv`(DX) + `on_begin_render_pass`(DX12 enhanced + Vulkan)，单一二进制覆盖两条路径
 - `unicap-shaders/Shaders/*.fx` — DepthToAddon + UIRemove shaders (copied from `shaders/`)
 
 Delete `build\` to force CMake reconfigure.
@@ -31,9 +33,14 @@ uv sync                                         # install Python deps (first tim
 uv run main.py launch                           # primary flow: deploy + launch + F6/F8/F9 loop
 uv run main.py launch --ui-mode ui              # capture post-UI BackBuffer only (no survey)
 uv run main.py launch --ui-mode both            # both pre-UI and post-UI streams (needs survey)
+uv run main.py launch --api vulkan              # Vulkan-only games (DOOM 2016/Eternal etc.)
 uv run main.py video  --game-dir DIR            # encode frames → MP4 (post-hoc, batch)
 uv run main.py pack   --game-dir DIR [--no-depth]  # pack frames + inputs → HDF5 (post-hoc, batch)
 ```
+
+`--api` 默认 `auto`（按 exe 名启发：含 `vk`/`vulkan` 子串 → vulkan，否则 dx）。DOOM 2016 之类 exe 名不带 vk 标记的 Vulkan-only 游戏必须显式 `--api vulkan`，否则走 DX 路径会在 F6 survey 时静默 timeout。
+
+**Vulkan 部署机制**：不修改游戏目录，通过游戏子进程的 env vars 注入：`VK_IMPLICIT_LAYER_PATH=<dist>` (loader ≥1.3.234 优先) + `VK_INSTANCE_LAYERS=VK_LAYER_unicap` + `VK_LAYER_PATH=<dist>` (老 loader fallback)。Layer DLL = `dist/UniCap64.dll`，manifest = `dist/UniCap64.json`（源 `reshade-addons/UniCap64.json`，重命名 + 自定义 layer name 以去 ReShade 品牌）。**全部副作用都在子进程范围内**，unicap 主进程退出后无残留（不写注册表）。
 
 `--ui-mode` controls what gets captured:
 

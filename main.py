@@ -24,11 +24,13 @@ ui-mode:
 """
 
 import argparse
+import atexit
 import configparser
 import ctypes
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -180,8 +182,127 @@ def _resolve_game_path(path_str: str):
 
 
 DXGI_DLL = ROOT / "dist" / "dxgi.dll"
+VULKAN_LAYER_DLL  = ROOT / "dist" / "UniCap64.dll"
+VULKAN_LAYER_JSON = ROOT / "dist" / "UniCap64.json"
+VULKAN_LAYER_NAME = "VK_LAYER_unicap"  # must match UniCap64.json `layer.name`
 ADDON_BIN = ROOT / "dist" / "frame_capture.addon"
 SHADER_SRC = ROOT / "shaders"
+
+
+# ── Vulkan layer registration (HKCU) ──────────────────────────────────────────
+# Steam relaunches games in its own subprocess tree, stripping env vars set by
+# main.py. Env-var-only injection (VK_IMPLICIT_LAYER_PATH etc.) silently fails
+# for any Steam-required game (DOOM 2016/Eternal etc.). HKCU registration is
+# Steam-immune since the loader reads it during vkCreateInstance regardless of
+# parent process. Cleanup is critical because a leaked entry affects ALL Vulkan
+# apps system-wide. Three-layer cleanup: atexit + signal handlers + startup
+# stale-entry scan (idempotent — manifest path is install-unique).
+
+_VK_LAYER_REGKEY = r"Software\Khronos\Vulkan\ImplicitLayers"
+_vk_registered_value: str | None = None  # absolute manifest path; None = not registered
+
+
+def _vk_register_layer(manifest_path: Path) -> None:
+    """Register UniCap64.json under HKCU\\...\\ImplicitLayers (DWORD value=0 = enabled)."""
+    import winreg
+    global _vk_registered_value
+    value_name = str(manifest_path.resolve())
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _VK_LAYER_REGKEY, 0,
+                            winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE) as key:
+        winreg.SetValueEx(key, value_name, 0, winreg.REG_DWORD, 0)
+    _vk_registered_value = value_name
+    atexit.register(_vk_unregister_layer)
+    # Best-effort signal hookup: SIGINT becomes KeyboardInterrupt → caught by
+    # cmd_launch's try/finally; SIGBREAK + console-close need explicit handlers.
+    try:
+        signal.signal(signal.SIGINT, _vk_signal_cleanup)
+        signal.signal(signal.SIGBREAK, _vk_signal_cleanup)  # type: ignore[attr-defined]
+    except (AttributeError, ValueError):
+        pass
+    _vk_install_console_handler()
+
+
+def _vk_unregister_layer() -> None:
+    """Idempotent — safe to call multiple times. Removes only OUR manifest entry."""
+    import winreg
+    global _vk_registered_value
+    if _vk_registered_value is None:
+        return
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _VK_LAYER_REGKEY, 0,
+                            winreg.KEY_SET_VALUE) as key:
+            winreg.DeleteValue(key, _vk_registered_value)
+    except (FileNotFoundError, OSError):
+        pass
+    _vk_registered_value = None
+
+
+def _vk_signal_cleanup(signum, _frame):
+    _vk_unregister_layer()
+    # Re-raise as KeyboardInterrupt so the existing cmd_launch handler runs cleanup
+    raise KeyboardInterrupt()
+
+
+def _vk_install_console_handler() -> None:
+    """Hook Win32 SetConsoleCtrlHandler for window-close / logoff (signal module
+    doesn't catch CTRL_CLOSE_EVENT). The handler runs in a separate thread that
+    Windows kills ~5s after our return — enough for one registry delete."""
+    @ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)
+    def handler(ctrl_type):
+        if ctrl_type in (0, 1, 2, 5, 6):  # CTRL_C, CTRL_BREAK, CTRL_CLOSE, CTRL_LOGOFF, CTRL_SHUTDOWN
+            _vk_unregister_layer()
+        return 0  # let default handler run
+    # Keep a strong ref so GC doesn't free the callback before Windows calls it
+    if not hasattr(_vk_install_console_handler, "_handler_ref"):
+        _vk_install_console_handler._handler_ref = handler  # type: ignore[attr-defined]
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(handler, 1)
+
+
+def _vk_clean_stale_entries(our_manifest: Path) -> int:
+    """On startup, scan HKCU ImplicitLayers for any value matching our manifest
+    path (could be from a previously crashed unicap session). Returns count cleaned."""
+    import winreg
+    target = str(our_manifest.resolve()).lower()
+    cleaned = 0
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _VK_LAYER_REGKEY, 0,
+                            winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE) as key:
+            stale_values = []
+            i = 0
+            while True:
+                try:
+                    name, _, _ = winreg.EnumValue(key, i)
+                except OSError:
+                    break
+                if name.lower() == target:
+                    stale_values.append(name)
+                i += 1
+            for name in stale_values:
+                try:
+                    winreg.DeleteValue(key, name)
+                    cleaned += 1
+                except OSError:
+                    pass
+    except FileNotFoundError:
+        pass  # ImplicitLayers key doesn't exist yet
+    return cleaned
+
+
+# ── API backend resolution ────────────────────────────────────────────────────
+
+def _resolve_api(api_arg: str, game_exe: Path) -> str:
+    """Returns 'dx' or 'vulkan'. 'auto' inspects exe name (vk-suffixed = Vulkan).
+    Heuristic is conservative: only flips to vulkan on strong signals; users with
+    Vulkan-only games whose exe names lack a 'vk' marker (e.g. DOOMx64.exe) must
+    pass --api vulkan explicitly. The fallback DX path then errors out cleanly
+    on F6 timeout, prompting the user to retry with --api vulkan."""
+    if api_arg in ("dx", "vulkan"):
+        return api_arg
+    name = game_exe.stem.lower()
+    vk_markers = ("vk", "vulkan")
+    if any(m in name for m in vk_markers):
+        return "vulkan"
+    return "dx"
 
 
 # ── unicap.ini / preset writers ───────────────────────────────────────────────
@@ -253,16 +374,32 @@ def _symlink_file(src: Path, dst: Path):
 
 def cmd_deploy(args):
     game_dir, game_exe = _resolve_game_path(args.game_path)
+    api = _resolve_api(getattr(args, "api", "auto"), game_exe)
 
-    for f in [DXGI_DLL, ADDON_BIN]:
+    required = [ADDON_BIN, DXGI_DLL] if api == "dx" else [ADDON_BIN, VULKAN_LAYER_DLL, VULKAN_LAYER_JSON]
+    for f in required:
         if not f.exists():
             sys.exit(f"[错误] 文件不存在：{f}\n       请先执行 scripts\\build.ps1")
 
-    dst_dll = game_dir / "dxgi.dll"
-    bak = game_dir / "dxgi.dll.bak"
-    if dst_dll.exists() and not dst_dll.is_symlink() and not bak.exists():
-        shutil.copy2(dst_dll, bak)
-    _symlink_file(DXGI_DLL, dst_dll)
+    if api == "dx":
+        dst_dll = game_dir / "dxgi.dll"
+        bak = game_dir / "dxgi.dll.bak"
+        if dst_dll.exists() and not dst_dll.is_symlink() and not bak.exists():
+            shutil.copy2(dst_dll, bak)
+        _symlink_file(DXGI_DLL, dst_dll)
+        print(f"[DEPLOY] api=dx  → dxgi.dll proxy 部署到 {game_dir}")
+    else:
+        # Vulkan: drop a 2-line redirect ini into game_dir. ReShade's dll_main
+        # reads <game_dir>/unicap.ini's [INSTALL] BasePath as the HIGHEST-priority
+        # base-path source (above RESHADE_BASE_PATH_OVERRIDE env var) — so this
+        # survives Steam's env-strip on game relaunch. Without this redirect,
+        # ReShade aborts the Vulkan layer load when the DLL name doesn't match
+        # d3d*/dxgi/opengl32/dinput* (dll_main.cpp:131-156).
+        redirect_ini = game_dir / "unicap.ini"
+        redirect_ini.write_text(
+            f"[INSTALL]\nBasePath={UNICAP_TEMP}\n", encoding="utf-8"
+        )
+        print(f"[DEPLOY] api=vulkan  → 写入 {redirect_ini}（base path 重定向到 {UNICAP_TEMP}）")
 
     dataset_root_arg = getattr(args, "dataset_root", "") or ""
     dataset_root = Path(dataset_root_arg) if dataset_root_arg else DATASET_ROOT
@@ -276,16 +413,40 @@ def cmd_deploy(args):
 
     _ensure_addon_enabled(ADDON_BIN.parent, pre_ui_skip=pre_ui_skip, ui_mode=ui_mode)
     _ensure_preset()
-    return game_dir, game_exe, game_name, dataset_root
+    return game_dir, game_exe, game_name, dataset_root, api
 
 
 # ── Subcommand: launch (interactive) ──────────────────────────────────────────
 
 def cmd_launch(args):
-    game_dir, game_exe, game_name, dataset_root = cmd_deploy(args)
+    game_dir, game_exe, game_name, dataset_root, api = cmd_deploy(args)
 
-    print(f"\n[启动] {game_exe}")
+    print(f"\n[启动] {game_exe}  (api={api})")
     env = {**os.environ, "RESHADE_BASE_PATH_OVERRIDE": str(UNICAP_TEMP)}
+    if api == "vulkan":
+        # Primary path: HKCU registration. Steam-immune (loader reads registry
+        # during vkCreateInstance regardless of parent process). Cleaned up via
+        # atexit + signal handlers; stale entries scrubbed on next launch.
+        cleaned = _vk_clean_stale_entries(VULKAN_LAYER_JSON)
+        if cleaned:
+            print(f"[VULKAN] 清理上次未释放的 {cleaned} 条注册表残留")
+        _vk_register_layer(VULKAN_LAYER_JSON)
+        print(f"[VULKAN] HKCU 注册 layer manifest: {VULKAN_LAYER_JSON.resolve()}")
+
+        # Belt-and-suspenders: env vars also work for non-Steam launches and
+        # newer loaders. Cheap to set; fail-safe if HKCU read is delayed.
+        layer_dir = str(VULKAN_LAYER_JSON.parent)
+        env["VK_IMPLICIT_LAYER_PATH"] = layer_dir
+        env["VK_LAYER_PATH"] = layer_dir
+        env["VK_INSTANCE_LAYERS"] = VULKAN_LAYER_NAME
+        # disable_environment is presence-checked (NOT value-checked) by the
+        # Vulkan loader — `="0"` still disables. Remove in case parent inherited.
+        env.pop("DISABLE_VK_LAYER_unicap_1", None)
+        if getattr(args, "vk_debug", False):
+            env["VK_LOADER_DEBUG"] = "layer,error,warn"
+            log_file = str(UNICAP_TEMP / "vk_loader.log")
+            env["VK_LOADER_LOG_FILE"] = log_file
+            print(f"[VULKAN] VK_LOADER_DEBUG enabled → {log_file}")
     subprocess.Popen([str(game_exe)], cwd=str(game_dir), env=env)
 
     _set_hints_flag(game_dir, args.hints)
@@ -313,6 +474,9 @@ def cmd_launch(args):
         print("\n[退出] Ctrl+C，main.py 退出。游戏继续运行。")
     finally:
         _set_state(game_dir, "idle")
+        if api == "vulkan":
+            _vk_unregister_layer()
+            print("[VULKAN] HKCU 注册表已清理")
 
 
 def _interactive_loop(args, game_dir: Path, game_name: str, dataset_root: Path):
@@ -681,6 +845,10 @@ def main():
     p.add_argument("--dataset-root", default="", metavar="PATH")
     p.add_argument("--ui-mode", choices=["no-ui", "ui", "both"], default="no-ui",
                    help="输出: no-ui=只 pre-UI（默认）, ui=只 post-UI BB（无需 survey）, both=双流")
+    p.add_argument("--api", choices=["auto", "dx", "vulkan"], default="auto",
+                   help="渲染后端: auto=按 exe 名启发（默认）, dx=DXGI proxy, vulkan=Vulkan layer")
+    p.add_argument("--vk-debug", action="store_true",
+                   help="Vulkan: 启用 VK_LOADER_DEBUG=layer，写到 %%TEMP%%\\unicap\\vk_loader.log")
     p.add_argument("--hints", action=argparse.BooleanOptionalAction, default=True,
                    help="显示控制台 + addon overlay 操作提示（默认开启）")
     p.add_argument("--video", action=argparse.BooleanOptionalAction, default=True,
