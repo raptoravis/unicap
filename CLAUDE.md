@@ -48,9 +48,9 @@ uv run main.py pack   --game-dir DIR [--no-depth]  # pack frames + inputs → HD
 
 | mode | survey 需求 | output BMPs                            | HDF5                  |
 | ---- | --------- | -------------------------------------- | --------------------- |
-| `no-ui` (default) | F8 首次自动跑 | `<ts> BackBuffer.bmp` (pre-UI)         | `/color`              |
-| `ui`              | 不需要       | `<ts> BackBuffer.bmp` (post-UI BB)     | `/color`              |
-| `both`            | F8 首次自动跑 | both `BackBuffer.bmp` + `BackBufferUI.bmp` | `/color` + `/color_ui` |
+| `no-ui` (default) | F8 首次自动跑 | `<ts> BackBuffer.bmp` (pre-UI)         | `/color` (--bmp no-ui) |
+| `ui`              | 不需要       | `<ts> BackBuffer.bmp` (post-UI BB)     | `/color` (--bmp ui)   |
+| `both`            | F8 首次自动跑 | both `BackBuffer.bmp` + `BackBufferUI.bmp` | `/color` 由 --bmp 选 |
 
 The addon is driven by two ini keys: `FC_PreUICapture` (1 = scene RT, 0 = post-UI BB) and `FC_BothCapture` (1 = also dump post-UI BMP alongside scene RT). `_ensure_addon_enabled` writes both based on `--ui-mode`.
 
@@ -87,7 +87,9 @@ Settings (`FC_EnableCapture`, `FC_ExportDepth`, `FC_PreUICapture`, `FC_PreUISkip
 
 ### `--mask-ui` (post-process UI mask)
 
-`--mask-ui`（同时存在于 `launch` 和 `video` 子命令）从 sibling DepthBuffer.exr 读深度，把 `depth == 0` 的像素在颜色帧上置黑后再编码 → 生成 `video_masked.mp4`（与 `video.mp4` 并存，不替换）。前提：`FC_ExportDepth=1`（默认开启）+ 引擎用 reverse-Z（UE4/id Tech 都是）→ UI 像素深度为 0。在 `pack_hdf5.py` HDF5 打包路径上同样的逻辑早已存在（`/color` 已 mask）。
+`--mask-ui`（同时存在于 `launch` 和 `video` 子命令）从 sibling DepthBuffer.exr 读深度，把 `depth <= 0 OR depth >= 0.999` 的像素（reverse-Z 下的 UI/sky）在颜色帧上置黑后再编码 → 生成 `video_masked.mp4`（与 `video.mp4` 并存，不替换）。**注意**：DepthToAddon.fx 导出已 reverse-Z flip + 线性化，所以 UE4/UE5/id Tech 7 都是 sky/UI 像素 = 1.0 不是 0.0。**id Tech 7 (DOOM Eternal) HUD 是真 3D 几何**（小三角面绘制在近平面），depth mask 抓不到 → 现实使用上 mask 主要干掉 sky，HUD 靠模型自学忽略。
+
+`pack` 子命令的 `--bmp {no-ui,ui}`（默认 no-ui）选哪种 BMP 进 `/color`：no-ui=BackBuffer.bmp，ui=BackBufferUI.bmp 优先（不存在 fallback BackBuffer.bmp）。Pack **不再**做 depth-based UI mask（引擎相关、效果差），HDF5 里 `/color` 是原图，`/depth` 完整保留。
 
 **Important:** `frame_capture.cpp` includes headers from `reshade-addons/deps/reshade/include` (v5 wrapper API). Do not change this include path — the addon's exported symbols target the v5 ABI and remain compatible with `dist/dxgi.dll` built from the 6.7.3.16 source.
 

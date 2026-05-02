@@ -232,24 +232,50 @@ def _load_normal(path: Path) -> np.ndarray:
 
 # ─── HDF5 打包 ────────────────────────────────────────────────────────────────
 
-def pack(frames_dir: Path, inputs_path: Path, output_path: Path, include_depth: bool = True):
-    print(f"[SCAN] 扫描: {frames_dir}")
+def pack(frames_dir: Path, inputs_path: Path, output_path: Path,
+         include_depth: bool = True, bmp: str = 'no-ui'):
+    """
+    bmp: 'no-ui' (默认) → 把 BackBuffer.bmp 作为 /color；适用于 --ui-mode no-ui
+                           或 --ui-mode both 采集（pre-UI / 干净 scene RT）。
+         'ui'           → 把 BackBufferUI.bmp 作为 /color（不存在则 fallback
+                           BackBuffer.bmp，假设 --ui-mode ui 采集）。post-UI
+                           帧含 HUD —— 模型自学忽略。
+    Pack 不再做基于 depth 的 UI mask（DOOM Eternal 等 id Tech 引擎 HUD 是真 3D
+    几何，depth 阈值分不开 HUD 和近景物体；UE4 的 mask 对 sky 反而有用但会误
+    伤场景）。要 mask 用 main.py video --mask-ui 生成 video_masked.mp4 验证。
+    """
+    print(f"[SCAN] 扫描: {frames_dir}  (bmp={bmp})")
     mode, frames = scan_frames(frames_dir)
     n = len(frames)
     if n == 0:
         print("[ERROR] 未找到任何有效帧，退出")
         sys.exit(1)
+
+    # 选择 primary BMP 字段：no-ui = 'bmp' (BackBuffer); ui = 'bmp_ui' fallback 'bmp'
+    primary_key = 'bmp'  # default for bmp='no-ui'
+    if bmp == 'ui':
+        ui_count = sum(1 for f in frames if f.get('bmp_ui'))
+        if ui_count == n:
+            primary_key = 'bmp_ui'
+            print(f"[SCAN] --bmp ui: 使用 BackBufferUI.bmp ({ui_count}/{n} 帧)")
+        elif ui_count > 0:
+            print(f"[SCAN] --bmp ui: 仅 {ui_count}/{n} 帧有 BackBufferUI.bmp，"
+                  f"frame integrity 不全 → 退到 BackBuffer.bmp（假设 --ui-mode ui 采集）")
+        else:
+            print("[SCAN] --bmp ui: 无 BackBufferUI.bmp → 用 BackBuffer.bmp"
+                  "（假设此 session 是 --ui-mode ui 采集，BackBuffer.bmp = post-UI）")
+
     if not include_depth and mode == 'triplet':
-        print("[SCAN] --no-depth: 跳过 /depth /normal 数据集与 UI mask")
+        print("[SCAN] --no-depth: 跳过 /depth /normal 数据集")
         mode = 'color'
         for f in frames:
             f['depth'] = None
             f['normal'] = None
-    has_ui = any(f.get('bmp_ui') for f in frames)
-    print(f"[SCAN] 模式={mode}, 帧数={n}{'  (含 post-UI 流)' if has_ui else ''}")
+    print(f"[SCAN] 模式={mode}, 帧数={n}")
 
-    # 读取第一帧确定分辨率
-    H, W = _load_bmp(frames[0]['bmp']).shape[:2]
+    # 读取第一帧（按 primary_key 选定的 BMP）确定分辨率
+    first_bmp = frames[0].get(primary_key) or frames[0]['bmp']
+    H, W = _load_bmp(first_bmp).shape[:2]
     print(f"[SCAN] 分辨率: {W}x{H}")
 
     print(f"[LOAD] 加载输入: {inputs_path}")
@@ -281,13 +307,7 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path, include_depth: 
             ds_depth  = hf.create_dataset('depth',  (n, H, W),    dtype='float32', chunks=(1, H, W),    **_C)
             ds_normal = hf.create_dataset('normal', (n, H, W, 3), dtype='float32', chunks=(1, H, W, 3), **_C)
 
-        ds_color_ui = None
-        if has_ui:
-            ds_color_ui = hf.create_dataset('color_ui', (n, H, W, 3), dtype='uint8',
-                                            chunks=(1, H, W, 3), **_C)
-
         max_dt = 0.0
-        ui_masked_total = 0  # 累计被方案 A 遮罩的像素数（B 已遮罩的为 0，不计入）
         for i, frame in enumerate(frames):
             inp, dt_ms = nearest_input(frame['ts'], ts_list, inputs)
 
@@ -296,30 +316,16 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path, include_depth: 
                 inp = {'ts': 0, 'kb': [0] * 256, 'mouse': [0, 0], 'gamepad': None}
                 dt_ms = 0.0
 
-            color = _load_bmp(frame['bmp'])
+            bmp_path = frame.get(primary_key) or frame['bmp']
+            color = _load_bmp(bmp_path)
 
             if mode == 'triplet':
                 if frame['depth']:
-                    depth_arr = _load_depth(frame['depth'])
-                    # DepthToAddon.fx 导出线性化 depth (0=near, 1=far)，已
-                    # 处理 reverse-Z flip。UE4/UE5/id Tech 7 都是 reverse-Z
-                    # → UI/sky 不写深度 → 经 flip+linearize 后 = 1.0。
-                    # 同时容许 forward-Z 引擎的 0.0 边界。
-                    # 注意：BackBufferExport.fx（旧名 UIRemove.fx）不做 UI
-                    # mask，只是 BackBuffer 拷贝；真正的 UI mask 完全靠这里
-                    # 的 depth 阈值判定。
-                    ui_mask = (depth_arr <= 0.0) | (depth_arr >= 0.999)
-                    masked = int(ui_mask.sum())
-                    if masked:
-                        color[ui_mask] = 0
-                        ui_masked_total += masked
-                    ds_depth[i] = depth_arr
+                    ds_depth[i] = _load_depth(frame['depth'])
                 if frame['normal']:
                     ds_normal[i] = _load_normal(frame['normal'])
 
             ds_color[i]     = color
-            if ds_color_ui is not None and frame.get('bmp_ui'):
-                ds_color_ui[i] = _load_bmp(frame['bmp_ui'])
             ds_frame_ts[i]  = frame['ts']
             ds_input_ts[i]  = inp['ts']
             ds_input_dt[i]  = float(dt_ms)
@@ -340,20 +346,13 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path, include_depth: 
         hf.attrs['fps_est']    = round(fps_est, 2)
         hf.attrs['created_at'] = datetime.datetime.now(UTC8).isoformat()
         hf.attrs['timezone']   = 'UTC+8 (frame filenames are local time)'
-        if mode == 'triplet':
-            avg_ui = ui_masked_total / n if n else 0
-            hf.attrs['ui_mask'] = 'depth<=0 or depth>=0.999 → black (reverse-Z linearized: UI/sky)'
-            hf.attrs['ui_mask_avg_px'] = round(avg_ui, 1)
+        hf.attrs['bmp']         = bmp           # 'no-ui' or 'ui'
+        hf.attrs['primary_bmp'] = primary_key   # 'bmp' or 'bmp_ui'
 
     size_mb = output_path.stat().st_size / 1024 / 1024
     print(f"[DONE] {output_path}  ({size_mb:.1f} MB)")
-    print(f"[DONE] 帧数={n}  分辨率={W}x{H}  fps≈{fps_est:.1f}  最大对齐误差={max_dt:.1f} ms")
-    if mode == 'triplet':
-        avg_ui = ui_masked_total / n if n else 0
-        if avg_ui > 0:
-            print(f"[MASK] 方案A兜底：平均每帧遮罩 {avg_ui:.0f} 个 UI 像素（B 已遮罩的不计入）")
-        else:
-            print(f"[MASK] 未发现 UI 像素（当前帧无 UI）")
+    print(f"[DONE] 帧数={n}  分辨率={W}x{H}  fps≈{fps_est:.1f}  最大对齐误差={max_dt:.1f} ms"
+          f"  bmp={bmp} (primary={primary_key})")
 
 
 # ─── 抽帧目视验证 ─────────────────────────────────────────────────────────────

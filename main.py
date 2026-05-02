@@ -611,7 +611,8 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path, just_
         t_pack = time.perf_counter()
         try:
             pack_hdf5.pack(frames_dir=frames_dir, inputs_path=inputs_out,
-                           output_path=session_dir / "dataset.h5")
+                           output_path=session_dir / "dataset.h5",
+                           bmp=getattr(args, "bmp", "no-ui"))
         except Exception as e:
             print(f"[PACK] 失败：{e}")
         print(f"[PACK] 总耗时 {_fmt_dur(time.perf_counter() - t_pack)}")
@@ -878,7 +879,7 @@ def cmd_pack(args):
         t0 = time.perf_counter()
         try:
             pack_hdf5.pack(frames_dir=frames, inputs_path=inputs, output_path=h5,
-                           include_depth=args.depth)
+                           include_depth=args.depth, bmp=args.bmp)
         except Exception as e:
             elapsed = time.perf_counter() - t0
             print(f"[ERROR] {sess.name} 失败：{e}  耗时 {_fmt_dur(elapsed)}")
@@ -913,9 +914,12 @@ def main():
     p.add_argument("--video", action=argparse.BooleanOptionalAction, default=True,
                    help="F9 停止采集后生成 video.mp4（默认开启；--no-video 跳过）")
     p.add_argument("--mask-ui", action="store_true",
-                   help="同时生成 video_masked.mp4：depth==0 像素置黑（UE4/id Tech UI mask）")
+                   help="同时生成 video_masked.mp4：depth==0|>=0.999 像素置黑（reverse-Z UI/sky mask）")
     p.add_argument("--pack", action="store_true",
                    help="F9 停止采集后立即打包 HDF5（默认不打包）")
+    p.add_argument("--bmp", choices=["no-ui", "ui"], default="no-ui",
+                   help="--pack 时哪种 BMP 进 /color: no-ui (默认) = BackBuffer.bmp; "
+                        "ui = BackBufferUI.bmp 优先")
 
     p = sub.add_parser("video", help="批量生成游戏目录下所有缺失的 video.mp4 / video_ui.mp4")
     p.add_argument("--game-dir", default="", metavar="DIR",
@@ -929,7 +933,10 @@ def main():
     p.add_argument("--game-dir", default="", metavar="DIR",
                    help="dataset-root 下的游戏目录（其下含 <YYYYMMDD_HHMMSS>/frames/ 子目录）")
     p.add_argument("--depth", action=argparse.BooleanOptionalAction, default=True,
-                   help="包含 /depth + /normal + UI mask（默认开启；--no-depth 跳过 EXR、只打 color）")
+                   help="包含 /depth + /normal（默认开启；--no-depth 跳过 EXR、只打 color）")
+    p.add_argument("--bmp", choices=["no-ui", "ui"], default="no-ui",
+                   help="哪种 BMP 进 /color: no-ui (默认) = BackBuffer.bmp; "
+                        "ui = BackBufferUI.bmp（不存在则 fallback BackBuffer.bmp）")
     p.add_argument("--spot-check", metavar="H5_PATH")
     p.add_argument("--check-frames", default="0,99,499")
     p.add_argument("--check-out", default=str(DATASET_ROOT / "spot_checks"))
