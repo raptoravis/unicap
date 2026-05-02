@@ -293,6 +293,7 @@ static uint32_t s_prev_non_bb_total = 0;
 // composite). When mode=1, the on_bind_rts_dsv / on_begin_render_pass handlers
 // short-circuit and on_barrier owns capture exclusively.
 static uint32_t g_capture_mode       = 0;
+static bool     g_barrier_dry_run    = false;  // FC_BarrierDryRun: log candidates, no copy
 static uint32_t s_barrier_idx        = 0;   // qualifying barriers seen this frame
 static uint32_t s_prev_barrier_total = 0;   // last frame's qualifying barrier count
 
@@ -453,6 +454,7 @@ static void on_init_device(device*)
     reshade::get_config_value(nullptr, "ADDON", "FC_PreUISkipCount", g_pre_ui_skip);
     reshade::get_config_value(nullptr, "ADDON", "FC_BothCapture",    g_both_capture);
     reshade::get_config_value(nullptr, "ADDON", "FC_CaptureMode",    g_capture_mode);
+    reshade::get_config_value(nullptr, "ADDON", "FC_BarrierDryRun",  g_barrier_dry_run);
 }
 
 static void on_init_swapchain(swapchain* sw, bool /*resize*/)
@@ -820,13 +822,18 @@ static void on_barrier(command_list* cmd_list, uint32_t count,
             should_record = (s_barrier_idx == target);
         }
 
+        // DIAGNOSTIC-ONLY MODE (FC_BarrierDryRun=1): log candidates but do
+        // NOT issue copy. Use this to understand pipeline structure without
+        // risking GPU hang / freeze from incorrect barrier sequence.
+        if (g_barrier_dry_run) {
+            s_barrier_idx++;
+            continue;
+        }
+
         if (should_record) {
             // CRITICAL: vulkan_hooks_command_list.cpp:939 calls trampoline BEFORE
             // firing addon_event::barrier — so by the time we run, the resource
             // is ALREADY in new_states[i] (which has shader_resource bit).
-            // Our barrier source must therefore be shader_resource, NOT old_states[i].
-            // The earlier UAV→copy_source attempt crashed DOOM Eternal precisely
-            // because R was already SR when we tried to transition from UAV.
             if (!g_pre_ui_staging.handle ||
                 g_pre_ui_staging_w != rd.texture.width || g_pre_ui_staging_h != rd.texture.height) {
                 if (g_pre_ui_staging.handle) dev->destroy_resource(g_pre_ui_staging);

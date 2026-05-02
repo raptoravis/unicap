@@ -307,13 +307,15 @@ def _resolve_api(api_arg: str, game_exe: Path) -> str:
 # ── unicap.ini / preset writers ───────────────────────────────────────────────
 
 def _ensure_addon_enabled(addon_dir: Path, pre_ui_skip: int = 0, ui_mode: str = "no-ui",
-                          capture_mode: str = "render-pass"):
+                          capture_mode: str = "render-pass", barrier_dry_run: bool = False):
     """ui_mode: 'no-ui' (pre-UI only) | 'ui' (post-UI BB only) | 'both' (pre-UI + post-UI).
     capture_mode: 'render-pass' (default; bind_rts_dsv + begin_render_pass) |
-                  'barrier' (compute-engine path; on_barrier owns capture)."""
+                  'barrier' (compute-engine path; on_barrier owns capture).
+    barrier_dry_run: barrier mode logs candidates but skips GPU copy (debug)."""
     pre_ui_flag      = "0" if ui_mode == "ui" else "1"
     both_flag        = "1" if ui_mode == "both" else "0"
     capture_mode_int = "1" if capture_mode == "barrier" else "0"
+    dry_run_int      = "1" if barrier_dry_run else "0"
     UNICAP_TEMP.mkdir(parents=True, exist_ok=True)
     ini = UNICAP_TEMP / "unicap.ini"
     cfg = configparser.RawConfigParser()
@@ -332,6 +334,7 @@ def _ensure_addon_enabled(addon_dir: Path, pre_ui_skip: int = 0, ui_mode: str = 
         ("ADDON", "FC_PreUISkipCount", str(pre_ui_skip)),
         ("ADDON", "FC_BothCapture", both_flag),
         ("ADDON", "FC_CaptureMode", capture_mode_int),
+        ("ADDON", "FC_BarrierDryRun", dry_run_int),
         ("GENERAL", "EffectSearchPaths", str(ROOT / "shaders")),
         ("GENERAL", "IntermediateCachePath", str(UNICAP_TEMP)),
         ("GENERAL", "TextureSearchPaths", str(ROOT / "shaders")),
@@ -418,8 +421,9 @@ def cmd_deploy(args):
         pre_ui_skip = 0
 
     capture_mode = getattr(args, "capture_mode", "render-pass")
+    barrier_dry_run = getattr(args, "barrier_dry_run", False)
     _ensure_addon_enabled(ADDON_BIN.parent, pre_ui_skip=pre_ui_skip, ui_mode=ui_mode,
-                          capture_mode=capture_mode)
+                          capture_mode=capture_mode, barrier_dry_run=barrier_dry_run)
     _ensure_preset()
     return game_dir, game_exe, game_name, dataset_root, api
 
@@ -543,7 +547,8 @@ def _run_survey(args, game_dir: Path, game_name: str, dataset_root: Path) -> boo
     # Persist recommendation to ini for next deploy
     _ensure_addon_enabled(ADDON_BIN.parent, pre_ui_skip=recommended,
                           ui_mode=getattr(args, "ui_mode", "no-ui"),
-                          capture_mode=getattr(args, "capture_mode", "render-pass"))
+                          capture_mode=getattr(args, "capture_mode", "render-pass"),
+                          barrier_dry_run=getattr(args, "barrier_dry_run", False))
 
     # Make the new skip take effect immediately in the running game:
     # one-shot survey-mode write so the addon picks up `recommended`,
@@ -849,6 +854,8 @@ def main():
     p.add_argument("--capture-mode", choices=["render-pass", "barrier"], default="render-pass",
                    help="pre-UI 触发点: render-pass=DX 经典 (bind_rts/begin_render_pass), "
                         "barrier=compute-engine (id Tech 7 / DOOM Eternal 类，hook RT→SR transition)")
+    p.add_argument("--barrier-dry-run", action="store_true",
+                   help="barrier 模式调试: 只记录 candidate transitions 到 unicap.log, 不做 GPU copy")
     p.add_argument("--vk-debug", action="store_true",
                    help="Vulkan: 启用 VK_LOADER_DEBUG=layer，写到 %%TEMP%%\\unicap\\vk_loader.log")
     p.add_argument("--hints", action=argparse.BooleanOptionalAction, default=True,
