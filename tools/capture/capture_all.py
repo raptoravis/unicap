@@ -72,8 +72,16 @@ def _thread_input(stop: threading.Event, inputs_out: Path):
 
     while not stop.is_set():
         t = time.time_ns()
-        kb = (ctypes.c_ubyte * 256)()
-        user32.GetKeyboardState(kb)
+        # GetAsyncKeyState polls the physical key state, independent of the
+        # caller thread's message queue. GetKeyboardState would return all
+        # zeros here (daemon thread → no window → no message queue → kb state
+        # never updated). Mirror the byte format ("high bit = down") so the
+        # schema documented in pack_hdf5.py and the recorder.py path stays
+        # consistent. Toggle bits (caps/num/scroll lock) are not preserved.
+        kb = [0] * 256
+        for vk in range(256):
+            if user32.GetAsyncKeyState(vk) & 0x8000:
+                kb[vk] = 0x80
         pt = POINT()
         user32.GetCursorPos(ctypes.byref(pt))
         gamepad = None
