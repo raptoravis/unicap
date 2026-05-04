@@ -1,229 +1,162 @@
-# Handoff: capture pipeline BMP → PNG migration done — sponsor live-verify open
+# Handoff: GetKeyboardState daemon-thread fix landed on auto-play; master not yet updated
 
-**Generated**: 2026-05-04 22:20 CST
-**Branch**: `master` (HEAD = `3fab8a4`, pushed to `origin/master`)
-**Status**: In Progress — code-side closed and EXE shipped; only sponsor live-fps measurement remains.
+**Generated**: 2026-05-04 22:40 CST
+**Branch**: `auto-play` (HEAD = `f6e1d0c`, in sync with `origin/auto-play`)
+**Status**: Ready for Review — code-side fix committed; only docs cleanup + branch alignment remain.
 
 ## Goal
 
-Cut the FF7R capture-write bottleneck (~5fps actual vs 30fps target in `--ui-mode both`) by switching color output from uncompressed BMP to PNG, and downscale the post-UI watchdog/VLM stream to 960×540. Plus close the cleanup-grace TODO from the prior handoff.
+Pre-emptively close the `GetKeyboardState` daemon-thread bug listed as a known limit in the prior handoff (`tools/capture/capture_all.py:_thread_input` line 76). The bug caused HDF5 `/kb` columns in every capture session to be all-zeros, silently breaking the keyboard channel of ML training data.
 
-## Completed in this session
+## Completed
 
-### commit `80ca317` (cleanup-grace, replay path)
-
-- [x] **`main.py:_run_replay` finally** replaced fixed 0.3s + 3× × 0.1s retry with adaptive polling: wait until `scratch.iterdir()` count is unchanged across a 0.6s window (hard cap 5s) before `rmtree`. Sponsor live-verified on FF7R: no more `[REPLAY] WARN: 清理 ... 失败`.
-
-### commit `e59b5f0` (BMP → PNG migration, addon + 11 .py files)
-
-- [x] **C++ addon (`frame_capture.cpp`)**:
-  - 3 new ini knobs: `FC_UsePNG` (default 1), `FC_PostUIDownscaleW` (960), `FC_PostUIDownscaleH` (540).
-  - `save_worker_fn` branches on `g_use_png` to call `stbi_write_png` (with stride). Pre-UI and post-UI paths both go through the toggle.
-  - Post-UI extra downscale to 960×540 — only fires when source is larger AND `g_post_ui_dscale_w/h > 0`. In `--ui-mode ui` (single stream feeding HDF5) the same field is repurposed but `g_both_capture` is false, so post-UI block isn't reached → no degradation of ML data.
-  - Filenames: `BackBuffer.bmp` / `BackBufferUI.bmp` / `survey_skip_NNN_BackBuffer.bmp` → `.png` when `g_use_png=1`.
-  - Worker pool: `NUM_WORKERS 2→4`, `MAX_QUEUE 16→32` to absorb PNG encode cost (~10× slower than BMP memcpy).
-- [x] **Python pipeline** (11 files): all glob patterns (`*BackBuffer.bmp` → `*BackBuffer.png`), filename constants, `endswith()` filters, ffmpeg input patterns, regex parsers in `pack_hdf5.py`, and `verify_replay.py` / `verify_auto_play.py` test fixtures. `cv2.imdecode` calls didn't need changes (format-agnostic).
-- [x] **`main.py:945`**: PACK-style `"[VIDEO] 开始生成 video.mp4（如不需要可加 --no-video 跳过）…"` announcement before fps-estimation log (per sponsor request).
-- [x] **`scripts/build.ps1`** produces `frame_capture.addon` (210 KB) without errors. `scripts/verify_replay.py` reports `33/33 passed`.
-
-### commit `3fab8a4` (EXE bundling fix)
-
-- [x] **`scripts/build-exe.ps1`** was missing `--include-data-dir=profiles=profiles`. Sponsor unzipped `unicap-1.0.5.zip` and got `[REPLAY] profile load failed: profiles 目录不存在: E:\downloads\unicap-1.0.5\profiles`. Fixed + added `profiles\_default.yaml` and `profiles\ff7r.yaml` to the required-asset preflight so a future regression fails the build instead of shipping. Rebuilt zip = 81.3 MB / 96 files (was 91), `dist-exe\profiles\` now contains all 4 yaml + README.
+- [x] **`tools/capture/capture_all.py:_thread_input`** — replaced `user32.GetKeyboardState(kb)` with a 256-entry `GetAsyncKeyState` loop that writes `0x80` into pressed-key slots. Mirrors the established in-repo pattern at `tools/replay/recorder.py:128-136` (which already documents this exact daemon-thread failure mode and chose the same trade-off). 6-line comment added explaining the *why*. Committed as `f6e1d0c update` on the `auto-play` branch.
+- [x] **VLM auto-play status review** (no code change) — confirmed VLMDriver code-side complete since `f854ccc`; only blocking item is sponsor's 30min FF7R live-game test of `--driver vlm`. Not actionable from agent side.
 
 ## Not Yet Done
 
-- [ ] **Sponsor live-fps measurement on FF7R**:
-  1. `uv run main.py launch --game-path "<ff7r>" --profile ff7 --ui-mode both` (or run the unicap.exe build); capture 60s of normal play.
-  2. Compute fps: count `*BackBuffer.png` in the session `frames/` dir / capture wall-time. Target: 5 → 15-20.
-  3. Check `%TEMP%\unicap\unicap.log1` for `FC: save queue full, dropping frame` lines. Zero or sparse = workers keeping up. Frequent = encode CPU bound; either bump `NUM_WORKERS` further or set `FC_UsePNG=0` (escape hatch in `unicap.ini`).
-  4. Eyeball FF7R itself for fps drops from the addon's encode CPU cost. If sponsor's game-side fps tanks, the worker pool is starving the render thread.
-- [ ] **Sponsor verify post-UI quality at 540p**: open one `*BackBufferUI.png` from a capture session — confirm watchdog/VLM can still see HUD/menus clearly enough. If 540p too fuzzy, bump `FC_PostUIDownscaleH=720` in `unicap.ini`.
-- [ ] **`auto-play` branch** still points at `68e89c7` (pre-PNG). All PNG work is on `master` only; if that branch matters going forward, ff-merge it to `3fab8a4`.
+- [ ] **Decide whether to ff-merge `auto-play` → `master`**, or cherry-pick `f6e1d0c` onto `master`. Right now the fix only exists on `auto-play`. `master` is still at `0dd0143` and produces broken `/kb` columns. Per `CLAUDE.md` `master` is "the main branch" — almost certainly should also get this fix. Action: `git checkout master && git merge --ff-only auto-play && git push` (auto-play is exactly `master` + this one commit, so it'll fast-forward).
+- [ ] **Update stale doc lines in `CLAUDE.md`**:
+  - Line 142: `samples keyboard (`GetKeyboardState`)` → should now say `GetAsyncKeyState`.
+  - Line 207: `capture_all._thread_input 用 `GetKeyboardState`/`XInput` 采集` — same swap. Sentiment ("bot input vs human input no difference") still holds because both paths see the same physical state. Trivial follow-up; could be folded into the merge commit or a separate `docs(claude-md):` commit.
+- [ ] **Sponsor live-fps measurement on FF7R** (carried over from prior handoff): 60s capture in `--ui-mode both`, count `*BackBuffer.png` / wall-time, target 5 → 15-20 fps. Check `%TEMP%\unicap\unicap.log1` for `save queue full` lines. Escape hatches: `FC_UsePNG=0` in `unicap.ini` reverts to BMP; bump `NUM_WORKERS 4→6` if encode-bound.
+- [ ] **Sponsor verify post-UI 540p readability for VLM** (carried over): if VLM struggles with HUD text at 540p, set `FC_PostUIDownscaleH=720` / `FC_PostUIDownscaleW=1280` in `unicap.ini`. No rebuild needed.
+- [ ] **Sponsor 30min FF7R live test of `--driver vlm`** (carried over): only way to verify VLM action JSON parses cleanly under real game frames + that 1Hz decision rate is sufficient. Check `[VLM-COST]` lines in `%TEMP%/unicap/auto_play.log` for actual hourly cost.
 
 ## Failed Approaches (Don't Repeat These)
 
-- **Synchronous BMP→PNG (option c-1)** was rejected during planning, NOT tried in code. Rationale: `runtime->capture_screenshot()` runs on a render-adjacent thread, ~30-50ms PNG encode synchronously would risk stuttering FF7R itself. The existing `save_worker_fn` infrastructure (already present for BMP) plus a worker-pool bump is the right route.
-- **Custom encode / libpng / zlib add-on**: rejected. `stb_image_write.h` was already linked in the addon (line 153/172 of `frame_capture.cpp` had `stbi_write_bmp`). Switching to `stbi_write_png` is zero new dependency.
-- **Backward-compat reading old `.bmp` recordings (Q4)**: the user explicitly chose NOT to support this. Old `_scenes/<name>/sync_NN.bmp` will fail under the new globs. Sponsor must re-record.
-- **Keeping `.bmp` extension while writing PNG bytes inside**: rejected. cv2/ffmpeg are content-detected so it would "work", but `file` command and external tools would mis-identify. Honest extension wins.
-- **Pre-`/clear` survey check** (closed last session in `68e89c7` but worth keeping in failed-list lore): ran survey before `focus_game_window()` was called → addon hadn't loaded → survey timed out. Survey check now lives in `_interactive_loop`, fires after replay.
+- **Don't use `GetKeyboardState` from a daemon polling thread**. It returns the calling thread's per-thread keyboard input queue state — for a thread with no window and no message pump, that queue is never updated, so the call returns zeros. This is the bug we just fixed, and `tools/replay/recorder.py:128-136` already had a comment explaining it; the in-repo precedent must be respected for any new daemon-thread input poller.
+- **Don't preserve toggle bits (caps/num/scroll lock low bits)**. The fix mirrors `recorder.py`'s choice of writing only `0x80` (high bit = down) when the key is physically pressed. Toggle state is not available from `GetAsyncKeyState`. Old recordings had all-zero `/kb`, so toggle data was never preserved historically anyway — no consumer has been depending on it.
+- **Don't try to parse the prior session's first git status output literally** — at session start the repo was on `master @ 3fab8a4` clean. Mid-session the user switched to `auto-play` and committed the edit themselves as `f6e1d0c update`. State shift was not driven by the agent; just documenting so the next agent doesn't get confused if they re-read the original handoff and find divergence.
 
 ## Key Decisions
 
 | Decision | Rationale |
 |---|---|
-| Switch extension `.bmp` → `.png` (Q1=yes, no compat shim) | Honest filename / content match. ffmpeg detects by extension. Python glob churn was mechanical (~50 sites). |
-| Pre-UI also PNG, not just post-UI (Q2=both) | Pre-UI 1080p BMP is the dominant write load (~8 MB/frame). Skipping it would only halve the gain. Worker pool bump (2→4) covers the encode cost. |
-| Add 3 ini knobs as escape hatches (Q3=yes) | `FC_UsePNG=0` in `unicap.ini` reverts to BMP without rebuilding `dxgi.dll`. Useful if sponsor sees game-side fps drops. |
-| No backward compat (Q4=no) | One-time re-record cost vs permanent dual-glob complexity. Sponsor's recordings are fresh anyway. |
-| Post-UI 540p downscale only in `both` mode | In `--ui-mode ui` post-UI is the ML training data — must stay full res. The downscale runs inside the `if (!task.ui_bmp_path.empty() ...)` branch, which only has data when `g_both_capture=true`. |
-| `NUM_WORKERS 2→4`, `MAX_QUEUE 16→32` | PNG encode is ~10× slower than BMP memcpy. At 30fps × pre-UI 1080p ~50ms encode = ~1500ms work/sec → needs ≥2 dedicated cores. Doubled both with margin. |
-| Trailing sync `frame=None` (from prior session, still load-bearing) | dHash on post-final-input HUD state is brittle (20-40 bit run-to-run variance). Wall-clock wait is the robust guarantee. |
+| Mirror `recorder.py:128-136` rather than invent a new approach | Established in-repo precedent; same daemon-thread problem; same byte-format compatibility (`high bit = down`). Drop-in replacement preserves the `pack_hdf5.py:18` schema doc semantics. |
+| `kb = [0] * 256` Python list instead of `(ctypes.c_ubyte * 256)()` | Downstream code does `list(kb)` then JSON-serializes; a Python list is the cleanest path. No semantic change for the JSONL output. |
+| Don't fix the `CLAUDE.md` docs in the same commit | Sponsor pushed `f6e1d0c` as a quick "update" — agent didn't get to bundle the doc fix. Rolled into "Not Yet Done" so the next agent picks it up. |
+| Land the fix on `auto-play` first, master second | The previous handoff flagged that `auto-play` branch was stale at `68e89c7` (pre-PNG). Sponsor's `f6e1d0c` lands on `auto-play` (which is now `master + 1 commit`), implicitly choosing to bring auto-play current. master can ff-merge later in one step. |
 
 ## Current State
 
-**Working** (verified offline + addon build):
-- Full BMP → PNG pipeline. Addon emits PNG when `FC_UsePNG=1` (default), worker fn branches cleanly.
-- Post-UI 540p downscale gated by `g_both_capture` AND `g_post_ui_dscale_w/h > 0`.
-- `scripts/verify_replay.py` 33/33 pass against the new `.png`-fixture tests.
-- `scripts/build.ps1` produces `dist/frame_capture.addon` (210 KB).
-- `scripts/build-exe.ps1` produces `dist-exe/unicap.exe` (59.7 MB) + `unicap-1.0.5.zip` (81.3 MB) with `profiles/` correctly bundled.
+**Working** (verified by reading committed file):
+- `tools/capture/capture_all.py:_thread_input` now polls `GetAsyncKeyState` per-key. `kb` field in `inputs.jsonl` will contain real data (`0x80` in pressed slots) instead of all-zeros.
+- HDF5 `/kb` column going forward will have meaningful per-frame keyboard state for ML training.
+- All other auto-play / capture / replay paths unchanged.
 
-**Not yet exercised live**:
-- Actual fps gain on FF7R (the whole point of this work).
-- Whether 540p is enough resolution for VLM driver to read HUD text.
-- Whether 4 workers + 32 queue is enough headroom under sustained 30fps capture.
+**Branch state**:
+- `auto-play` at `f6e1d0c`, in sync with `origin/auto-play`.
+- `master` at `0dd0143`, has *not* received the fix yet — captures done from `master` still produce broken `/kb`.
+- `vulkan-support` and `claude/sharp-tesla-8a79a6` exist but are not in scope.
 
-**Open / Known limits**:
-- Auto-play stuck on non-modal popups (out of scope; needs region-based or VLM detection).
-- `tools/capture/capture_all.py:_thread_input` line 76 still has the `GetKeyboardState` daemon-thread bug noted in earlier handoffs — not addressed in this session, affects HDF5 `/kb` for ML training.
+**Semantic shift to flag to ML consumers**:
+- Old recordings: HDF5 `/kb` column was all zeros (junk).
+- New recordings: `/kb` column has `0x80` in slots where keys were physically down at sample time.
+- If anyone has been training models on the old-data assumption that `/kb` is meaningless and excluding the column, they need to know it's now meaningful.
 
-**Uncommitted**: nothing. Working tree clean. `.env` is sponsor-local and gitignored.
+**Uncommitted Changes**: none. Working tree clean.
 
 ## Files to Know
 
 | File | Why It Matters |
 |---|---|
-| `reshade-addons/99-frame_capture/frame_capture.cpp` | All PNG/downscale logic. `save_worker_fn` (~ line 125-200) has the encode branch. Globals + ini reader near top of file. `NUM_WORKERS=4`, `MAX_QUEUE=32` near line 86. |
-| `main.py` | Line 947: `[VIDEO]` announcement. Lines 1008-1017: `_depth_path_for` extension swap. Line 1052: `*BackBuffer.png` glob. All argparse `--color` help strings updated. |
-| `scripts/build-exe.ps1` | Nuitka standalone build. Lines 110-115: `--include-data-dir` list. Lines 147-156: `$required` preflight. **Don't ship without `profiles/` here again.** |
-| `scripts/build.ps1` | C++ build. Wraps MSBuild. `-Rebuild` flag forces ReShade core rebuild too. |
-| `scripts/verify_replay.py` | 33 offline tests. Now uses `.png` fixtures. Sponsor's go-to before/after any replay-path change. |
-| `tools/capture/pack_hdf5.py` | `_RE_A` / `_RE_B` regex updated to `(png|exr)`. Comment headers reference `BackBuffer.png` triplet. |
-| `tools/auto_play/watchdog.py` / `vlm_driver.py` | `endswith(".png")` filters. `_BMP_MIN_AGE_S = 0.5` still tuned for ~50ms write time + safety margin (PNG isn't dramatically slower at 540p). |
-| `profiles/ff7r.yaml` | Watchdog timing: `sample_period_s: 3.0`, `consecutive_static_required: 2` (= 6s recovery trigger). Don't touch without reason. |
+| `tools/capture/capture_all.py` | The fix lives in `_thread_input` (lines 73-93). Any future change to per-frame input polling cadence / format must keep the `kb` schema compatible with `pack_hdf5.py:18`. |
+| `tools/replay/recorder.py:122-136` | The reference pattern. Comment explains *why* `GetAsyncKeyState` is used in a polling thread; if you ever need to poll input from another daemon thread, copy this pattern. |
+| `tools/capture/pack_hdf5.py:18` | Schema doc says `/kb uint8 (N, 256)` with "GetKeyboardState 字节数组" semantics. Comment is now technically inaccurate (we read via `GetAsyncKeyState`) but the *byte format* (`0x80 = down`) is preserved. Either leave or update the comment. Trivial. |
+| `tools/auto_play/vlm_driver.py` | VLM driver; code-complete since `f854ccc`. Untouched this session; relevant only because `--driver vlm` live-test is one of the open items. |
+| `scripts/verify_auto_play.py` | 38 offline checks for auto-play. Run before any auto-play change. Untouched this session. |
+| `CLAUDE.md:142` and `:207` | Stale `GetKeyboardState` references. To update next session along with master ff-merge. |
 
 ## Code Context
 
-**Worker function PNG branch** (`frame_capture.cpp:save_worker_fn`, current truth from commit `e59b5f0`):
-```cpp
-// Write color (RGBA8, 4 channels) — PNG (~3-4× smaller, slower encode) or BMP (uncompressed)
-if (g_use_png)
-    stbi_write_png(task.bmp_path.u8string().c_str(),
-                   (int)color_w, (int)color_h, 4, color_src, (int)color_w * 4);
-else
-    stbi_write_bmp(task.bmp_path.u8string().c_str(),
-                   (int)color_w, (int)color_h, 4, color_src);
-
-// "Both" mode: also write the post-UI BB. This stream feeds watchdog / VLM
-// (HUD / menu visibility) — full resolution is unnecessary, so downscale to
-// FC_PostUIDownscaleW/H (default 960×540) when configured.
-if (!task.ui_bmp_path.empty() && !task.ui_color_pixels.empty()) {
-    const uint8_t* ui_src = task.ui_color_pixels.data();
-    uint32_t ui_w = task.ui_width;
-    uint32_t ui_h = task.ui_height;
-    // First normalize to capture resolution if needed (matches existing behavior).
-    std::vector<uint8_t> ui_resized;
-    if (g_cap_width > 0 && g_cap_height > 0 &&
-        (ui_w != g_cap_width || ui_h != g_cap_height)) {
-        ui_resized.resize(g_cap_width * g_cap_height * 4);
-        stbir_resize_uint8(ui_src, (int)ui_w, (int)ui_h, 0,
-                           ui_resized.data(), (int)g_cap_width, (int)g_cap_height, 0, 4);
-        ui_src = ui_resized.data();
-        ui_w   = g_cap_width;
-        ui_h   = g_cap_height;
-    }
-    // Then downscale post-UI stream specifically (only applies in both-mode).
-    std::vector<uint8_t> ui_dscale;
-    if (g_post_ui_dscale_w > 0 && g_post_ui_dscale_h > 0 &&
-        (ui_w > g_post_ui_dscale_w || ui_h > g_post_ui_dscale_h)) {
-        ui_dscale.resize((size_t)g_post_ui_dscale_w * g_post_ui_dscale_h * 4);
-        stbir_resize_uint8(ui_src, (int)ui_w, (int)ui_h, 0,
-                           ui_dscale.data(),
-                           (int)g_post_ui_dscale_w, (int)g_post_ui_dscale_h, 0, 4);
-        ui_src = ui_dscale.data();
-        ui_w   = g_post_ui_dscale_w;
-        ui_h   = g_post_ui_dscale_h;
-    }
-    if (g_use_png)
-        stbi_write_png(task.ui_bmp_path.u8string().c_str(),
-                       (int)ui_w, (int)ui_h, 4, ui_src, (int)ui_w * 4);
-    else
-        stbi_write_bmp(task.ui_bmp_path.u8string().c_str(),
-                       (int)ui_w, (int)ui_h, 4, ui_src);
-}
-```
-
-**Ini knobs read at init** (`frame_capture.cpp` config-load block):
-```cpp
-reshade::get_config_value(nullptr, "ADDON", "FC_UsePNG",            g_use_png);
-reshade::get_config_value(nullptr, "ADDON", "FC_PostUIDownscaleW",  g_post_ui_dscale_w);
-reshade::get_config_value(nullptr, "ADDON", "FC_PostUIDownscaleH",  g_post_ui_dscale_h);
-```
-
-**Cleanup-grace adaptive polling** (`main.py:_run_replay` lines 691-722, current truth from commit `80ca317`):
+**The committed fix** (`tools/capture/capture_all.py:_thread_input`, current truth from `f6e1d0c`):
 ```python
-if scratch.exists():
-    stable_window_s = 0.6
-    sample_period_s = 0.15
-    deadline = time.monotonic() + 5.0
-    prev_count = -1
-    stable_since: float | None = None
-    while time.monotonic() < deadline:
-        try:
-            count = sum(1 for _ in scratch.iterdir())
-        except OSError:
-            count = prev_count
-        now = time.monotonic()
-        if count == prev_count:
-            if stable_since is None:
-                stable_since = now
-            elif now - stable_since >= stable_window_s:
-                break
-        else:
-            prev_count = count
-            stable_since = None
-        time.sleep(sample_period_s)
-    for attempt in range(3):
-        try:
-            shutil.rmtree(scratch)
-            break
-        except OSError as e:
-            if attempt == 2:
-                print(f"[REPLAY] WARN: 清理 {scratch} 失败: {e}", flush=True)
-            else:
-                time.sleep(0.2)
+while not stop.is_set():
+    t = time.time_ns()
+    # GetAsyncKeyState polls the physical key state, independent of the
+    # caller thread's message queue. GetKeyboardState would return all
+    # zeros here (daemon thread → no window → no message queue → kb state
+    # never updated). Mirror the byte format ("high bit = down") so the
+    # schema documented in pack_hdf5.py and the recorder.py path stays
+    # consistent. Toggle bits (caps/num/scroll lock) are not preserved.
+    kb = [0] * 256
+    for vk in range(256):
+        if user32.GetAsyncKeyState(vk) & 0x8000:
+            kb[vk] = 0x80
+    pt = POINT()
+    user32.GetCursorPos(ctypes.byref(pt))
+    gamepad = None
+    if xinput:
+        state = XINPUT_STATE()
+        if xinput.XInputGetState(0, ctypes.byref(state)) == 0:
+            gamepad = _parse_xinput(state)
+    log.append({"ts": t, "kb": list(kb), "mouse": [pt.x, pt.y], "gamepad": gamepad})
+    stop.wait(1 / 120)
+```
+
+**Reference pattern** (`tools/replay/recorder.py:_read_state`, lines 126-137 — DO NOT modify, this is the exemplar):
+```python
+def _read_state() -> _State:
+    s = _State()
+    # GetAsyncKeyState returns the *physical* key state, independent of the
+    # caller thread's message queue. GetKeyboardState would return all zeros
+    # in a daemon polling thread (no window → no message queue → no keyboard
+    # messages dispatched to update the per-thread state). 256 syscalls/tick
+    # × 120Hz ≈ 30k syscalls/s ≈ 3% CPU — fine.
+    kb = [0] * 256
+    for vk in range(256):
+        if _user32.GetAsyncKeyState(vk) & 0x8000:
+            kb[vk] = 0x80  # mimic GetKeyboardState's "high bit = currently down"
+    s.kb = kb
+```
+
+**JSONL schema** (`inputs.jsonl`, one entry per 120Hz tick) — unchanged, only the `kb` content quality changed:
+```json
+{"ts": 1746368420123456789, "kb": [0, 0, 128, 0, ...256 entries...], "mouse": [960, 540], "gamepad": null}
 ```
 
 ## Resume Instructions
 
-1. **Confirm state**: `git log --oneline -1` → `3fab8a4 fix(build-exe): bundle profiles/ ...`. `git status` clean.
-2. **Sponsor live-verify the fps gain**:
-   - `cd D:\dev\unicap.git` and either `uv run main.py launch ...` (dev) or unzip `unicap-1.0.5.zip` and run `unicap.exe launch ...` (release path).
-   - Capture 60s in FF7R at `--ui-mode both --profile ff7`. Stop with F9.
-   - In the session `frames/` dir, count `*BackBuffer.png` and divide by elapsed seconds. Target: 15-20 fps.
-   - Open `%TEMP%\unicap\unicap.log1`. `Select-String "save queue full"` should return zero or a handful of lines.
-3. **If queue-full warnings are frequent**:
-   - First try `FC_UsePNG=0` in `%TEMP%\unicap\unicap.ini` to revert to BMP without rebuilding. Verifies the regression isn't elsewhere.
-   - If revert fixes it, look at bumping `NUM_WORKERS` 4→6 and/or setting `stbi_write_png_compression_level=1` in `frame_capture.cpp` (faster encode, slightly larger files).
-4. **If 540p post-UI is too fuzzy for VLM**:
-   - Sponsor sets `FC_PostUIDownscaleH=720` in `unicap.ini` and `FC_PostUIDownscaleW=1280`. No rebuild needed.
-5. **Update `auto-play` branch if relevant**:
-   - `git checkout auto-play && git merge --ff-only master` (it's at `68e89c7`, would fast-forward cleanly).
+1. **Confirm state**: `git log --oneline -1` → should show `f6e1d0c update` on `auto-play`. `git status` clean. `git log master..auto-play --oneline` should show exactly `f6e1d0c update` (auto-play is master + 1).
+2. **Bring `master` in line**:
+   - `git checkout master`
+   - `git merge --ff-only auto-play` → fast-forwards `master` to `f6e1d0c`.
+   - `git push` → publishes the fix to `origin/master` so any sponsor running from `master` (the documented main branch) gets the real `/kb` data.
+   - Expected: master ends at `f6e1d0c`. If `merge --ff-only` refuses, somebody pushed to master since this handoff was written; investigate before forcing.
+3. **Clean up the doc staleness in the same merge commit OR a follow-up**:
+   - Edit `CLAUDE.md:142`: `samples keyboard (\`GetKeyboardState\`)` → `samples keyboard (\`GetAsyncKeyState\`)`
+   - Edit `CLAUDE.md:207`: `capture_all._thread_input 用 \`GetKeyboardState\`/\`XInput\` 采集` → `\`GetAsyncKeyState\`/\`XInput\``
+   - Optionally also `tools/capture/pack_hdf5.py:18` comment.
+   - `git commit -m "docs(claude-md): swap GetKeyboardState → GetAsyncKeyState in _thread_input refs"`.
+4. **(Optional, if sponsor reports back on PNG fps)**: see "Edge Cases" below for the queue-full / 540p-too-fuzzy decision tree from the prior handoff.
+5. **(Optional, no sponsor signal yet)**: pre-emptive VLM work — `--vlm-dry-run` flag (parse-only mode for first sponsor live test, doesn't inject), or prompt-cache-friendly system prompt restructure to lower Qwen-VL token cost. Both are speculative; do not start without user confirmation.
 
 ## Setup Required
 
-- FF7R at sponsor's path (`E:\games\ff7remake\…\ff7remake_.exe`)
-- Profile `ff7` (resolves to `profiles/ff7r.yaml`, in repo)
-- `dist/dxgi.dll` + `dist/frame_capture.addon` (auto-deployed by `launch`)
-- For the EXE path: `unicap-1.0.5.zip` extracted to e.g. `E:\downloads\unicap-1.0.5\`
-- `uv` for the dev path; `uv sync` for Python deps
+Same as prior handoff. Nothing changed.
+- FF7R at sponsor's path (`E:\games\ff7remake\…\ff7remake_.exe`).
+- `dist/dxgi.dll` + `dist/frame_capture.addon` (auto-deployed by `launch`).
+- `uv sync` for Python deps.
+- For VLM live test: `.env` with `VLM_API_KEY` / `VLM_BASE_URL` / `VLM_MODEL` (sponsor-local, gitignored).
 
 ## Edge Cases & Error Handling
 
-- **Capture during a stuck popup**: 6s watchdog timing fires recovery within ~6-12s. Non-modal popups (game keeps animating) defeat watchdog → still stuck. Out of scope.
-- **`--ui-mode no-ui` + `--auto-play`**: auto-overridden to `both` in `cmd_launch` so watchdog can see HUD. Explicit `--ui-mode no-ui` stays `no-ui`; watchdog falls back to pre-UI BMP, recovery quality drops.
-- **Empty recording (no input events)**: trailing sync gated by `if self._events:` — empty recordings get no trailing sync (correct).
-- **Cleanup-grace hard cap (5s)**: protects against a hung addon. Real-world stable in ~0.6-1.2s.
-- **`FC_UsePNG=0` (escape hatch)**: addon falls back to BMP filenames + content. Python side still globs `*.png` only — so during fallback, capture sessions would have `.bmp` files that Python doesn't see. **If you flip `FC_UsePNG=0`, you must also temporarily revert Python globs to `.bmp`.** The escape hatch is for the addon-only / dev-side fps debugging, not a production rollback.
+(Carried over from prior handoff — still apply, none new this session.)
+
+- **Capture during stuck modal popup**: 6s watchdog timing fires recovery within ~6-12s. Non-modal popups still defeat watchdog (out of scope).
+- **`--ui-mode no-ui` + `--auto-play`**: auto-overridden to `both` in `cmd_launch` so watchdog can see HUD. Explicit `--ui-mode no-ui` stays no-ui.
+- **`FC_UsePNG=0` (escape hatch)**: addon falls back to BMP filenames + content. **Python side still globs `*.png` only** — flipping `FC_UsePNG=0` requires also reverting Python globs to `.bmp` for that session. Not a true production rollback path, only addon-side debugging.
 - **Old `.bmp` recordings under `_scenes/`**: deliberately broken (Q4=no compat). Sponsor must re-record any scene scripts.
+- **PNG queue-full (`save queue full, dropping frame` in `unicap.log1`)**: first try `FC_UsePNG=0` to verify PNG is the cause. If it is, bump `NUM_WORKERS 4→6` in `frame_capture.cpp` and/or set `stbi_write_png_compression_level=1` (faster encode, slightly larger files). Rebuild via `scripts\build.ps1`.
+- **540p post-UI too fuzzy for VLM**: sponsor sets `FC_PostUIDownscaleH=720` and `FC_PostUIDownscaleW=1280` in `%TEMP%\unicap\unicap.ini`. No rebuild needed.
 
 ## Warnings
 
-- **DO NOT amend `3fab8a4` or earlier** — pushed to `master`. New commits on top.
-- **DO NOT remove the `if self._events:` gate** on trailing-sync emission — empty-recording E2E test relies on it.
+- **DO NOT amend `f6e1d0c`** — it's pushed to `origin/auto-play`. New commits on top.
+- **DO NOT change `if self._events:` gate** on trailing-sync emission in `tools/replay/recorder.py` — empty-recording E2E test relies on it.
 - **DO NOT lower dHash threshold back to 10** without per-sync override — sponsor's recordings will start failing on HUD-bearing scenes.
-- **DO NOT change `_BMP_MIN_AGE_S = 0.5`** in watchdog/sync_match without testing — tuned to addon's per-frame write time + safety margin. PNG at 1080p is slower than BMP, but 0.5s still has headroom; if sponsor sees lots of `None`-frame reads in long captures, this is the first knob to look at.
+- **DO NOT change `_BMP_MIN_AGE_S = 0.5`** in watchdog/sync_match without testing — tuned to addon's per-frame write time + safety margin.
 - **DO NOT commit `.env`** — sponsor-local API keys.
-- **`FC_UsePNG=0` is an addon-only switch** — see Edge Cases. Don't expect it to be a true production rollback without also reverting Python globs.
-- **`tools/capture/capture_all.py:_thread_input` line 76** still has the `GetKeyboardState` daemon-thread bug — not fixed here, affects HDF5 `/kb` for ML training. Sponsor decision pending (changes column semantics).
+- **DO NOT amend the `update` commit message** even though it's terse. The diff is small, the commit is on a feature branch, and amending pushed history is a worse outcome than a less-than-ideal commit message.
+- **`master` produces broken `/kb` until somebody ff-merges from `auto-play`** — flag this in the merge commit message so the data-pipeline team / future ML training notice the cutover point.
