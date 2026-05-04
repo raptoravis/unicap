@@ -710,9 +710,9 @@ def t_profile_reserved_keys():
         except Exception as e:
             return False, f"{name} load failed: {e}"
         rk = set(p.reserved_keys)
-        if not {"F6", "F7", "F8", "F9"}.issubset(rk):
-            return False, f"{name} missing F6/F7/F8/F9 in {rk}"
-    return True, "all 4 profiles include F6/F7/F8/F9"
+        if not {"F7", "F8", "F9"}.issubset(rk):
+            return False, f"{name} missing F7/F8/F9 in {rk}"
+    return True, "all 4 profiles include F7/F8/F9"
 
 
 def t_inputbackend_mouse_op_extension():
@@ -840,7 +840,7 @@ CHECKS = [
      t_main_underscore_filter),
 
     # profile + backend integration
-    ("profile: all 4 profiles contain F6/F7/F8/F9 in reserved_keys",
+    ("profile: all 4 profiles contain F7/F8/F9 in reserved_keys",
      t_profile_reserved_keys),
     ("backend: mouse ops 'down' / 'up' dispatch correctly",
      t_inputbackend_mouse_op_extension),

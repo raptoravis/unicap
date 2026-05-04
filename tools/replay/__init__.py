@@ -2,7 +2,7 @@
 
 Public API:
   RECORDER_VERSION         — bumped on schema change
-  ReplayRecorder           — records F6/F7-driven scene scripts
+  ReplayRecorder           — records scene scripts (auto-sync on long input gaps; F7 stop)
   ReplayPlayer, ReplayResult — replays scripts with sync-point waiting
   load_meta, write_meta, iter_events, validate_meta — schema helpers
 

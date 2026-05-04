@@ -28,10 +28,10 @@ REQUIRED_WATCHDOG_KEYS = {
 REQUIRED_INPUT_KEYS = {"prefer_gamepad", "mouse_sensitivity"}
 REQUIRED_VLM_KEYS = {"game_instructions", "frame_subsample_long_edge"}
 
-# F6/F7 = replay record/stop, F8/F9 = capture start/stop. All four are unicap's
+# F7 = replay record stop, F8/F9 = capture start/stop. These three are unicap's
 # hotkeys — auto-play (and replay player's input injection) must NEVER inject
-# them. Profile may add more entries but cannot remove these four.
-MANDATORY_RESERVED_KEYS = {"F6", "F7", "F8", "F9"}
+# them. Profile may add more entries (e.g. F6) but cannot remove these three.
+MANDATORY_RESERVED_KEYS = {"F7", "F8", "F9"}
 
 VALID_STEP_ACTIONS = {
     "move_forward", "move_back", "move_left", "move_right",

@@ -1,4 +1,4 @@
-"""ReplayRecorder — polls input state, emits diff events, handles F6/F7.
+"""ReplayRecorder — polls input state, emits diff events, auto-emits sync points.
 
 Polling cadence: 120 Hz (matches capture_all._thread_input). Each tick:
   - GetKeyboardState → 256-byte snapshot
@@ -6,12 +6,14 @@ Polling cadence: 120 Hz (matches capture_all._thread_input). Each tick:
   - XInput           → optional gamepad state
 Diff against previous snapshot → emit only changed-bit events.
 
-F6 = sync point. F7 = stop.
+F7 = stop. (No F6: sync points are auto-emitted whenever input idles for
+`auto_sync_gap_s` seconds, which is exactly where loading screens / menu
+transitions sit. The recorder copies the newest BMP from sync_scratch_dir
+as sync_NN.bmp at gap end and inserts a sync event into the script.)
 
 Sync frame source: addon writes BMPs continuously to `sync_scratch_dir` while
-fc_output_dir.txt is set. On F6 we copy the newest BMP as sync_NN.bmp into the
-scene dir. After F7 (or on close()), the scratch dir is rmtree'd to reclaim
-disk (BMPs are ~6MB each at 1080p; 30s recording = ~5GB).
+fc_output_dir.txt is set. After F7 (or on close()), the scratch dir is
+rmtree'd to reclaim disk (BMPs are ~6MB each at 1080p; 30s recording = ~5GB).
 """
 
 from __future__ import annotations
@@ -87,13 +89,11 @@ VK_RBUTTON = 0x02
 VK_MBUTTON = 0x04
 _MOUSE_VKS = {VK_LBUTTON: "left", VK_RBUTTON: "right", VK_MBUTTON: "middle"}
 
-# F6 = sync, F7 = stop. Recorder ignores F8/F9 — those belong to capture/idle loop.
-VK_F6 = 0x75
+# F7 = stop. Recorder ignores F8/F9 — those belong to capture/idle loop.
 VK_F7 = 0x76
 
-# Don't emit these as key events (recorder owns them, or they'd self-trigger
-# on F6/F7 press during recording).
-_HOTKEY_VKS = {VK_F6, VK_F7}
+# Don't emit F7 as a key event (would self-trigger on stop).
+_HOTKEY_VKS = {VK_F7}
 
 
 @dataclass(slots=True)
@@ -233,9 +233,8 @@ _GAMEPAD_BIT_NAMES = {
 class ReplayRecorder:
     """Records a scene script. Lifecycle: __init__ → start() → wait_until_done() → close().
 
-    Hotkey policy: F6 sync, F7 stop. Caller (main.py) installs the watcher
-    thread; this class polls a private flag rather than owning the GetAsyncKeyState
-    loop (keeps the polling Win32 surface consolidated in main.py).
+    Sync points are auto-emitted whenever input idles for ``auto_sync_gap_s``
+    seconds (default 1.5s). F7 stops recording.
     """
 
     def __init__(
@@ -250,6 +249,7 @@ class ReplayRecorder:
         scene_name: str,
         poll_hz: float = 120.0,
         hotkey_poll_hz: float = 50.0,
+        auto_sync_gap_s: float = 1.5,
     ) -> None:
         self.scene_dir = scene_dir
         self.sync_scratch_dir = sync_scratch_dir
@@ -262,12 +262,13 @@ class ReplayRecorder:
 
         self._poll_period = 1.0 / max(poll_hz, 1.0)
         self._hotkey_period = 1.0 / max(hotkey_poll_hz, 1.0)
+        self._auto_sync_gap_s = max(auto_sync_gap_s, 0.1)
 
         self._events: list[dict[str, Any]] = []
         self._sync_count = 0
+        self._last_input_t_rel: float | None = None
         self._t_start: float | None = None
         self._stop_evt = threading.Event()
-        self._sync_evt = threading.Event()  # set briefly when F6 fires
         self._poll_thread: threading.Thread | None = None
         self._hotkey_thread: threading.Thread | None = None
 
@@ -297,6 +298,10 @@ class ReplayRecorder:
     def wait_until_done(self, timeout: float | None = None) -> None:
         """Block until F7 pressed (or external stop()). Returns; caller calls save() then close()."""
         self._stop_evt.wait(timeout)
+
+    @property
+    def auto_sync_gap_s(self) -> float:
+        return self._auto_sync_gap_s
 
     def save(self) -> Path:
         """Write script.jsonl + meta.json. Returns scene_dir."""
@@ -366,43 +371,42 @@ class ReplayRecorder:
     # ── polling loops ──────────────────────────────────────────────────────
 
     def _poll_loop(self) -> None:
-        """120Hz state diff. Runs until stop_evt set."""
+        """120Hz state diff. Auto-emits sync at long input gaps. Runs until stop_evt set."""
         prev = _read_state()
         while not self._stop_evt.is_set():
             time.sleep(self._poll_period)
             cur = _read_state()
             t_rel = time.monotonic() - (self._t_start or time.monotonic())
             evts = _diff_events(prev, cur, t_rel)
-            self._events.extend(evts)
+            if evts:
+                if (self._last_input_t_rel is not None
+                        and t_rel - self._last_input_t_rel > self._auto_sync_gap_s):
+                    self._emit_auto_sync(self._last_input_t_rel + 0.1)
+                self._events.extend(evts)
+                self._last_input_t_rel = t_rel
             prev = cur
 
     def _hotkey_loop(self) -> None:
-        """50Hz F6/F7 polling with edge detection (debounced 300ms)."""
-        last_f6 = 0.0
+        """50Hz F7 polling with edge detection (debounced 300ms)."""
         last_f7 = 0.0
         debounce = 0.3
         while not self._stop_evt.is_set():
             time.sleep(self._hotkey_period)
             now = time.monotonic()
-            if bool(_user32.GetAsyncKeyState(VK_F6) & 0x8000) and now - last_f6 > debounce:
-                last_f6 = now
-                self._handle_sync()
             if bool(_user32.GetAsyncKeyState(VK_F7) & 0x8000) and now - last_f7 > debounce:
                 last_f7 = now
                 self._stop_evt.set()
                 return
 
-    def _handle_sync(self) -> None:
-        """F6: copy newest BMP from scratch as sync_NN.bmp + emit sync event."""
+    def _emit_auto_sync(self, t_rel: float) -> None:
+        """Auto-sync at gap end: copy newest BMP from scratch + insert sync event."""
         self._sync_count += 1
         sid = f"S-{self._sync_count:02d}"
-        t_rel = time.monotonic() - (self._t_start or time.monotonic())
-
         frame_name = f"sync_{self._sync_count:02d}.bmp"
         frame_path = self._latest_scratch_bmp()
         if frame_path is None:
-            log.warning("[REPLAY-REC] sync %s: no BMP in scratch — frame=null", sid)
-            print(f"[REPLAY-REC] sync {sid} at {t_rel:.1f}s (warn: no frame yet)",
+            log.warning("[REPLAY-REC] auto-sync %s: no BMP — frame=null", sid)
+            print(f"[REPLAY-REC] auto-sync {sid} at {t_rel:.1f}s (warn: no frame)",
                   flush=True)
             self._events.append({"type": "sync", "id": sid, "frame": None,
                                  "t_rel": t_rel, "description": ""})
@@ -410,12 +414,13 @@ class ReplayRecorder:
         try:
             shutil.copy2(frame_path, self.scene_dir / frame_name)
         except OSError as e:
-            log.warning("[REPLAY-REC] sync %s: copy failed: %s — frame=null",
+            log.warning("[REPLAY-REC] auto-sync %s: copy failed: %s — frame=null",
                         sid, e)
             self._events.append({"type": "sync", "id": sid, "frame": None,
                                  "t_rel": t_rel, "description": ""})
             return
-        print(f"[REPLAY-REC] sync {sid} at {t_rel:.1f}s", flush=True)
+        print(f"[REPLAY-REC] auto-sync {sid} at {t_rel:.1f}s "
+              f"(gap > {self._auto_sync_gap_s:.1f}s)", flush=True)
         self._events.append({"type": "sync", "id": sid, "frame": frame_name,
                              "t_rel": t_rel, "description": ""})
 

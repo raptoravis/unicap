@@ -72,7 +72,7 @@ CAP_HEIGHT = 1080
 CAP_FPS    = 30
 SURVEY_FPS = 1.0   # Python wait cadence during survey sweep
 
-VK_F6, VK_F7, VK_F8, VK_F9 = 0x75, 0x76, 0x77, 0x78
+VK_F7, VK_F8, VK_F9 = 0x76, 0x77, 0x78
 _user32 = ctypes.WinDLL("user32")
 
 
@@ -597,9 +597,9 @@ def _run_record(args, game_dir: Path, game_name: str, dataset_root: Path,
 
     print()
     print(f"┌─ 录制场景脚本: {scene_name} ─────────────────────────────┐")
-    print(f"│  F6  标视觉同步点（sync point）                       │")
     print(f"│  F7  停止录制                                         │")
     print(f"│  Ctrl+C  中止录制（不保存）                           │")
+    print(f"│  sync 自动按 long-gap 检测（默认 1.5s 无输入触发）     │")
     print(f"│  [!] 录制中 F8/F9 不响应 capture                        │")
     print(f"└──────────────────────────────────────────────────────┘\n")
 
@@ -1265,7 +1265,7 @@ def main():
     parser.add_argument("--version", action="version", version=f"unicap v{VERSION}")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("launch", help="部署 + 启动游戏 + 进入交互式 F6/F7/F8/F9 工作流")
+    p = sub.add_parser("launch", help="部署 + 启动游戏 + 进入交互式 F7/F8/F9 工作流")
     p.add_argument("--game-path", default=str(GAME_PATH))
     p.add_argument("--game-name", default="", help="游戏名（输出路径第一级，默认从 exe 推导）")
     p.add_argument("--dataset-root", default="", metavar="PATH")
@@ -1314,7 +1314,7 @@ def main():
     p.add_argument("--vlm-budget-per-hour", type=int, default=60,
                    help="VLM driver 每小时调用上限（默认 60；耗尽自动降级 keep-alive）")
     p.add_argument("--record-scene", default=None, metavar="NAME",
-                   help="录制场景脚本到 _scenes/<NAME>/；F6 标 sync, F7 停止录制；"
+                   help="录制场景脚本到 _scenes/<NAME>/；F7 停止录制；sync 自动按 long-gap 检测（默认 1.5s）；"
                         "录完进入正常 idle 等 F8。与 --replay-scene 互斥；可与 --auto-play 同用"
                         "（auto-play 在 F8 capture 阶段才生效，不污染 record）")
     p.add_argument("--replay-scene", default=None, metavar="NAME",

@@ -33,7 +33,7 @@ uv sync                                         # install Python deps (first tim
 uv run main.py launch                           # primary flow: deploy + launch + F8/F9 loop
 uv run main.py launch --ui-mode ui              # capture post-UI BackBuffer only (no survey)
 uv run main.py launch --ui-mode both            # both pre-UI and post-UI streams (needs survey)
-uv run main.py launch --record-scene tutorial   # 录制场景脚本（F6 标 sync, F7 停）；落 _scenes/tutorial/
+uv run main.py launch --record-scene tutorial   # 录制场景脚本（F7 停；sync 自动 long-gap 检测）；落 _scenes/tutorial/
 uv run main.py launch --replay-scene tutorial   # 自动回放到目标场景（缺 survey 自动跑）；之后 F8 capture
 uv run main.py launch --replay-scene tutorial --auto-play --auto-capture   # 全自动无人值守
 uv run main.py scenes --game-dir DIR             # 列出 _scenes/ 已录场景 + 元信息
@@ -164,9 +164,9 @@ The addon handles all timing and frame output; `capture_all.py` only records inp
 
 ### 录制 / 回放（replay-scene）— 反复进入测试场景
 
-`--record-scene NAME` / `--replay-scene NAME` 解决"测试时反复拉起游戏 + 进入某场景"的繁琐操作。范式 = 时序回放 + 视觉同步点：录制时按 **F6** 标关键帧（如加载界面前后），**F7** 结束；回放时按时序通过 `InputBackend` 注入键鼠手柄，遇 sync 处暂停截图与录制帧做 dHash 比对（汉明距离 ≤ 10），匹配即续注入 → 自动吸收加载时间方差。Sync 超时 30s 暂停 console 等用户按 **R** 续 / **Q** 退（exit code 2）。
+`--record-scene NAME` / `--replay-scene NAME` 解决"测试时反复拉起游戏 + 进入某场景"的繁琐操作。范式 = 时序回放 + 视觉同步点：录制时连续 polling 键鼠手柄输入，**F7** 结束；sync 锚点**自动按 long-gap 检测**（输入 idle ≥ `auto_sync_gap_s`，默认 1.5s — 加载界面 / 菜单切换天然落在 gap 上 → 自动拷一帧 BMP 作 sync），无需手动按键。回放时按时序通过 `InputBackend` 注入键鼠手柄，遇 sync 处暂停截图与录制帧做 dHash 比对（汉明距离 ≤ 10），匹配即续注入 → 自动吸收加载时间方差。Sync 超时 30s 暂停 console 等用户按 **R** 续 / **Q** 退（exit code 2）。
 
-**热键策略**：F6/F7 仅服务 record；F8/F9 始终归 capture/survey；R/Q 仅 sync paused 态响应。所有 4 个 profile 的 `reserved_keys` 必须含 F6/F7/F8/F9。回放期间 F6/F7 不响应（要中止只能 Ctrl+C in console）。
+**热键策略**：F7 = 停止录制；F8/F9 始终归 capture/survey；R/Q 仅 sync paused 态响应。所有 4 个 profile 的 `reserved_keys` 必须含 F7/F8/F9（F6 不再被 unicap 占用，profile 可继续保留也可移除）。回放期间 F7 不响应（要中止只能 Ctrl+C in console）。
 
 **已知限制**：mouse-look 录制无效 — FPS 游戏锁鼠到屏幕中心，`GetCursorPos` 永远返中心，回放时等于 no-op。设计仅支持菜单 / 导航 / 简单移动场景。
 
@@ -209,7 +209,7 @@ uv run main.py launch --game-path "...DOOMEternalx64vk.exe" --ui-mode ui --auto-
 **架构**：
 - `tools/auto_play/driver.py` — `BotDriver` ABC + `Action` / `Observation` 数据契约
 - `tools/auto_play/input_backend.py` — SendInput + vgamepad，单 Lock 串行化所有注入
-- `tools/auto_play/profile.py` — YAML schema 校验；F8/F9 强制 `reserved_keys`
+- `tools/auto_play/profile.py` — YAML schema 校验；F7/F8/F9 强制 `reserved_keys`
 - `tools/auto_play/keep_alive.py` — `KeepAliveDriver` + 公共 `step_to_actions(profile, step, rng)`（watchdog 复用）
 - `tools/auto_play/watchdog.py` — `StaticFrameWatchdog` 后台线程；连续静帧 → profile 声明的 recovery 序列
 - `tools/auto_play/runner.py` — `AutoPlayRunner` 编排 driver + watchdog + lifecycle，集成在 `_run_capture` 的 finally
