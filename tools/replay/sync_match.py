@@ -59,10 +59,10 @@ def hamming(a: int, b: int) -> int:
 
 
 def _read_latest_bmp(frames_dir: Path, min_age_s: float = 0.5) -> np.ndarray | None:
-    """Find newest *BackBuffer.bmp older than min_age_s (avoid mid-write reads).
+    """Find newest *BackBuffer.png older than min_age_s (avoid mid-write reads).
 
     Mirrors watchdog._BMP_MIN_AGE_S guard — addon takes ~50ms to write a 1920x1080
-    BMP; 0.5s is comfortably past that.
+    frame; 0.5s is comfortably past that.
     """
     if not frames_dir.is_dir():
         return None
@@ -73,7 +73,7 @@ def _read_latest_bmp(frames_dir: Path, min_age_s: float = 0.5) -> np.ndarray | N
         # Only care about main BackBuffer (not BackBufferUI for sync purposes —
         # sync ref was captured during recording with same fc_output_dir, so
         # whatever the addon writes is what we see during replay).
-        if not p.name.endswith(".bmp"):
+        if not p.name.endswith(".png"):
             continue
         try:
             m = p.stat().st_mtime

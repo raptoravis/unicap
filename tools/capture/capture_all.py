@@ -132,7 +132,7 @@ def run(fps: int = 30, duration=None, frames_dir: Path = None, inputs_out: Path 
                 break
             now = time.perf_counter()
             if now - last_print >= 14.0:
-                count = sum(1 for _ in frames_dir.glob("*BackBuffer.bmp"))
+                count = sum(1 for _ in frames_dir.glob("*BackBuffer.png"))
                 if count != last_count:
                     print(f"[CAPTURE] {elapsed:6.1f}s / {count} 帧", flush=True)
                     last_count = count
@@ -142,10 +142,10 @@ def run(fps: int = 30, duration=None, frames_dir: Path = None, inputs_out: Path 
         stop.set()
 
     elapsed = time.perf_counter() - t_start
-    bmp_count = sum(1 for _ in frames_dir.glob("*BackBuffer.bmp"))
+    bmp_count = sum(1 for _ in frames_dir.glob("*BackBuffer.png"))
     exr_count = sum(1 for _ in frames_dir.glob("*.exr"))
     fps_actual = bmp_count / elapsed if elapsed > 0 else 0
-    print(f"[CAPTURE] 完成：{bmp_count} BMP  {exr_count} EXR  {elapsed:.1f}s  {fps_actual:.1f} fps")
+    print(f"[CAPTURE] 完成：{bmp_count} PNG  {exr_count} EXR  {elapsed:.1f}s  {fps_actual:.1f} fps")
 
     t_input.join(timeout=10)
 

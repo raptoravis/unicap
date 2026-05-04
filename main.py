@@ -943,16 +943,17 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path, just_
     print(f"[CAPTURE] 总耗时 {_fmt_dur(time.perf_counter() - t_cap)}", flush=True)
 
     if getattr(args, "video", True):
+        print("[VIDEO] 开始生成 video.mp4（如不需要可加 --no-video 跳过）…")
         t_video = time.perf_counter()
-        _make_video(frames_dir, video_out, fps=0, glob_pat="*BackBuffer.bmp")
+        _make_video(frames_dir, video_out, fps=0, glob_pat="*BackBuffer.png")
         # --mask-ui: 额外生成 video_masked.mp4
         if getattr(args, "mask_ui", False):
             _make_video(frames_dir, session_dir / "video_masked.mp4", fps=0,
-                        glob_pat="*BackBuffer.bmp", mask_ui=True)
+                        glob_pat="*BackBuffer.png", mask_ui=True)
         # "both" mode: 也生成 post-UI 视频
-        if any(frames_dir.glob("*BackBufferUI.bmp")):
+        if any(frames_dir.glob("*BackBufferUI.png")):
             _make_video(frames_dir, session_dir / "video_ui.mp4", fps=0,
-                        glob_pat="*BackBufferUI.bmp")
+                        glob_pat="*BackBufferUI.png")
         print(f"[VIDEO] 总耗时 {_fmt_dur(time.perf_counter() - t_video)}")
     else:
         print("[VIDEO] --no-video 跳过；待会儿运行：")
@@ -978,7 +979,7 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path, just_
 
 # ── Video + pack ──────────────────────────────────────────────────────────────
 
-# BMP 文件名格式：<prefix> YYYY-MM-DD HH-MM-SS <ms> BackBuffer.bmp
+# 图像文件名格式：<prefix> YYYY-MM-DD HH-MM-SS <ms> BackBuffer.png
 _RE_BMP_TS = re.compile(r' (\d{4}-\d{2}-\d{2}) (\d{2}-\d{2}-\d{2}) (\d+) ')
 
 
@@ -1005,14 +1006,14 @@ def _estimate_fps(bmps: list[Path]) -> float | None:
 
 
 def _depth_path_for(bmp: Path) -> Path:
-    """Sibling depth EXR for a BMP. Filename pattern:
-       '<exe> <date> <time> <ms> BackBuffer.bmp'
+    """Sibling depth EXR for a color image. Filename pattern:
+       '<exe> <date> <time> <ms> BackBuffer.png'
        '<exe> <date> <time> <ms> DepthBuffer.exr'  (matched on suffix swap)"""
     name = bmp.name
-    if name.endswith(" BackBuffer.bmp"):
-        return bmp.with_name(name[:-len(" BackBuffer.bmp")] + " DepthBuffer.exr")
-    if name.endswith(" BackBufferUI.bmp"):
-        return bmp.with_name(name[:-len(" BackBufferUI.bmp")] + " DepthBuffer.exr")
+    if name.endswith(" BackBuffer.png"):
+        return bmp.with_name(name[:-len(" BackBuffer.png")] + " DepthBuffer.exr")
+    if name.endswith(" BackBufferUI.png"):
+        return bmp.with_name(name[:-len(" BackBufferUI.png")] + " DepthBuffer.exr")
     return bmp.with_suffix(".exr")  # fallback
 
 
@@ -1042,16 +1043,16 @@ def _apply_ui_mask_bgr(img_bgr, depth_exr: Path) -> tuple:
 
 
 def _make_video(frames_dir: Path, output: Path, fps: float = 0,
-                glob_pat: str = "*BackBuffer.bmp", mask_ui: bool = False):
+                glob_pat: str = "*BackBuffer.png", mask_ui: bool = False):
     """fps=0 时按文件名时间戳自动估算实际采集 fps，避免快进/慢放。
     mask_ui=True 时读 sibling DepthBuffer.exr，把 depth==0 的 UI 像素置黑后再编码。"""
     import cv2
 
     bmps = sorted(frames_dir.glob(glob_pat))
-    if not bmps and glob_pat == "*BackBuffer.bmp":
-        bmps = sorted(frames_dir.glob("*.bmp"))
+    if not bmps and glob_pat == "*BackBuffer.png":
+        bmps = sorted(frames_dir.glob("*.png"))
     if not bmps:
-        print("[VIDEO] 未找到 BMP 文件，跳过")
+        print("[VIDEO] 未找到帧图像，跳过")
         return
 
     if fps <= 0:
@@ -1162,13 +1163,13 @@ def cmd_video(args):
     for sess in sessions:
         frames = sess / "frames"
         # 主流：BackBuffer
-        targets = [(sess / "video.mp4", "*BackBuffer.bmp", False)]
+        targets = [(sess / "video.mp4", "*BackBuffer.png", False)]
         # masked variant: 仅在 --mask-ui 时生成（独立文件，不覆盖 video.mp4）
         if args.mask_ui:
-            targets.append((sess / "video_masked.mp4", "*BackBuffer.bmp", True))
+            targets.append((sess / "video_masked.mp4", "*BackBuffer.png", True))
         # post-UI 流（both 模式才存在）
-        if any(frames.glob("*BackBufferUI.bmp")):
-            targets.append((sess / "video_ui.mp4", "*BackBufferUI.bmp", False))
+        if any(frames.glob("*BackBufferUI.png")):
+            targets.append((sess / "video_ui.mp4", "*BackBufferUI.png", False))
 
         for out, pat, mask in targets:
             if out.exists():
@@ -1333,8 +1334,8 @@ def main():
     p.add_argument("--pack", action="store_true",
                    help="F9 停止采集后立即打包 HDF5（默认不打包）")
     p.add_argument("--color", choices=["no-ui", "ui"], default="no-ui",
-                   help="--pack 时哪种 BMP 进 /color: no-ui (默认) = BackBuffer.bmp; "
-                        "ui = BackBufferUI.bmp 优先")
+                   help="--pack 时哪种图进 /color: no-ui (默认) = BackBuffer.png; "
+                        "ui = BackBufferUI.png 优先")
     p.add_argument("--normal", action="store_true",
                    help="--pack 时同时打包 /normal（默认不打包）")
     p.add_argument("--auto-play", action="store_true",
@@ -1374,7 +1375,7 @@ def main():
     p.add_argument("--game-dir", default="", metavar="DIR",
                    help="dataset-root 下的游戏目录（其下含 <YYYYMMDD_HHMMSS>/frames/ 子目录）")
     p.add_argument("--fps", type=float, default=0,
-                   help="编码 fps；默认 0 = 从 BMP 文件名时间戳自动估算（推荐）")
+                   help="编码 fps；默认 0 = 从图像文件名时间戳自动估算（推荐）")
     p.add_argument("--mask-ui", action="store_true",
                    help="额外生成 video_masked.mp4：用 sibling DepthBuffer.exr 的 depth==0 "
                         "把 UI 像素置黑（适用于 --ui-mode ui 采集 + UE4/id Tech 引擎）")
@@ -1383,8 +1384,8 @@ def main():
     p.add_argument("--game-dir", default="", metavar="DIR",
                    help="dataset-root 下的游戏目录（其下含 <YYYYMMDD_HHMMSS>/frames/ 子目录）")
     p.add_argument("--color", choices=["no-ui", "ui"], default="no-ui",
-                   help="哪种 BMP 进 /color: no-ui (默认) = BackBuffer.bmp; "
-                        "ui = BackBufferUI.bmp 优先（不存在则 fallback BackBuffer.bmp）")
+                   help="哪种图进 /color: no-ui (默认) = BackBuffer.png; "
+                        "ui = BackBufferUI.png 优先（不存在则 fallback BackBuffer.png）")
     p.add_argument("--depth", action=argparse.BooleanOptionalAction, default=True,
                    help="包含 /depth 数据集（默认开启；--no-depth 跳过 depth EXR）")
     p.add_argument("--normal", action=argparse.BooleanOptionalAction, default=False,

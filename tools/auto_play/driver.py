@@ -45,7 +45,7 @@ class Action:
 class Observation:
     """What the driver sees on each decision tick.
 
-    frame_bgr is the latest BackBuffer.bmp content (BGR uint8 ndarray) or None
+    frame_bgr is the latest BackBuffer.png content (BGR uint8 ndarray) or None
     when the watchdog hasn't read a frame yet (capture just started).
     """
 

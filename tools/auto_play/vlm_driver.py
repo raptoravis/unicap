@@ -1,6 +1,6 @@
 """VLMDriver — C-layer (vision-language model brain).
 
-Subscribes to BackBuffer.bmp at ~1 Hz, calls a configured OpenAI-compatible
+Subscribes to BackBuffer.png at ~1 Hz, calls a configured OpenAI-compatible
 VLM endpoint with the current frame + profile.vlm.game_instructions, parses
 a JSON action plan, and returns Actions for the InputBackend to inject.
 
@@ -655,11 +655,11 @@ class VLMDriver(BotDriver):
     _BMP_MIN_AGE_S = 0.5
 
     def _read_latest_frame(self) -> np.ndarray | None:
-        """Read latest BackBuffer.bmp from frames_dir.
+        """Read latest BackBuffer.png from frames_dir.
 
-        Mirrors watchdog's read pattern: prefer BackBufferUI.bmp when present
+        Mirrors watchdog's read pattern: prefer BackBufferUI.png when present
         (--ui-mode={ui,both} writes both, the post-UI variant has HUD/menus
-        which gives the model more context), fall back to BackBuffer.bmp.
+        which gives the model more context), fall back to BackBuffer.png.
         """
         if self._frames_dir is None or not self._frames_dir.is_dir():
             return None
@@ -669,7 +669,7 @@ class VLMDriver(BotDriver):
         latest_bb_mtime = -1.0
         latest_bb_path: Path | None = None
         for p in self._frames_dir.iterdir():
-            if not p.name.endswith(".bmp"):
+            if not p.name.endswith(".png"):
                 continue
             try:
                 m = p.stat().st_mtime

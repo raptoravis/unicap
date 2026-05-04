@@ -222,9 +222,9 @@ def cap_vlm_driver() -> None:
     try:
         with tempfile.TemporaryDirectory() as td:
             d = VLMDriver(profile, frames_dir=Path(td))
-            # Seed a fake BMP so _read_latest_frame returns non-None,
+            # Seed a fake PNG so _read_latest_frame returns non-None,
             # forcing the code path past the frame check.
-            bmp = Path(td) / "0001 BackBuffer.bmp"
+            bmp = Path(td) / "0001 BackBuffer.png"
             cv2.imwrite(str(bmp), np.zeros((720, 1280, 3), dtype=np.uint8))
             time.sleep(0.6)  # mtime > 500ms guard
             try:
@@ -254,10 +254,10 @@ def cap_watchdog() -> None:
     ib = InputBackend(profile)
     wd = StaticFrameWatchdog(tmp, profile, ib)
 
-    # Write 5 identical BMPs with growing mtimes
+    # Write 5 identical PNGs with growing mtimes
     img = np.full((180, 320, 3), 128, dtype=np.uint8)
     for i in range(5):
-        cv2.imwrite(str(tmp / f"frame_{i:03d} BackBuffer.bmp"), img)
+        cv2.imwrite(str(tmp / f"frame_{i:03d} BackBuffer.png"), img)
         time.sleep(0.05)
 
     wd.start()
@@ -373,7 +373,7 @@ def e2e_3_vlm_driver_budget_fallback() -> None:
     try:
         with tempfile.TemporaryDirectory() as td:
             d = VLMDriver(profile, frames_dir=Path(td))
-            bmp = Path(td) / "0001 BackBuffer.bmp"
+            bmp = Path(td) / "0001 BackBuffer.png"
             cv2.imwrite(str(bmp), np.zeros((720, 1280, 3), dtype=np.uint8))
             time.sleep(0.6)
             raised = False

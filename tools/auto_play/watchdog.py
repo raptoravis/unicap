@@ -1,4 +1,4 @@
-"""StaticFrameWatchdog — daemon thread, samples BackBuffer.bmp, triggers
+"""StaticFrameWatchdog — daemon thread, samples BackBuffer.png, triggers
 recovery Actions when frames go static for too long.
 """
 
@@ -108,14 +108,14 @@ class StaticFrameWatchdog:
             else:
                 consecutive_static = 0
 
-    # BMPs younger than this are likely still being written by the addon →
-    # cv2.imread would print "can't open/read" to stderr. 500ms is comfortably
-    # longer than addon's per-frame BMP write at 1920x1080 (~50ms).
+    # Frames younger than this are likely still being written by the addon →
+    # cv2.imdecode would fail mid-write. 500ms is comfortably longer than
+    # addon's per-frame PNG write at 1920x1080.
     _BMP_MIN_AGE_S = 0.5
 
     def _read_latest_bmp(self) -> np.ndarray | None:
-        """Prefer BackBufferUI.bmp (post-UI, has HUD/menus) when --ui-mode={ui,both}.
-        Fall back to BackBuffer.bmp under --ui-mode=no-ui or pre-UI-only sessions.
+        """Prefer BackBufferUI.png (post-UI, has HUD/menus) when --ui-mode={ui,both}.
+        Fall back to BackBuffer.png under --ui-mode=no-ui or pre-UI-only sessions.
         Watchdog needs to see UI to detect 'Game Over' / pause menus / static HUD."""
         if not self._frames_dir.is_dir():
             return None
@@ -125,14 +125,14 @@ class StaticFrameWatchdog:
         latest_bb_mtime = -1.0
         latest_bb_path: Path | None = None
         for p in self._frames_dir.iterdir():
-            if not p.name.endswith(".bmp"):
+            if not p.name.endswith(".png"):
                 continue
             try:
                 m = p.stat().st_mtime
             except OSError:
                 continue
-            # Skip BMPs likely still being written (addon writes ~50ms/frame
-            # at 1920x1080; 500ms guard is comfortable)
+            # Skip frames likely still being written; PNG encode + write
+            # at 1920x1080 takes longer than BMP, but 500ms is still comfortable.
             if now - m < self._BMP_MIN_AGE_S:
                 continue
             if "BackBufferUI" in p.name:

@@ -442,10 +442,10 @@ class ReplayRecorder:
         """Auto-sync at gap end: copy newest BMP from scratch + insert sync event."""
         self._sync_count += 1
         sid = f"S-{self._sync_count:02d}"
-        frame_name = f"sync_{self._sync_count:02d}.bmp"
+        frame_name = f"sync_{self._sync_count:02d}.png"
         frame_path = self._latest_scratch_bmp()
         if frame_path is None:
-            log.warning("[REPLAY-REC] auto-sync %s: no BMP — frame=null", sid)
+            log.warning("[REPLAY-REC] auto-sync %s: no frame — frame=null", sid)
             print(f"[REPLAY-REC] auto-sync {sid} at {t_rel:.1f}s (warn: no frame)",
                   flush=True)
             self._events.append({"type": "sync", "id": sid, "frame": None,
@@ -473,9 +473,9 @@ class ReplayRecorder:
                              "t_rel": t_rel, "description": ""})
 
     def _latest_scratch_bmp(self, min_age_s: float = 0.1) -> Path | None:
-        """Newest *BackBuffer.bmp at least `min_age_s` old (avoid addon write race).
+        """Newest *BackBuffer.png at least `min_age_s` old (avoid addon write race).
 
-        Addon takes ~50ms to write a 1920x1080 BMP; 100ms covers that plus a
+        Addon takes ~50ms to write a 1920x1080 frame; 100ms covers that plus a
         frame interval of safety margin. The selected frame is at most 100ms
         older than the gap-end moment — visually indistinguishable.
         """
@@ -485,7 +485,7 @@ class ReplayRecorder:
         latest: Path | None = None
         latest_mt = -1.0
         for p in self.sync_scratch_dir.iterdir():
-            if not p.name.endswith("BackBuffer.bmp"):
+            if not p.name.endswith("BackBuffer.png"):
                 continue
             try:
                 m = p.stat().st_mtime

@@ -57,6 +57,9 @@ static float    g_target_fps      = 30.0f;
 static bool     g_pre_ui_mode     = false;   // FC_PreUICapture: capture before HUD is drawn
 static uint32_t g_pre_ui_skip     = 0;       // FC_PreUISkipCount: skip first N no-DSV BB binds
 static bool     g_both_capture    = false;   // FC_BothCapture: also dump post-UI BB alongside pre-UI
+static bool     g_use_png         = true;    // FC_UsePNG: emit PNG (true) instead of BMP (false). Disk I/O ~3-4× lower.
+static uint32_t g_post_ui_dscale_w = 960;    // FC_PostUIDownscaleW: only applies in --ui-mode both; 0 = no downscale
+static uint32_t g_post_ui_dscale_h = 540;    // FC_PostUIDownscaleH: only applies in --ui-mode both; 0 = no downscale
 static bool     doOnce            = false;
 static bool     g_logged_textures = false;
 static int      windowSize[2]     = { 320, 560 };
@@ -76,15 +79,15 @@ struct SaveTask {
     std::vector<float>    depth_pixels;   // RGBA32F, depth_w*depth_h*4, no padding
     uint32_t              depth_w = 0, depth_h = 0;
 
-    // "Both" mode: optional second BMP holding the post-UI BackBuffer
+    // "Both" mode: optional second image holding the post-UI BackBuffer
     // (BackBufferExport_ColorTex) captured in the same frame as the pre-UI scene.
     std::filesystem::path ui_bmp_path;
     std::vector<uint8_t>  ui_color_pixels; // RGBA8
     uint32_t              ui_width = 0, ui_height = 0;
 };
 
-static constexpr size_t           MAX_QUEUE     = 16;
-static constexpr size_t           NUM_WORKERS   = 2;   // parallel save threads
+static constexpr size_t           MAX_QUEUE     = 32;  // doubled vs BMP — PNG encode ~10× slower, more in-flight slack
+static constexpr size_t           NUM_WORKERS   = 4;   // parallel save threads (was 2 for BMP, bumped for PNG encode cost)
 static std::vector<std::thread>   g_save_threads;
 static std::mutex                 g_queue_mutex;
 static std::condition_variable    g_queue_cv;
@@ -149,16 +152,22 @@ static void save_worker_fn()
             color_h   = g_cap_height;
         }
 
-        // Write BMP (RGBA8, 4 channels)
-        stbi_write_bmp(task.bmp_path.u8string().c_str(),
-                       (int)color_w, (int)color_h, 4, color_src);
+        // Write color (RGBA8, 4 channels) — PNG (~3-4× smaller, slower encode) or BMP (uncompressed)
+        if (g_use_png)
+            stbi_write_png(task.bmp_path.u8string().c_str(),
+                           (int)color_w, (int)color_h, 4, color_src, (int)color_w * 4);
+        else
+            stbi_write_bmp(task.bmp_path.u8string().c_str(),
+                           (int)color_w, (int)color_h, 4, color_src);
 
-        // "Both" mode: also write the post-UI BB BMP (no resize — it's already at
-        // the runtime BB size, which equals g_cap_width/height for our use case).
+        // "Both" mode: also write the post-UI BB. This stream feeds watchdog / VLM
+        // (HUD / menu visibility) — full resolution is unnecessary, so downscale to
+        // FC_PostUIDownscaleW/H (default 960×540) when configured.
         if (!task.ui_bmp_path.empty() && !task.ui_color_pixels.empty()) {
             const uint8_t* ui_src = task.ui_color_pixels.data();
             uint32_t ui_w = task.ui_width;
             uint32_t ui_h = task.ui_height;
+            // First normalize to capture resolution if needed (matches existing behavior).
             std::vector<uint8_t> ui_resized;
             if (g_cap_width > 0 && g_cap_height > 0 &&
                 (ui_w != g_cap_width || ui_h != g_cap_height)) {
@@ -169,8 +178,24 @@ static void save_worker_fn()
                 ui_w   = g_cap_width;
                 ui_h   = g_cap_height;
             }
-            stbi_write_bmp(task.ui_bmp_path.u8string().c_str(),
-                           (int)ui_w, (int)ui_h, 4, ui_src);
+            // Then downscale post-UI stream specifically (only applies in both-mode).
+            std::vector<uint8_t> ui_dscale;
+            if (g_post_ui_dscale_w > 0 && g_post_ui_dscale_h > 0 &&
+                (ui_w > g_post_ui_dscale_w || ui_h > g_post_ui_dscale_h)) {
+                ui_dscale.resize((size_t)g_post_ui_dscale_w * g_post_ui_dscale_h * 4);
+                stbir_resize_uint8(ui_src, (int)ui_w, (int)ui_h, 0,
+                                   ui_dscale.data(),
+                                   (int)g_post_ui_dscale_w, (int)g_post_ui_dscale_h, 0, 4);
+                ui_src = ui_dscale.data();
+                ui_w   = g_post_ui_dscale_w;
+                ui_h   = g_post_ui_dscale_h;
+            }
+            if (g_use_png)
+                stbi_write_png(task.ui_bmp_path.u8string().c_str(),
+                               (int)ui_w, (int)ui_h, 4, ui_src, (int)ui_w * 4);
+            else
+                stbi_write_bmp(task.ui_bmp_path.u8string().c_str(),
+                               (int)ui_w, (int)ui_h, 4, ui_src);
         }
 
         // Write depth EXR (single-channel float; render thread already extracted scalar depth)
@@ -444,6 +469,9 @@ static void on_init_device(device*)
     reshade::get_config_value(nullptr, "ADDON", "FC_PreUICapture",   g_pre_ui_mode);
     reshade::get_config_value(nullptr, "ADDON", "FC_PreUISkipCount", g_pre_ui_skip);
     reshade::get_config_value(nullptr, "ADDON", "FC_BothCapture",    g_both_capture);
+    reshade::get_config_value(nullptr, "ADDON", "FC_UsePNG",            g_use_png);
+    reshade::get_config_value(nullptr, "ADDON", "FC_PostUIDownscaleW",  g_post_ui_dscale_w);
+    reshade::get_config_value(nullptr, "ADDON", "FC_PostUIDownscaleH",  g_post_ui_dscale_h);
 }
 
 static void on_init_swapchain(swapchain* sw, bool /*resize*/)
@@ -904,7 +932,8 @@ static void on_reshade_present(effect_runtime* runtime)
         command_list*  cmd   = queue->get_immediate_command_list();
 
         SaveTask task;
-        task.bmp_path = save_prefix; task.bmp_path += L"BackBuffer.bmp";
+        const wchar_t* color_ext = g_use_png ? L"BackBuffer.png" : L"BackBuffer.bmp";
+        task.bmp_path = save_prefix; task.bmp_path += color_ext;
 
         // ── Color capture ─────────────────────────────────────────────────────
         // use_scene_rt: color was already copied to g_pre_ui_staging in on_bind_rts_dsv
@@ -940,7 +969,7 @@ static void on_reshade_present(effect_runtime* runtime)
             }
 
             // "Both" mode: also copy BackBufferExport_ColorTex (post-UI BB) into sbi.color_staging
-            // so the worker can dump a parallel "BackBufferUI.bmp" alongside the pre-UI BMP.
+            // so the worker can dump a parallel "BackBufferUI" image alongside the pre-UI image.
             // Skip in survey mode — survey only needs one capture per skip value.
             bool do_ui = g_both_capture && !s_survey_mode;
             if (do_ui) {
@@ -1012,7 +1041,7 @@ static void on_reshade_present(effect_runtime* runtime)
             }
 
             if (do_ui) {
-                task.ui_bmp_path = save_prefix; task.ui_bmp_path += L"BackBufferUI.bmp";
+                task.ui_bmp_path = save_prefix; task.ui_bmp_path += g_use_png ? L"BackBufferUI.png" : L"BackBufferUI.bmp";
                 task.ui_width  = sbi.color_staging_w;
                 task.ui_height = sbi.color_staging_h;
                 task.ui_color_pixels.resize((size_t)task.ui_width * task.ui_height * 4);

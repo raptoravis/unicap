@@ -2,8 +2,8 @@
 FF7 Remake 帧数据 HDF5 打包脚本
 
 输入：
-  frames_dir/   — BackBuffer.bmp + DepthBuffer.exr + NormalMap.exr 三元组
-                  或纯 BMP 文件（color-only 模式）
+  frames_dir/   — BackBuffer.png + DepthBuffer.exr + NormalMap.exr 三元组
+                  或纯 PNG 文件（color-only 模式）
   inputs.jsonl  — 输入录制（~120 Hz，UTC 纳秒）
 
 输出：
@@ -22,8 +22,8 @@ FF7 Remake 帧数据 HDF5 打包脚本
   attrs: n_frames, mode, width, height, fps_est, created_at, timezone
 
 支持的文件名格式：
-  A: "ff7remake_.exe 2026-04-28 19-17-06 805 BackBuffer.bmp"   (triplet)
-  B: "ff7remake_ 2026-04-28 19-10-10_523.bmp"                  (color-only)
+  A: "ff7remake_.exe 2026-04-28 19-17-06 805 BackBuffer.png"   (triplet)
+  B: "ff7remake_ 2026-04-28 19-10-10_523.png"                  (color-only)
 
 时区：文件名为本地时间（UTC+8），inputs.jsonl 为 UTC 纳秒。
       转换：local_dt(UTC+8).timestamp() * 1e9 + ms * 1e6 → UTC ns
@@ -61,16 +61,16 @@ GAMEPAD_DIM = 7  # [buttons, lt, rt, lx, ly, rx, ry]
 # ─── 文件名解析 ───────────────────────────────────────────────────────────────
 
 # 格式 A：前缀 日期 时间 毫秒 帧类型.扩展名
-# 例：ff7remake_.exe 2026-04-28 19-17-06 805 BackBuffer.bmp
+# 例：ff7remake_.exe 2026-04-28 19-17-06 805 BackBuffer.png
 _RE_A = re.compile(
     r'^.+ (\d{4}-\d{2}-\d{2}) (\d{2}-\d{2}-\d{2}) (\d+)'
-    r' (BackBufferUI|BackBuffer|DepthBuffer|NormalMap)\.(bmp|exr)$'
+    r' (BackBufferUI|BackBuffer|DepthBuffer|NormalMap)\.(png|exr)$'
 )
 
 # 格式 B：前缀 日期 时间_毫秒.扩展名
-# 例：ff7remake_ 2026-04-28 19-10-10_523.bmp
+# 例：ff7remake_ 2026-04-28 19-10-10_523.png
 _RE_B = re.compile(
-    r'^.+ (\d{4}-\d{2}-\d{2}) (\d{2}-\d{2}-\d{2})_(\d+)\.(bmp|exr)$'
+    r'^.+ (\d{4}-\d{2}-\d{2}) (\d{2}-\d{2}-\d{2})_(\d+)\.(png|exr)$'
 )
 
 
@@ -149,7 +149,7 @@ def scan_frames(frames_dir: Path):
     else:
         frames = []
         for key, path in simples.items():
-            if path.suffix.lower() != '.bmp':
+            if path.suffix.lower() != '.png':
                 continue
             frames.append({'ts': _to_utc_ns(*key), 'bmp': path, 'bmp_ui': None,
                            'depth': None, 'normal': None})
@@ -205,10 +205,10 @@ def _encode_gamepad(gamepad) -> np.ndarray:
 # ─── 图像加载 ─────────────────────────────────────────────────────────────────
 
 def _load_bmp(path: Path) -> np.ndarray:
-    """Load BMP → RGB uint8 (H, W, 3)."""
+    """Load color image → RGB uint8 (H, W, 3)."""
     img = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if img is None:
-        raise RuntimeError(f"无法读取 BMP: {path}")
+        raise RuntimeError(f"无法读取图像: {path}")
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
@@ -236,8 +236,8 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path,
          include_depth: bool = True, include_normal: bool = False,
          color: str = 'no-ui'):
     """
-    color: 'no-ui' (默认) → BackBuffer.bmp 进 /color (--ui-mode no-ui 或 both 的 pre-UI 流)
-           'ui'           → BackBufferUI.bmp 优先 / fallback BackBuffer.bmp
+    color: 'no-ui' (默认) → BackBuffer.png 进 /color (--ui-mode no-ui 或 both 的 pre-UI 流)
+           'ui'           → BackBufferUI.png 优先 / fallback BackBuffer.png
                             (--ui-mode ui 或 both 的 post-UI 流)
     include_depth (默认 True): 写 /depth 数据集
     include_normal (默认 False): 写 /normal 数据集
@@ -251,19 +251,19 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path,
         print("[ERROR] 未找到任何有效帧，退出")
         sys.exit(1)
 
-    # 选择 primary BMP 字段：no-ui = 'bmp' (BackBuffer); ui = 'bmp_ui' fallback 'bmp'
+    # 选择 primary 颜色字段：no-ui = 'bmp' (BackBuffer); ui = 'bmp_ui' fallback 'bmp'
     primary_key = 'bmp'  # default for color='no-ui'
     if color == 'ui':
         ui_count = sum(1 for f in frames if f.get('bmp_ui'))
         if ui_count == n:
             primary_key = 'bmp_ui'
-            print(f"[SCAN] --color ui: 使用 BackBufferUI.bmp ({ui_count}/{n} 帧)")
+            print(f"[SCAN] --color ui: 使用 BackBufferUI.png ({ui_count}/{n} 帧)")
         elif ui_count > 0:
-            print(f"[SCAN] --color ui: 仅 {ui_count}/{n} 帧有 BackBufferUI.bmp，"
-                  f"integrity 不全 → 退到 BackBuffer.bmp（假设 --ui-mode ui 采集）")
+            print(f"[SCAN] --color ui: 仅 {ui_count}/{n} 帧有 BackBufferUI.png，"
+                  f"integrity 不全 → 退到 BackBuffer.png（假设 --ui-mode ui 采集）")
         else:
-            print("[SCAN] --color ui: 无 BackBufferUI.bmp → 用 BackBuffer.bmp"
-                  "（假设此 session 是 --ui-mode ui 采集，BackBuffer.bmp = post-UI）")
+            print("[SCAN] --color ui: 无 BackBufferUI.png → 用 BackBuffer.png"
+                  "（假设此 session 是 --ui-mode ui 采集，BackBuffer.png = post-UI）")
 
     # 数据集组合：color 必含；depth/normal 各自独立 opt-in/out
     if mode == 'triplet':

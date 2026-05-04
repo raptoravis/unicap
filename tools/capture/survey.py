@@ -4,7 +4,7 @@ Pre-UI skip 自动扫描工具。
 工作原理：
   1. 探测帧（skip=0）：写入 fc_skip_count.txt + fc_output_dir.txt，等待第一帧。
      addon 同时写 fc_pass_total.txt（当帧非 BB pass 总数），Python 据此计算扫描范围。
-  2. 扫描：从 (total-1) 倒数到 0，每个 skip 值等待对应的 survey_skip_NNN_BackBuffer.bmp。
+  2. 扫描：从 (total-1) 倒数到 0，每个 skip 值等待对应的 survey_skip_NNN_BackBuffer.png。
   3. 分析：对相邻帧做加权差分（HUD 区域权重加倍），差分最大处为 UI 合成点。
 
 1-frame lag 说明：
@@ -47,12 +47,12 @@ def _read_pass_total(game_dir: Path) -> int | None:
 def _wait_for_bmp(survey_dir: Path, skip: int, timeout: float,
                   mtime_floor: float,
                   abort: threading.Event | None = None) -> Path | None:
-    """等待 survey_skip_NNN_BackBuffer.bmp 出现。
+    """等待 survey_skip_NNN_BackBuffer.png 出现。
 
     用 mtime_floor 排除上轮 survey 的同名残留：addon 在 wait_per_skip 期间
     会重复覆盖同一文件，主动 unlink 会和 addon 写盘抢锁导致 WinError 32。
     """
-    target = survey_dir / f"survey_skip_{skip:03d}_BackBuffer.bmp"
+    target = survey_dir / f"survey_skip_{skip:03d}_BackBuffer.png"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if abort is not None and abort.is_set():
@@ -277,7 +277,7 @@ def run(
     if total == 1 and 0 in captured:
         print("\n[SURVEY] 警告：该游戏仅 1 个非 BB pass，无法做 boundary 分析。")
         print("         skip=0 是唯一可选值；pre-UI 帧能否采到取决于游戏管线。")
-        print("         建议：先打开 survey_skip_000_BackBuffer.bmp 检查是否含 UI；")
+        print("         建议：先打开 survey_skip_000_BackBuffer.png 检查是否含 UI；")
         print("               若含 UI，请改用 --ui-mode ui（跳过 survey，直抓 BackBuffer）。")
         rec_file = survey_dir / "recommended_skip.txt"
         rec_file.write_text("0", encoding="utf-8")

@@ -84,7 +84,7 @@ def t_dhash_perf():
 
 def t_wait_for_match_no_dir():
     from tools.replay.sync_match import wait_for_match
-    res = wait_for_match(Path("/nonexistent_ref.bmp"),
+    res = wait_for_match(Path("/nonexistent_ref.png"),
                          Path("/nonexistent_dir"),
                          threshold=10, timeout_s=0.5)
     return (not res.matched and res.reason == "ref_unreadable"), \
@@ -96,12 +96,12 @@ def t_wait_for_match_immediate():
     with tempfile.TemporaryDirectory() as td:
         td_p = Path(td)
         img = (np.random.rand(720, 1280, 3) * 255).astype(np.uint8)
-        ref = td_p / "ref.bmp"
+        ref = td_p / "ref.png"
         cv2.imwrite(str(ref), img)
         # Place a copy in scratch as "latest" frame, age it
         scratch = td_p / "scratch"
         scratch.mkdir()
-        latest = scratch / "test_BackBuffer.bmp"
+        latest = scratch / "test_BackBuffer.png"
         cv2.imwrite(str(latest), img)
         old = time.time() - 2.0
         os.utime(latest, (old, old))
@@ -267,17 +267,17 @@ def _make_dummy_scene(td: Path, name: str = "test", with_sync: bool = False,
     if with_sync:
         # ref + (matching or non-matching) live frame
         ref_img = (np.random.rand(360, 640, 3) * 255).astype(np.uint8)
-        ref_path = scene / "sync_01.bmp"
+        ref_path = scene / "sync_01.png"
         cv2.imwrite(str(ref_path), ref_img)
         if sync_matches:
             live_img = ref_img.copy()
         else:
             live_img = (np.random.rand(360, 640, 3) * 255).astype(np.uint8)
-        live_path = scratch / "live_BackBuffer.bmp"
+        live_path = scratch / "live_BackBuffer.png"
         cv2.imwrite(str(live_path), live_img)
         old = time.time() - 2.0
         os.utime(live_path, (old, old))
-        events.append({"type": "sync", "id": "S-01", "frame": "sync_01.bmp",
+        events.append({"type": "sync", "id": "S-01", "frame": "sync_01.png",
                        "t_rel": 0.2, "description": ""})
         events.append({"type": "key_down", "t_rel": 0.3, "vk": "S"})
         events.append({"type": "key_up",   "t_rel": 0.35, "vk": "S"})
@@ -635,7 +635,7 @@ def t_main_scenes_subcommand():
                 json.dumps({"type": "key_down", "t_rel": 0.0, "vk": "W"}),
                 json.dumps({"type": "key_up",   "t_rel": 0.1, "vk": "W"}),
                 json.dumps({"type": "sync", "id": "S-01",
-                            "frame": "sync_01.bmp", "t_rel": 0.2,
+                            "frame": "sync_01.png", "t_rel": 0.2,
                             "description": ""}),
             ]) + "\n", encoding="utf-8")
         write_meta(good / "meta.json", MetaModel(
