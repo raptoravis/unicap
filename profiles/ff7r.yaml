@@ -14,7 +14,7 @@ controls:
   interact: E
   jump: SPACE             # FF7R 不支持跳，但 keep_alive sequence 不调用
 
-reserved_keys: [F8, F9]
+reserved_keys: [F6, F7, F8, F9]
 
 input:
   prefer_gamepad: false

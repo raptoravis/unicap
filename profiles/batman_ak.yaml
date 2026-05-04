@@ -14,7 +14,7 @@ controls:
   interact: E
   jump: SPACE             # 也用作披风滑翔
 
-reserved_keys: [F8, F9]
+reserved_keys: [F6, F7, F8, F9]
 
 input:
   prefer_gamepad: false

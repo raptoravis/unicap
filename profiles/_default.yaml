@@ -14,7 +14,7 @@ controls:
   interact: E
   jump: SPACE
 
-reserved_keys: [F8, F9]   # F8/F9 强制保留（unicap 自身热键）
+reserved_keys: [F6, F7, F8, F9]   # 强制保留：F6/F7=replay record/stop, F8/F9=capture start/stop
 
 input:
   prefer_gamepad: false

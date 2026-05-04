@@ -33,6 +33,9 @@ uv sync                                         # install Python deps (first tim
 uv run main.py launch                           # primary flow: deploy + launch + F8/F9 loop
 uv run main.py launch --ui-mode ui              # capture post-UI BackBuffer only (no survey)
 uv run main.py launch --ui-mode both            # both pre-UI and post-UI streams (needs survey)
+uv run main.py launch --record-scene tutorial   # 录制场景脚本（F6 标 sync, F7 停）；落 _scenes/tutorial/
+uv run main.py launch --replay-scene tutorial   # 自动回放到目标场景（缺 survey 自动跑）；之后 F8 capture
+uv run main.py launch --replay-scene tutorial --auto-play --auto-capture   # 全自动无人值守
 uv run main.py launch --api vulkan              # Vulkan-only games (DOOM 2016/Eternal etc.)
 uv run main.py launch --auto-play               # auto-play bot 持续注入输入（无人值守采集）
 uv run main.py video  --game-dir DIR            # encode frames → MP4 (post-hoc, batch)
@@ -157,6 +160,22 @@ The addon handles all timing and frame output; `capture_all.py` only records inp
 1. `reshade_core` (ExternalProject, MSBuild) → `dist/dxgi.dll` (unused)
 2. `frame_capture` (shared library, MSVC, CXX17) → `dist/frame_capture.addon`
 3. `shaders` (custom target, always runs) → copies `.fx` files to `dist/unicap-shaders/Shaders/`
+
+### 录制 / 回放（replay-scene）— 反复进入测试场景
+
+`--record-scene NAME` / `--replay-scene NAME` 解决"测试时反复拉起游戏 + 进入某场景"的繁琐操作。范式 = 时序回放 + 视觉同步点：录制时按 **F6** 标关键帧（如加载界面前后），**F7** 结束；回放时按时序通过 `InputBackend` 注入键鼠手柄，遇 sync 处暂停截图与录制帧做 dHash 比对（汉明距离 ≤ 10），匹配即续注入 → 自动吸收加载时间方差。Sync 超时 30s 暂停 console 等用户按 **R** 续 / **Q** 退（exit code 2）。
+
+**热键策略**：F6/F7 仅服务 record；F8/F9 始终归 capture/survey；R/Q 仅 sync paused 态响应。所有 4 个 profile 的 `reserved_keys` 必须含 F6/F7/F8/F9。回放期间 F6/F7 不响应（要中止只能 Ctrl+C in console）。
+
+**已知限制**：mouse-look 录制无效 — FPS 游戏锁鼠到屏幕中心，`GetCursorPos` 永远返中心，回放时等于 no-op。设计仅支持菜单 / 导航 / 简单移动场景。
+
+**布局**：`DATASET_ROOT/<game>/_scenes/<name>/` 含 `script.jsonl`（event 流）+ `meta.json`（窗口尺寸 / 游戏 / 时间戳 / per-sync 阈值）+ `sync_NN.bmp`（视觉锚点）。`_*` 前缀子目录不进 `pack` / `video` 扫描。回放前缺 `survey/recommended_skip.txt` 自动跑 survey（exit code 3 if 失败）。
+
+**互斥**：`--record-scene` 与 `--replay-scene` 不能同时给（操作模式不同）。`--auto-play` 与两者都兼容 — 它只在 F8 capture 阶段生效，不污染 record/replay 本身。
+
+**全自动无人值守组合**：`--replay-scene foo --auto-play --auto-capture` 三连 = replay 自动到达场景 → `--auto-capture` 跳过 F8 等待 → capture 立即启动 → `--auto-play` bot 接管。从命令行起到无人值守采集，零按键。`--auto-capture` 也可单独用（`launch --auto-capture`）= 启动游戏后立即开 capture，省掉一次 F8。
+
+**模块**：`tools/replay/`（recorder.py / player.py / sync_match.py / schema.py / __init__.py）；`scripts/verify_replay.py` = sponsor 一条命令跑 23 个 offline 测试。Live-game E2E（FF7R 录 + 第二天回放）由 sponsor 实机验收。
 
 ### 自动玩游戏（auto-play）— 无人值守采集
 

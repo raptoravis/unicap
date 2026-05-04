@@ -260,17 +260,22 @@ class InputBackend:
                 dx = int(action.payload.get("dx", 0))
                 dy = int(action.payload.get("dy", 0))
                 self._send_mouse(dx, dy, MOUSEEVENTF_MOVE)
-            elif op == "click":
+            elif op in ("click", "down", "up"):
                 button = action.payload.get("button", "left")
                 down_flag, up_flag = {
                     "left":  (MOUSEEVENTF_LEFTDOWN,   MOUSEEVENTF_LEFTUP),
                     "right": (MOUSEEVENTF_RIGHTDOWN,  MOUSEEVENTF_RIGHTUP),
                     "middle":(MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
                 }.get(button, (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP))
-                self._send_mouse(0, 0, down_flag)
-                if action.duration_ms > 0:
-                    time.sleep(action.duration_ms / 1000.0)
-                self._send_mouse(0, 0, up_flag)
+                if op == "click":
+                    self._send_mouse(0, 0, down_flag)
+                    if action.duration_ms > 0:
+                        time.sleep(action.duration_ms / 1000.0)
+                    self._send_mouse(0, 0, up_flag)
+                elif op == "down":
+                    self._send_mouse(0, 0, down_flag)
+                else:  # op == "up"
+                    self._send_mouse(0, 0, up_flag)
             else:
                 raise ValueError(f"未知 mouse op: {op!r}")
 
@@ -297,18 +302,25 @@ class InputBackend:
                       op, action.payload)
         with self._lock:
             try:
-                if op == "button":
+                if op in ("button", "button_down", "button_up"):
                     name = action.payload.get("button", "")
                     enum_name = _GAMEPAD_BUTTON_MAP.get(name.upper())
                     if enum_name is None:
                         raise ValueError(f"未知 gamepad button: {name!r}")
                     button_enum = getattr(vgamepad.XUSB_BUTTON, enum_name)
-                    self._gamepad.press_button(button=button_enum)
-                    self._gamepad.update()
-                    if action.duration_ms > 0:
-                        time.sleep(action.duration_ms / 1000.0)
-                    self._gamepad.release_button(button=button_enum)
-                    self._gamepad.update()
+                    if op == "button":
+                        self._gamepad.press_button(button=button_enum)
+                        self._gamepad.update()
+                        if action.duration_ms > 0:
+                            time.sleep(action.duration_ms / 1000.0)
+                        self._gamepad.release_button(button=button_enum)
+                        self._gamepad.update()
+                    elif op == "button_down":
+                        self._gamepad.press_button(button=button_enum)
+                        self._gamepad.update()
+                    else:  # op == "button_up"
+                        self._gamepad.release_button(button=button_enum)
+                        self._gamepad.update()
                 elif op == "stick":
                     side = action.payload.get("side", "left")
                     x = float(action.payload.get("x", 0.0))
