@@ -638,14 +638,10 @@ def _run_replay(args, game_dir: Path, game_name: str, dataset_root: Path,
         print(f"[REPLAY] script not found: {script_path}", flush=True)
         return 2
 
-    # G-005: auto-survey if cache missing
-    ui_mode = getattr(args, "ui_mode", "no-ui")
-    needs_survey = ui_mode != "ui"
-    if needs_survey and _load_recommended_skip(dataset_root, game_name) is None:
-        print("[REPLAY] no survey cache, running survey first...", flush=True)
-        if not _run_survey(args, game_dir, game_name, dataset_root):
-            print("[REPLAY] survey failed; aborting replay", flush=True)
-            return 3
+    # NOTE: survey cache check is deferred to _interactive_loop (line ~826),
+    # which runs survey on-demand before the first capture. Running it here
+    # would fire before the game window is up — addon never sees survey
+    # sidecar writes → survey times out and aborts replay.
 
     profile_name = getattr(args, "profile", "") or game_name
     try:

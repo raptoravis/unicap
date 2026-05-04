@@ -86,17 +86,22 @@ def _read_latest_bmp(frames_dir: Path, min_age_s: float = 0.5) -> np.ndarray | N
             latest_path = p
     if latest_path is None:
         return None
+    # np.fromfile + cv2.imdecode (instead of cv2.imread) so partial/locked
+    # BMPs return None silently — imread's path-based variant prints
+    # "can't open/read file" WARN to stderr that floods the console.
     try:
-        img = cv2.imread(str(latest_path), cv2.IMREAD_COLOR)
-    except Exception:
+        data = np.fromfile(str(latest_path), dtype=np.uint8)
+    except OSError:
         return None
-    return img
+    if data.size < 100:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_COLOR)
 
 
 def wait_for_match(
     ref_path: Path,
     frames_dir: Path,
-    threshold: int = 10,
+    threshold: int = 16,
     timeout_s: float = 30.0,
     poll_interval_s: float = 0.2,
     abort_check=None,
@@ -111,7 +116,13 @@ def wait_for_match(
 
     if not ref_path.is_file():
         return MatchResult(matched=False, waited_s=0.0, reason="ref_unreadable")
-    ref_img = cv2.imread(str(ref_path), cv2.IMREAD_COLOR)
+    try:
+        ref_data = np.fromfile(str(ref_path), dtype=np.uint8)
+    except OSError:
+        return MatchResult(matched=False, waited_s=0.0, reason="ref_unreadable")
+    if ref_data.size < 100:
+        return MatchResult(matched=False, waited_s=0.0, reason="ref_unreadable")
+    ref_img = cv2.imdecode(ref_data, cv2.IMREAD_COLOR)
     if ref_img is None:
         return MatchResult(matched=False, waited_s=0.0, reason="ref_unreadable")
     ref_hash = dhash(ref_img)

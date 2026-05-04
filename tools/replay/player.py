@@ -70,7 +70,7 @@ class ReplayPlayer:
         current_window_size: tuple[int, int] | None = None,
         paused_input_provider: Callable[[], str] | None = None,
         sync_timeout_default_s: float = 30.0,
-        sync_threshold_default: int = 10,
+        sync_threshold_default: int = 16,
     ) -> None:
         """
         scene_dir: _scenes/<name>/

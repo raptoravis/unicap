@@ -686,10 +686,16 @@ class VLMDriver(BotDriver):
         latest = latest_ui_path or latest_bb_path
         if latest is None:
             return None
+        # np.fromfile + cv2.imdecode (instead of cv2.imread) so partial/locked
+        # BMPs return None silently — imread's path-based variant prints
+        # "can't open/read file" WARN to stderr that floods the console.
         try:
-            return cv2.imread(str(latest), cv2.IMREAD_COLOR)
-        except Exception:
+            data = np.fromfile(str(latest), dtype=np.uint8)
+        except OSError:
             return None
+        if data.size < 100:
+            return None
+        return cv2.imdecode(data, cv2.IMREAD_COLOR)
 
     def _subsample(self, frame: np.ndarray) -> np.ndarray:
         h, w = frame.shape[:2]

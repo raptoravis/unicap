@@ -146,10 +146,16 @@ class StaticFrameWatchdog:
         latest_path = latest_ui_path if latest_ui_path is not None else latest_bb_path
         if latest_path is None:
             return None
+        # np.fromfile + cv2.imdecode (instead of cv2.imread) so partial/locked
+        # BMPs return None silently — imread's path-based variant prints
+        # "can't open/read file" WARN to stderr that floods the console.
         try:
-            img = cv2.imread(str(latest_path), cv2.IMREAD_COLOR)
-        except Exception:
+            data = np.fromfile(str(latest_path), dtype=np.uint8)
+        except OSError:
             return None
+        if data.size < 100:  # too small to be a valid BMP header
+            return None
+        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
         if img is None:
             return None
         # Subsample to 320x180 for cheap diff

@@ -58,9 +58,12 @@ keep_alive:
     - {action: move_forward, duration_ms: 2000}
 
 watchdog:
-  sample_period_s: 6.0
+  sample_period_s: 3.0
   static_diff_threshold: 0.008
-  consecutive_static_required: 3   # FF7R cutscene 多 — 不要太敏感
+  consecutive_static_required: 2   # 6s 触发 — 教学弹窗暂停游戏后立即 static，
+                                   # 早点按 M 退掉。cutscene 误触发也无害
+                                   # （recovery 第一步先按 M 退 UI，第二步 ENTER
+                                   # 推进 cutscene — 都是想要的）
 
 vlm:
   game_instructions: |

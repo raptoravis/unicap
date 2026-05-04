@@ -340,7 +340,7 @@ class ReplayRecorder:
             window_size=self.window_size,
             mouse_origin=self.mouse_origin,
             vlm_fallback_enabled=False,
-            syncs={sid: {"hamming_threshold": 10, "timeout_s": 30}
+            syncs={sid: {"hamming_threshold": 16, "timeout_s": 30}
                    for sid in sync_ids},
         )
         write_meta(self.scene_dir / "meta.json", meta)
@@ -407,6 +407,24 @@ class ReplayRecorder:
                 self._events.extend(evts)
                 self._last_input_t_rel = t_rel
             prev = cur
+
+        # F7 (or manual stop) — emit a trailing time-marker sync at the actual
+        # stop moment so the player waits for the in-game state to settle
+        # (menu transition / loading screen still in flight after last input)
+        # before declaring "reached". frame=None deliberately: dHash on the
+        # post-final-input state is brittle (HUD text / random tip / animation
+        # state vary 20-40 bits across runs); the wall-clock wait is the
+        # robust guarantee. Press/long-gap syncs continue to do full dHash.
+        if self._events:
+            stop_t_rel = time.monotonic() - (self._t_start or time.monotonic())
+            if self._last_input_t_rel is None or stop_t_rel > self._last_input_t_rel:
+                self._sync_count += 1
+                sid = f"S-{self._sync_count:02d}"
+                self._events.append({"type": "sync", "id": sid, "frame": None,
+                                     "t_rel": stop_t_rel,
+                                     "description": "trailing time-marker"})
+                print(f"[REPLAY-REC] trailing sync {sid} at {stop_t_rel:.1f}s "
+                      "(time-only, no dHash)", flush=True)
 
     def _hotkey_loop(self) -> None:
         """50Hz F7 polling with edge detection (debounced 300ms)."""
