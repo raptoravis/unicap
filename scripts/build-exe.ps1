@@ -112,6 +112,7 @@ try {
         --include-data-files=dist/UniCap64.dll=dist/UniCap64.dll `
         --include-data-dir=shaders=shaders `
         --include-data-dir=config=config `
+        --include-data-dir=profiles=profiles `
         --include-data-files=pyproject.toml=pyproject.toml `
         --product-name=unicap `
         --file-version=$version `
@@ -150,7 +151,9 @@ $required = @(
     "dist\UniCap64.json",
     "dist\frame_capture.addon",
     "shaders\DepthToAddon.fx",
-    "config\unicapPreset.ini"
+    "config\unicapPreset.ini",
+    "profiles\_default.yaml",
+    "profiles\ff7r.yaml"
 )
 $missing = @()
 foreach ($rel in $required) {
