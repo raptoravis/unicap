@@ -1,195 +1,166 @@
-# Handoff: record-scene v1.1 — E2E partial success, cleanup-grace tuning open
+# Handoff: replay-scene v1.1 live-fix wave done — 3 open follow-ups
 
-**Generated**: 2026-05-04 17:28 CST
-**Branch**: `auto-play` (HEAD = `56a9f1d` pushed)
-**Status**: In Progress — replay-side fixes verified live; recorder-side fix not yet exercised live; one new regression to tune
+**Generated**: 2026-05-04 21:00 CST
+**Branch**: `master` (HEAD = `68e89c7`, ff-merged from `auto-play`, both pushed)
+**Status**: In Progress — code-side closed; sponsor live-verify + 2 perf/UX items open
 
 ## Goal
 
-Replace v1.0 manual `F6` sync hotkey with auto-sync (every press + long-gap fallback). Fix bugs uncovered during sponsor's first live record/replay sessions in FF7R.
+Make `--replay-scene X --auto-play --auto-capture` work as a true unattended pipeline in FF7R: replay reaches scene → capture starts automatically → bot keeps playing → no human keypresses needed.
 
-## Completed (commit 56a9f1d, pushed)
+## Completed (commit `68e89c7`, pushed to `origin/master`)
 
-- [x] F6 hotkey removed; F7 stops; sync now auto-emit by press-sync + long-gap
-- [x] `_emit_auto_sync` BMP race fix: `_latest_scratch_bmp(min_age_s=0.1)` + 3× copy retry / 50ms backoff
-- [x] `_read_state` swapped to 256× `GetAsyncKeyState` (daemon-thread safe; physical key state)
-- [x] `focus_game_window()` + `wait_for_game_foreground()` in `tools/window_manager.py`; called from `_run_replay`
-- [x] `_run_replay` finally: 300ms grace + rmtree retry 3× / 100ms backoff with visible WARN (this is the one to tune — see Not Yet Done)
-- [x] `MANDATORY_RESERVED_KEYS` reduced to `{F7,F8,F9}`
-- [x] `verify_replay.py` test assertion updated; all 33 tests pass
-
-## Live E2E results (sponsor, this session, post-56a9f1d)
-
-Command run: `launch --game-path "<ff7r>" --profile ff7 --replay-scene test --auto-play`
-(Replay only — recording on disk was a pre-fix artifact. NO new recording done with the GetAsyncKeyState fix yet.)
-
-Working ✓:
-- `[REPLAY] 等待游戏窗口出现 (ff7remake_.exe, 最多 30s)...`
-- `[REPLAY] 已聚焦游戏窗口 (hwnd=0x18103e)` — focus pull working
-- `[WINDOW] 已强制 borderless 窗口模式` — borderless transition working
-- `[REPLAY] sync S-01 matched (waited 0.9s, dist=0)`
-- `[REPLAY] sync S-02 matched (waited 5.0s, dist=6)` — non-zero dist = real picture comparison
-- `[REPLAY] sync S-03 matched (waited 0.6s, dist=3)` — non-zero dist = real picture comparison
-- `[REPLAY] reached scene test in 39.0s (recorded 38.9s, drift +0.0s)`
-
-Issue ✗:
-- `[REPLAY] WARN: 清理 D:\unicap_output\ff7remake_\_scenes\test\_replay_frames 失败: [WinError 145] 目录不是空的。` — cleanup-grace timing too tight for a 39s replay (~1170 BMPs accumulated)
-
-After replay, console correctly stopped at `[等待] 按 F8 = 采集` — sponsor expected auto-capture but only passed `--auto-play`. See Key Decisions for `--auto-capture` flag (existing, not new).
+- [x] **Survey deferred** — `main.py:_run_replay` no longer runs survey before the game window is up. Check moved to `_interactive_loop` (~line 826) which fires it after replay completes, before first capture.
+- [x] **Trailing time-marker sync** — `recorder.py:_poll_loop` emits `frame=None` sync at F7-press time. Player waits the full recorded duration before declaring "reached" (was finishing at last input event's `t_rel`, which is BEFORE the game settles the post-input transition). dHash on that post-input state was tried and proved brittle (HUD text variance) — see Failed Approaches.
+- [x] **dHash threshold 10 → 16** in `sync_match.py` / `player.py` / `recorder.py:save()`. Press-syncs on loading screens still match cleanly; cross-run HUD-text noise no longer blocks matches.
+- [x] **cv2.imread WARN flood silenced** — `watchdog.py` / `vlm_driver.py` / `sync_match.py` switched to `np.fromfile + cv2.imdecode`. Partial/locked BMPs now return `None` silently instead of OpenCV printing `can't open/read file: check file path/integrity` to stderr.
+- [x] **ff7r watchdog tightened** — `profiles/ff7r.yaml`: `sample_period_s: 6→3`, `consecutive_static_required: 3→2`. Modal popups (e.g. "Locking Onto Targets" tutorial) freeze frames; recovery now fires in 6s instead of 18s, presses M to dismiss.
 
 ## Not Yet Done
 
-- [ ] **Tune cleanup grace** in `main.py:_run_replay` finally — current 300ms + 3× × 100ms retry = 500ms worst case is insufficient for long replays. Recommended fix: 1.5s grace + 5× × 200ms retry (worst case 2.5s). Or smarter: poll until `len(list(scratch.iterdir()))` is stable for N ticks, then rmtree.
-- [ ] **Live record E2E** — sponsor needs to do a full new recording with the GetAsyncKeyState recorder fix; verify console shows `[REPLAY-REC] auto-sync S-NN at X.Xs` lines per press, and that `script.jsonl` `syncs` count matches press count + long-gap firings. The current `_scenes/test/` is a pre-fix artifact — its `script.jsonl` may have only mouse_move events. See Edge Cases below.
-- [ ] **Decide on `tools/capture/capture_all.py:_thread_input` GetKeyboardState bug** — same root cause; affects HDF5 `/kb` for ML training; out of scope for v1.1 record-scene.
-- [ ] (Cosmetic) Stale F6 references in `docs/req/replay-scene.md`, `docs/designs/*_replay-scene.md` — left intentionally to preserve v1.0 design history. CLAUDE.md is the authoritative current-state doc.
+- [ ] **Cleanup-grace tuning** in `main.py:_run_replay` finally (lines 690-708 — verified). Still 0.3s + 3× × 0.1s retry from before. Long replays (>20s, ~1000+ BMPs accumulated) leave residue with visible `[REPLAY] WARN: 清理 ... 失败` log. Two approaches:
+  - **Option A (simple)**: extend constants — `0.3s → 1.5s`, retries `3 → 5`, backoff `0.1s → 0.2s`. Worst case 2.5s.
+  - **Option B (smarter)**: poll for stable BMP count for ~600ms before rmtree (adapts to addon flush rate, more code). Reference snippet in previous handoff (commit `e1f70b7`).
+- [ ] **Sponsor live-verify the unattended pipeline**:
+  1. `rm -r D:\unicap_output\ff7remake_\_scenes\test` (drop pre-fix recording, has stale S-06 BMP-pointing trailing sync)
+  2. `uv run main.py launch --game-path "<ff7r>" --profile ff7 --record-scene test` — press a few ENTERs, F7 to stop. Console should print `[REPLAY-REC] trailing sync S-NN at X.Xs (time-only, no dHash)` as the LAST recorder line.
+  3. `uv run main.py launch --game-path "<ff7r>" --profile ff7 --replay-scene test --auto-play --auto-capture`. Expected: replay reaches scene → no `R/Q` pause prompt → capture starts → bot plays → NO `[REPLAY] WARN: 清理 ... 失败` if sponsor also picks one of the cleanup-grace options above.
+- [ ] **Capture-fps bottleneck — design call**. `--ui-mode both` (the auto-play default) produces ~5fps actual vs 30fps target because addon writes 2× 8MB BMPs + 11KB EXR per frame ≈ 480 MB/s sustained. Sponsor decision needed: (a) default `--ui-mode no-ui` for unattended ML capture (halves write load → expect ~10fps; loses post-UI for watchdog/VLM), (b) keep `both` and accept low fps, (c) addon-side BMP→PNG compression (3-4× saving, requires touching `frame_capture.cpp`'s capture path which currently calls ReShade's `runtime->capture_screenshot()`).
 
-## Failed Approaches (Don't Repeat)
+## Failed Approaches (Don't Repeat These)
 
-- **200ms dedup on press-sync** — dropped per-key syncs in rapid combos (e.g. ENTER × 3 within 240ms), making replay susceptible to dropped keys when game stutters between presses. Same-tick multi-press merging is the only dedup that survived.
-- **5s focus_game_window timeout** — too short. FF7R launcher → game PID handoff takes 10-30s on slow disks. Pulled to 30s.
-- **`input()` after focus failure** — Enter steals focus back to console. Replaced with `wait_for_game_foreground()` polling.
-- **`GetKeyboardState` in recorder daemon thread** — silently returns zeros (no message queue). Use `GetAsyncKeyState` instead.
-- **`shutil.rmtree(scratch, ignore_errors=True)` immediately on player exit** — addon still finishing in-flight BMP writes; locked file silently kept; user saw 4 GB leftover. Replaced with grace + retry + visible WARN. Now needs the grace itself extended (open task).
-- **Initial cleanup grace 300ms / retry 3× / 100ms backoff** — partially insufficient: short replays clean fine, 39s+ replays leave the WARN. Bigger grace needed.
+- **Pre-replay survey check** (was lines 641-648 of `main.py:_run_replay`): ran survey before `focus_game_window()` was called → addon hadn't loaded → no probe frame received → survey timed out → replay aborted with exit code 3. Symptom: `[REPLAY] no survey cache, running survey first... [SURVEY] × 未收到探测帧 ... [REPLAY] survey failed; aborting replay` immediately after `[启动]`. **Don't add survey checks before the game window is confirmed up.**
+- **dHash on the trailing sync** (first attempt at the trailing-sync feature, before this session's final form): emitted the trailing sync with a real BMP frame so player could dHash-verify the post-final-input scene. Best dist consistently 17-24 across runs (HUD text / random tutorial tip varies > threshold), so the sync ALWAYS missed → R/Q prompt → blocks `--auto-capture`. **Trailing sync must be `frame=None` (time-marker only).** Press-syncs and long-gap syncs in the middle of the script are fine to dHash because they typically land on loading screens / menu transitions where HUD is absent.
+- **dHash threshold 10**: too tight for any sync that lands on a HUD-bearing frame. Bumped to 16 as the new default. If a specific scene still fails, override per-sync via `meta.json` `syncs[sid].hamming_threshold`.
+- **`cv2.imread(str(path))` for live BMP polling**: OpenCV's path-based imread prints `[ WARN:1@...] global loadsave.cpp:278 cv::findDecoder imread_(...): can't open/read file` to stderr when the file is mid-write or briefly locked. Floods the console. Bytes-based `cv2.imdecode(np.fromfile(...))` returns None silently for the same failure modes.
 
 ## Key Decisions
 
 | Decision | Rationale |
 |---|---|
-| Auto-capture is `--auto-capture`, NOT `--auto-play` | `--auto-play` only injects bot input *during* capture; it does not skip the F8 wait. Skipping F8 is the role of `--auto-capture`. Three-flag combo `--replay-scene X --auto-play --auto-capture` is the unattended pipeline (CLAUDE.md:36-38). |
-| GetAsyncKeyState 256× / tick (~1ms / tick) | acceptable overhead at 120Hz; F7 stop already proved this API works in the recorder daemon thread. |
-| `min_age_s=0.1` for recorder BMP picker (vs 0.5 for sync_match) | recorder needs gap-end picture, can't be 500ms stale. 100ms = addon write time (50ms) + frame interval safety. |
-| F6 NOT removed from profile YAMLs | extra entries in `reserved_keys` are harmless; prevents breaking sponsor's external profiles. |
-| Cleanup grace > silently-failing rmtree | visible WARN tells sponsor when cleanup fails (better than silent 4GB residue). Currently the grace is just too short for long replays. |
+| Trailing sync uses `frame=None` (no dHash) | Wall-clock time alignment is the robust guarantee; visual verification on the post-input HUD frame is too brittle (run-to-run variance 20-40 bits). Press-syncs in the middle still do full dHash. |
+| dHash default 16, not e.g. 24 | 16 still rejects clearly-different scenes (a totally wrong room is usually 30+ bits); 24 risks false positives. Sponsor can per-sync override in `meta.json` if a specific sync needs more slack. |
+| Defer survey to `_interactive_loop`, not gate `_run_replay` on cached survey | `_interactive_loop` already had on-demand survey for the F8 path; reusing it makes the auto-capture path consistent and avoids touching survey code. |
+| Watchdog 6s (not 3s or 12s) | Modal popups freeze frames immediately; 6s = 2 samples is the minimum that excludes single-sample noise. Cutscene false-positive risk is low because recovery first-step is `M` (no-op outside UI) followed by `ENTER` (advances cutscenes — desired side effect anyway). |
 
 ## Current State
 
-**Working** (verified live this session):
-- `launch --replay-scene X --auto-play` — replay reaches scene; focus pull, borderless transition, sync matching all functional
-- `--auto-play` correctly does NOT skip F8 (by design)
-- Cleanup WARN is visible (the fix from this session is firing — just timing too tight)
-
-**Working** (verified offline only):
+**Working** (verified offline + reasoned about live):
 - All 33 `verify_replay.py` tests pass
-- Recorder smoke: `t_recorder_smoke_save`, `t_recorder_sidecar_cleanup`, `t_e2e_record_then_replay_round_trip` all pass
+- Code path for `--replay-scene + --auto-play + --auto-capture` is now: deploy → focus window → replay (with trailing time-marker) → reaches via wall-clock + final dHash press-sync → `_interactive_loop` checks survey cache → runs survey if absent (game now in foreground, addon responsive) → starts capture → `--auto-play` bot takes over
+
+**Working** (verified live, but on PRE-fix recording — re-verify needed):
+- `[REPLAY] 等待游戏窗口出现 → 已聚焦 → 已强制 borderless → sync S-0X matched → reached` happy path for FF7R
 
 **Not yet exercised live**:
-- Recording with the GetAsyncKeyState fix (sponsor only ran replay this session; their `_scenes/test/` recording predates the fix)
-- `--auto-capture` three-flag pipeline
+- Trailing-sync emission during recording (sponsor's `_scenes/test/` is from before this fix)
+- Full unattended pipeline end-to-end on the new code
 
-**Broken / Open**:
-- Cleanup of `_replay_frames/` after long (>20s) replays — leaves ~1000+ BMPs on disk; subsequent replay's rmtree at start handles it but interim disk usage is ~4-9 GB
+**Open / Known limits**:
+- Capture fps ~5 in `--ui-mode both` — see Not Yet Done
+- Auto-play stuck on non-modal popups (where bot's W keeps frame moving) — out of scope; needs region-based or VLM detection
+- Cleanup-grace WARN on long replays — see Not Yet Done
 
-**Uncommitted**: only `.env` (sponsor-local — DO NOT commit).
+**Uncommitted**: nothing. Working tree clean. `.env` is sponsor-local and gitignored (despite earlier commit `43d7b95 add .env` adding a placeholder).
 
 ## Files to Know
 
 | File | Why It Matters |
 |---|---|
-| `main.py:_run_replay` (~line 692-712) | Where the cleanup grace lives. **The file to edit for the cleanup-grace tuning.** |
-| `tools/replay/recorder.py` | Auto-sync logic; GetAsyncKeyState in `_read_state`; `_emit_auto_sync` BMP race fix |
-| `tools/window_manager.py` | `focus_game_window` + `wait_for_game_foreground` (this session); `force_borderless_async` (existing) |
-| `tools/replay/sync_match.py` | dHash + `_read_latest_bmp(min_age_s=0.5)` — reference implementation for grace-based race avoidance |
-| `tools/auto_play/profile.py` | `MANDATORY_RESERVED_KEYS = {"F7","F8","F9"}` |
-| `CLAUDE.md` | Authoritative current-state doc; --auto-capture / --auto-play / --replay-scene combos at lines 36-38 |
-| `D:\unicap_output\ff7remake_\_scenes\test\` | Pre-fix recording from earlier this session; sponsor should DELETE before fresh recording. Currently has ~9 GB `_replay_frames/` leftover from this run. |
+| `main.py:_run_replay` (~ line 628-709) | Survey-defer comment at top; cleanup-grace block at the bottom (lines 690-708) is THE file to edit for the open cleanup-grace task |
+| `tools/replay/recorder.py:_poll_loop` (~ line 389-420) | Trailing-sync emission lives at the end of this function; uses `frame=None` |
+| `tools/replay/sync_match.py` | dHash + `wait_for_match`; default `threshold=16`; uses `np.fromfile + cv2.imdecode` |
+| `tools/replay/player.py` | `_sync_threshold_default = 16`; null-frame sync handling at line ~154 (`if not frame: skipping match`) |
+| `tools/auto_play/watchdog.py` | `_read_latest_bmp` uses `np.fromfile + cv2.imdecode`; FF7R timing in `profiles/ff7r.yaml`, NOT here |
+| `tools/auto_play/vlm_driver.py:_read_latest_frame` | Same `np.fromfile + cv2.imdecode` pattern |
+| `profiles/ff7r.yaml` | `watchdog.sample_period_s: 3.0`, `consecutive_static_required: 2` (= 6s recovery trigger); `keep_alive.recovery` first step is press M (already correct) |
+| `scripts/verify_replay.py` | 33 offline tests; sponsor's go-to before/after any replay code change |
 
 ## Code Context
 
-**Cleanup-grace location to tune** (`main.py:_run_replay`):
+**Trailing sync emission** (`recorder.py:_poll_loop` end — current truth):
+```python
+# F7 (or manual stop) — emit a trailing time-marker sync at the actual
+# stop moment so the player waits for the in-game state to settle
+# (menu transition / loading screen still in flight after last input)
+# before declaring "reached". frame=None deliberately: dHash on the
+# post-final-input state is brittle (HUD text / random tip / animation
+# state vary 20-40 bits across runs); the wall-clock wait is the
+# robust guarantee. Press/long-gap syncs continue to do full dHash.
+if self._events:
+    stop_t_rel = time.monotonic() - (self._t_start or time.monotonic())
+    if self._last_input_t_rel is None or stop_t_rel > self._last_input_t_rel:
+        self._sync_count += 1
+        sid = f"S-{self._sync_count:02d}"
+        self._events.append({"type": "sync", "id": sid, "frame": None,
+                             "t_rel": stop_t_rel,
+                             "description": "trailing time-marker"})
+        print(f"[REPLAY-REC] trailing sync {sid} at {stop_t_rel:.1f}s "
+              "(time-only, no dHash)", flush=True)
+```
+
+**Cleanup-grace block to tune** (`main.py:_run_replay` lines 690-708):
 ```python
 finally:
     backend.close()
     _set_state(game_dir, "idle")
     # Let addon see the cleared sidecar and finish its in-flight BMP write
     # before we rmtree (otherwise the locked file gets skipped silently).
-    time.sleep(0.3)                            # ← extend this (recommend 1.5)
+    time.sleep(0.3)                           # ← Option A: bump to 1.5
     if scratch.exists():
-        for attempt in range(3):               # ← extend retries (recommend 5)
+        for attempt in range(3):              # ← Option A: bump to 5
             try:
                 shutil.rmtree(scratch)
                 break
             except OSError as e:
-                if attempt == 2:               # ← update terminal index
+                if attempt == 2:              # ← Option A: bump to 4
                     print(f"[REPLAY] WARN: 清理 {scratch} 失败: {e}",
                           flush=True)
                 else:
-                    time.sleep(0.1)            # ← extend backoff (recommend 0.2)
-return result.exit_code
+                    time.sleep(0.1)           # ← Option A: bump to 0.2
 ```
 
-**Alternative (smarter) cleanup**: poll for empty/stable dir before rmtree:
+**Pattern to copy when reading polled BMPs** (silences cv2 WARN flood):
 ```python
-# Wait for addon to fully drain (no new BMPs for N consecutive ticks)
-import time as _t
-prev_count, stable_ticks = -1, 0
-deadline = _t.monotonic() + 3.0
-while _t.monotonic() < deadline:
-    cur_count = sum(1 for _ in scratch.iterdir()) if scratch.exists() else 0
-    if cur_count == prev_count:
-        stable_ticks += 1
-        if stable_ticks >= 3:  # 600ms stable → safe to rmtree
-            break
-    else:
-        stable_ticks = 0
-    prev_count = cur_count
-    _t.sleep(0.2)
-# then rmtree as before
-```
-Pro: adapts to whatever the addon's flush rate is. Con: more code.
-
-**Sync trigger logic** (already committed, here for reference):
-```python
-if evts:
-    long_gap = (self._last_input_t_rel is not None
-                and t_rel - self._last_input_t_rel > self._auto_sync_gap_s)
-    has_press = any(e["type"] in _PRESS_EVENT_TYPES for e in evts)
-    if long_gap and self._last_input_t_rel is not None:
-        self._emit_auto_sync(self._last_input_t_rel + 0.1)
-    elif has_press:
-        self._emit_auto_sync(t_rel - 0.001)
-    self._events.extend(evts)
-    self._last_input_t_rel = t_rel
+try:
+    data = np.fromfile(str(latest_path), dtype=np.uint8)
+except OSError:
+    return None
+if data.size < 100:                          # too small for valid BMP header
+    return None
+img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+if img is None:
+    return None
 ```
 
 ## Resume Instructions
 
-1. **Confirm state**: `git log --oneline -1` should show `56a9f1d feat(replay): ...`. `git status -s` should show only `M .env`.
-2. **Pick cleanup-grace approach** with sponsor:
-   - Option A (simple): Extend constants — `time.sleep(0.3)` → `time.sleep(1.5)`, retries `3` → `5`, backoff `0.1` → `0.2`. Worst case 2.5s.
-   - Option B (smarter): Poll for stable BMP count before rmtree (see code above).
-3. **Implement chosen option** in `main.py:_run_replay` finally (~line 692-712).
-4. **Verify offline**: `uv run python scripts/verify_replay.py`
-   - Expected: `== 33/33 passed, 0 failed ==`
-5. **Live verify** (sponsor): full record → replay round trip with auto-capture.
-   - First, manually clean disk: `rm -r D:\unicap_output\ff7remake_\_scenes\test`
-   - Run record: `uv run main.py launch --game-path "<ff7r>" --profile ff7 --record-scene test`
-   - Press a few keys (e.g. ENTER × 3) and F7 to stop.
-   - Expected console: `[REPLAY-REC] auto-sync S-01 at X.Xs (gap > 1.5s)` per press, then `saved ... (NN inputs / MM syncs)` with MM ≥ press count.
-   - If sync count is suspicious (= 0 or only mouse_move events), the recorder fix didn't take effect on this build — `git diff 56a9f1d HEAD -- tools/replay/recorder.py` should show the GetAsyncKeyState swap.
-   - Run replay: `uv run main.py launch --game-path "<ff7r>" --profile ff7 --replay-scene test --auto-play --auto-capture`
-   - Expected console: focus + 3-step pipeline; replay completes; capture starts immediately (no F8 wait); after replay, **NO `[REPLAY] WARN: 清理 ... 失败`** if cleanup-grace tuning is correct.
+1. **Confirm state**: `git log --oneline -1` should show `68e89c7 fix(replay+auto-play): ...`. `git status` clean. Both `master` and `auto-play` ff'd to this SHA.
+2. **Pick cleanup-grace approach** with sponsor (A or B above).
+3. **Implement chosen option** in `main.py:_run_replay` lines 690-708.
+4. **Verify offline**: `uv run python scripts/verify_replay.py` → expect `== 33/33 passed, 0 failed ==`.
+5. **Sponsor live-verify** (steps in the Not Yet Done section above).
+6. **Address capture-fps** if sponsor wants long unattended runs to actually be useful for ML — currently a 40s `--ui-mode both` capture yields only ~200 frames.
 
 ## Setup Required
 
-- FF7R install at sponsor's path (E:\games\ff7remake\…\ff7remake_.exe)
-- Profile `ff7` (resolves to `profiles/ff7r.yaml`, exists in repo)
+- FF7R install at sponsor's path (`E:\games\ff7remake\…\ff7remake_.exe`)
+- Profile `ff7` (resolves to `profiles/ff7r.yaml`, in repo)
 - ReShade `dxgi.dll` in `dist/` (auto-deployed by `launch`)
-- `uv` installed; project deps via `uv sync`
+- `uv` installed; `uv sync` for Python deps
 
 ## Edge Cases & Error Handling
 
-- **Sponsor's existing `_scenes/test/`**: pre-fix recording from earlier this session; `script.jsonl` may be missing key events (only mouse_move). Verify by `cat _scenes/test/script.jsonl | head` — if no `key_down` lines, recording is broken and replay results from this session are coincidence on dHash matching loading screens.
-- **Long replay (> 20s)**: cleanup WARN expected until grace is tuned. Disk usage grows ~30 BMPs/s × 8MB = 240MB/s during replay. 39s replay = ~9 GB.
-- **`_replay_frames/` not cleaned**: next `--replay-scene <name>` run will rmtree it at start of `_run_replay` (player.run sets fc_output_dir then does mkdir; no explicit pre-rmtree but scratch_dir is already inside scene_dir which the start path reuses).
-  - Actually verify this: search `tools/replay/player.py` for whether scratch is wiped on entry. If not, residual files might confuse dHash matching on the next replay.
+- **Sponsor's existing `_scenes/test/`**: pre-trailing-sync recording. The S-06 in its `script.jsonl` (if present) points to a BMP file that the player WILL try to dHash-match → likely miss → R/Q prompt → blocks unattended pipeline. **Sponsor must delete and re-record before the live-verify step.**
+- **Capture during a stuck popup**: with the new 6s watchdog timing, recovery should fire within ~6-12s of the popup appearing. If popup is non-modal (game keeps animating), watchdog never sees static → still stuck. Out of scope.
+- **`--ui-mode no-ui` + `--auto-play`**: currently auto-overridden to `both` in `cmd_launch` so watchdog can see HUD. If sponsor explicitly passes `--ui-mode no-ui`, it stays `no-ui`; watchdog falls back to pre-UI BMP, recovery quality drops. CLAUDE.md documents this.
+- **Trailing sync when recording is empty (no input events)**: gated by `if self._events:` — empty recordings don't get a trailing sync (correct: nothing to wait for).
 
 ## Warnings
 
-- **DO NOT commit `.env`** — sponsor-local API keys etc.
-- **DO NOT remove F6 from profile YAMLs** — works fine with F6 still listed; touching 4 files just to remove a harmless entry isn't worth the risk.
-- **DO NOT amend 56a9f1d** — pushed to origin/auto-play already. Make a new commit on top.
-- **DO NOT silently change `auto_sync_gap_s` default** without telling sponsor — it's the one knob that defines what counts as "long gap"; sponsor calibrated to 1.5s for FF7R.
-- **`tools/capture/capture_all.py:_thread_input`** has the same `GetKeyboardState` bug (line 76). NOT fixed here. Fixing it would change `/kb` HDF5 column semantics — separate sponsor decision.
-- **Live records before fix**: any `_scenes/<name>/script.jsonl` recorded before commit 56a9f1d may have only mouse_move events. Sponsor must re-record after the fix to get real key/mouse-button/gamepad events.
+- **DO NOT commit `.env`** — sponsor-local API keys. `.env.example` is the public template.
+- **DO NOT amend `68e89c7` or earlier** — pushed to both `auto-play` and `master`. Make new commits on top.
+- **DO NOT remove the `if self._events:` gate** on the trailing-sync emission — empty-recording E2E test relies on no trailing sync being added when there are no events.
+- **DO NOT lower dHash threshold back to 10** without per-sync override — sponsor's recordings will start failing on HUD-bearing scenes.
+- **DO NOT change `_BMP_MIN_AGE_S = 0.5`** in watchdog/sync_match without testing — it's tuned to addon's ~50ms BMP write time + safety margin.
+- **`tools/capture/capture_all.py:_thread_input` line 76** still has the `GetKeyboardState` daemon-thread bug noted in earlier handoff — not fixed here, affects HDF5 `/kb` for ML training. Sponsor decision pending (changes column semantics).
