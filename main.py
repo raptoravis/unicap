@@ -688,10 +688,31 @@ def _run_replay(args, game_dir: Path, game_name: str, dataset_root: Path,
     finally:
         backend.close()
         _set_state(game_dir, "idle")
-        # Let addon see the cleared sidecar and finish its in-flight BMP write
-        # before we rmtree (otherwise the locked file gets skipped silently).
-        time.sleep(0.3)
+        # Poll for scratch-dir BMP count to stabilize before rmtree. Player
+        # already cleared fc_output_dir.txt in its finally; here we wait until
+        # the count stays put across a 0.6s window (= addon has finished its
+        # in-flight write). Hard cap 5s in case the addon is hung on heavy I/O.
         if scratch.exists():
+            stable_window_s = 0.6
+            sample_period_s = 0.15
+            deadline = time.monotonic() + 5.0
+            prev_count = -1
+            stable_since: float | None = None
+            while time.monotonic() < deadline:
+                try:
+                    count = sum(1 for _ in scratch.iterdir())
+                except OSError:
+                    count = prev_count  # transient; treat as no change
+                now = time.monotonic()
+                if count == prev_count:
+                    if stable_since is None:
+                        stable_since = now
+                    elif now - stable_since >= stable_window_s:
+                        break
+                else:
+                    prev_count = count
+                    stable_since = None
+                time.sleep(sample_period_s)
             for attempt in range(3):
                 try:
                     shutil.rmtree(scratch)
@@ -701,7 +722,7 @@ def _run_replay(args, game_dir: Path, game_name: str, dataset_root: Path,
                         print(f"[REPLAY] WARN: 清理 {scratch} 失败: {e}",
                               flush=True)
                     else:
-                        time.sleep(0.1)
+                        time.sleep(0.2)
     return result.exit_code
 
 
