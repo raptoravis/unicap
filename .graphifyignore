@@ -1,0 +1,15 @@
+# .graphifyignore
+
+reshade/
+node_modules/
+dist/
+dist-exe/
+\*.generated.py
+.git/
+.venv/
+raw/
+build/
+
+req/immediate/
+.ruff_cache
+

@@ -16,3 +16,5 @@ config/
 # vendor/**/*.dll
 # vendor/**/*.addon
 # vendor/**/*.exe
+graphify-out/cache/
+graphify-out/*
