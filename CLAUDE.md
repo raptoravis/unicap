@@ -36,6 +36,7 @@ uv run main.py launch --ui-mode both            # both pre-UI and post-UI stream
 uv run main.py launch --record-scene tutorial   # 录制场景脚本（F6 标 sync, F7 停）；落 _scenes/tutorial/
 uv run main.py launch --replay-scene tutorial   # 自动回放到目标场景（缺 survey 自动跑）；之后 F8 capture
 uv run main.py launch --replay-scene tutorial --auto-play --auto-capture   # 全自动无人值守
+uv run main.py scenes --game-dir DIR             # 列出 _scenes/ 已录场景 + 元信息
 uv run main.py launch --api vulkan              # Vulkan-only games (DOOM 2016/Eternal etc.)
 uv run main.py launch --auto-play               # auto-play bot 持续注入输入（无人值守采集）
 uv run main.py video  --game-dir DIR            # encode frames → MP4 (post-hoc, batch)

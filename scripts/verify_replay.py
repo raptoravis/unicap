@@ -571,6 +571,111 @@ def t_main_no_auto_capture_waits_f8():
     return call_log == ["wait_for_keys"], f"call_log={call_log}"
 
 
+def t_main_empty_scene_name_rejected():
+    """BUG-003 fix: --record-scene "" / --replay-scene "" must error early."""
+    import argparse
+    import main as main_mod
+    cases = [
+        argparse.Namespace(record_scene="", replay_scene=None, auto_play=False),
+        argparse.Namespace(record_scene=None, replay_scene="", auto_play=False),
+        argparse.Namespace(record_scene="   ", replay_scene=None, auto_play=False),
+    ]
+    for args in cases:
+        try:
+            main_mod._validate_launch_args(args)
+            return False, f"empty/whitespace name not rejected: {args}"
+        except SystemExit:
+            pass
+    return True, "all 3 empty/whitespace cases rejected"
+
+
+def t_main_path_traversal_scene_name_rejected():
+    """BUG-004 fix: --record-scene / --replay-scene must reject path separators / .."""
+    import argparse
+    import main as main_mod
+    cases = [
+        ("--record-scene", "../escape"),
+        ("--record-scene", "foo/bar"),
+        ("--record-scene", "foo\\bar"),
+        ("--replay-scene", "..\\evil"),
+        ("--replay-scene", "scene with space"),  # space is OK actually
+    ]
+    rejected = 0
+    accepted = 0
+    for flag, name in cases:
+        if flag == "--record-scene":
+            args = argparse.Namespace(record_scene=name, replay_scene=None, auto_play=False)
+        else:
+            args = argparse.Namespace(record_scene=None, replay_scene=name, auto_play=False)
+        try:
+            main_mod._validate_launch_args(args)
+            accepted += 1
+        except SystemExit:
+            rejected += 1
+    # First 4 must reject; "scene with space" must accept (space allowed)
+    return rejected == 4 and accepted == 1, \
+        f"rejected={rejected}/5 accepted={accepted}/5"
+
+
+def t_main_scenes_subcommand():
+    """FEAT-001: scenes subcommand lists scenes with event/sync counts."""
+    import argparse
+    import io
+    import contextlib
+    import main as main_mod
+    from tools.replay.schema import MetaModel, RECORDER_VERSION, write_meta
+    with tempfile.TemporaryDirectory() as td:
+        game_dir = Path(td)
+        scenes_dir = game_dir / "_scenes"
+        # Build a complete scene
+        good = scenes_dir / "tutorial"
+        good.mkdir(parents=True)
+        (good / "script.jsonl").write_text(
+            "\n".join([
+                json.dumps({"type": "key_down", "t_rel": 0.0, "vk": "W"}),
+                json.dumps({"type": "key_up",   "t_rel": 0.1, "vk": "W"}),
+                json.dumps({"type": "sync", "id": "S-01",
+                            "frame": "sync_01.bmp", "t_rel": 0.2,
+                            "description": ""}),
+            ]) + "\n", encoding="utf-8")
+        write_meta(good / "meta.json", MetaModel(
+            name="tutorial", version=1,
+            recorded_at="2026-05-04T20:00:00+00:00",
+            recorder_version=RECORDER_VERSION,
+            game_exe="x.exe", api="dx", window_size=(1920, 1080),
+            mouse_origin=(960, 540),
+        ))
+        # Build an incomplete scene (missing meta.json)
+        bad = scenes_dir / "broken"
+        bad.mkdir()
+        (bad / "script.jsonl").write_text("", encoding="utf-8")
+
+        args = argparse.Namespace(game_dir=str(game_dir))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            main_mod.cmd_scenes(args)
+        out = buf.getvalue()
+
+    ok = ("tutorial" in out and "2 events / 1 syncs" in out
+          and "broken" in out and "不完整" in out)
+    return ok, f"out={out!r}"
+
+
+def t_main_scenes_no_dir():
+    """scenes subcommand prints helpful message when _scenes/ doesn't exist."""
+    import argparse
+    import io
+    import contextlib
+    import main as main_mod
+    with tempfile.TemporaryDirectory() as td:
+        args = argparse.Namespace(game_dir=str(Path(td)))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            main_mod.cmd_scenes(args)
+        out = buf.getvalue()
+    return "不存在" in out and "还没录过" in out, f"out={out!r}"
+
+
 def t_main_underscore_filter():
     """cmd_video / cmd_pack must skip _scenes/, _foo/."""
     import main as main_mod
@@ -723,6 +828,14 @@ CHECKS = [
      t_main_auto_capture_skips_f8),
     ("main: without --auto-capture, loop waits F8 first (no regression)",
      t_main_no_auto_capture_waits_f8),
+    ("main: empty / whitespace scene name rejected (BUG-003)",
+     t_main_empty_scene_name_rejected),
+    ("main: path-traversal scene name rejected, normal names accepted (BUG-004)",
+     t_main_path_traversal_scene_name_rejected),
+    ("main: scenes subcommand lists complete + flags incomplete (FEAT-001)",
+     t_main_scenes_subcommand),
+    ("main: scenes subcommand handles missing _scenes/ gracefully",
+     t_main_scenes_no_dir),
     ("main: _* and survey filtered from session scan",
      t_main_underscore_filter),
 

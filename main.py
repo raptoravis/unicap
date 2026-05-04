@@ -498,12 +498,35 @@ def cmd_deploy(args):
 
 # ── Replay (record/playback scene) ────────────────────────────────────────────
 
+_SCENE_NAME_FORBIDDEN = set(r'/\:*?"<>|')
+
+
+def _validate_scene_name(flag: str, name) -> None:
+    """Reject empty / whitespace-only / path-separator-bearing scene names.
+    None means the flag wasn't passed — that's fine, caller decides.
+    Rejecting `..` substring blocks both `../foo` traversal and the rare
+    `foo..bar` weird-name case (acceptable over-rejection for safety)."""
+    if name is None:
+        return
+    if not name.strip():
+        sys.exit(f"[错误] {flag} 不能为空")
+    if name != name.strip():
+        sys.exit(f"[错误] {flag} 名字不能含前后空白：{name!r}")
+    if ".." in name:
+        sys.exit(f"[错误] {flag} 名字不能含 '..'（防路径穿越）：{name!r}")
+    bad = [c for c in name if c in _SCENE_NAME_FORBIDDEN]
+    if bad:
+        sys.exit(f"[错误] {flag} 名字含非法字符 {sorted(set(bad))}：{name!r}")
+
+
 def _validate_launch_args(args) -> None:
     """Enforce mutual exclusion between --record-scene and --replay-scene.
     --auto-play is allowed with either (or neither): bot runs in the F8-triggered
     capture phase that follows record/replay completion."""
     record = getattr(args, "record_scene", None)
     replay = getattr(args, "replay_scene", None)
+    _validate_scene_name("--record-scene", record)
+    _validate_scene_name("--replay-scene", replay)
     if record and replay:
         sys.exit("[错误] --record-scene 与 --replay-scene 不能同时使用")
 
@@ -577,7 +600,7 @@ def _run_record(args, game_dir: Path, game_name: str, dataset_root: Path,
     print(f"│  F6  标视觉同步点（sync point）                       │")
     print(f"│  F7  停止录制                                         │")
     print(f"│  Ctrl+C  中止录制（不保存）                           │")
-    print(f"│  ⚠ 录制中 F8/F9 不响应 capture                        │")
+    print(f"│  [!] 录制中 F8/F9 不响应 capture                        │")
     print(f"└──────────────────────────────────────────────────────┘\n")
 
     rec = ReplayRecorder(
@@ -1183,6 +1206,48 @@ def cmd_pack(args):
     print(f"\n[DONE] 打包 {packed}，跳过 {skipped}，失败 {failed}；总耗时 {_fmt_dur(time.perf_counter() - t_total)}")
 
 
+def cmd_scenes(args):
+    """List recorded replay scenes under <game_dir>/_scenes/."""
+    if not args.game_dir:
+        sys.exit("[错误] scenes 需要游戏目录参数：uv run main.py scenes --game-dir <DIR>")
+    game_dir = Path(args.game_dir)
+    if not game_dir.is_dir():
+        sys.exit(f"[错误] 游戏目录不存在：{game_dir}")
+
+    scenes_dir = game_dir / "_scenes"
+    if not scenes_dir.is_dir():
+        print(f"[SCENES] {scenes_dir} 不存在 — 该游戏还没录过场景")
+        return
+
+    scenes = sorted(d for d in scenes_dir.iterdir() if d.is_dir())
+    if not scenes:
+        print(f"[SCENES] {scenes_dir} 为空 — 该游戏还没录过场景")
+        return
+
+    from tools.replay import iter_events, load_meta
+
+    print(f"[SCENES] 找到 {len(scenes)} 个场景（{scenes_dir}）：\n")
+    for s in scenes:
+        meta_path = s / "meta.json"
+        script_path = s / "script.jsonl"
+        if not meta_path.is_file() or not script_path.is_file():
+            print(f"  {s.name:<24}  [!] 不完整（缺 meta.json 或 script.jsonl）")
+            continue
+        try:
+            meta = load_meta(meta_path)
+            sync_count = 0
+            input_count = 0
+            for evt in iter_events(script_path):
+                if evt.get("type") == "sync":
+                    sync_count += 1
+                else:
+                    input_count += 1
+            print(f"  {s.name:<24}  {meta.recorded_at}  "
+                  f"{input_count} events / {sync_count} syncs")
+        except Exception as e:
+            print(f"  {s.name:<24}  [!] 解析失败: {e}")
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1284,9 +1349,14 @@ def main():
     p.add_argument("--check-frames", default="0,99,499")
     p.add_argument("--check-out", default=str(DATASET_ROOT / "spot_checks"))
 
+    p = sub.add_parser("scenes", help="列出 _scenes/ 下所有已录回放场景及其元信息")
+    p.add_argument("--game-dir", default="", metavar="DIR",
+                   help="dataset-root 下的游戏目录（其下含 _scenes/ 子目录）")
+
     args = parser.parse_args()
     print(f"unicap v{VERSION}", flush=True)
-    {"launch": cmd_launch, "video": cmd_video, "pack": cmd_pack}[args.cmd](args)
+    {"launch": cmd_launch, "video": cmd_video, "pack": cmd_pack,
+     "scenes": cmd_scenes}[args.cmd](args)
 
 
 if __name__ == "__main__":
