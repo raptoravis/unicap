@@ -164,7 +164,7 @@ The addon handles all timing and frame output; `capture_all.py` only records inp
 
 ### 录制 / 回放（replay-scene）— 反复进入测试场景
 
-`--record-scene NAME` / `--replay-scene NAME` 解决"测试时反复拉起游戏 + 进入某场景"的繁琐操作。范式 = 时序回放 + 视觉同步点：录制时连续 polling 键鼠手柄输入，**F7** 结束；sync 锚点**自动按 long-gap 检测**（输入 idle ≥ `auto_sync_gap_s`，默认 1.5s — 加载界面 / 菜单切换天然落在 gap 上 → 自动拷一帧 BMP 作 sync），无需手动按键。回放时按时序通过 `InputBackend` 注入键鼠手柄，遇 sync 处暂停截图与录制帧做 dHash 比对（汉明距离 ≤ 10），匹配即续注入 → 自动吸收加载时间方差。Sync 超时 30s 暂停 console 等用户按 **R** 续 / **Q** 退（exit code 2）。
+`--record-scene NAME` / `--replay-scene NAME` 解决"测试时反复拉起游戏 + 进入某场景"的繁琐操作。范式 = 时序回放 + 视觉同步点：录制时连续 polling 键鼠手柄输入，**F7** 结束；sync 锚点**全自动**生成，两个机制并存：(1) **press-sync** — 每个 key/mouse-button/gamepad-button **press** 事件触发 sync（按键前夕拷帧），同 tick 多键合并为 1 个 sync；(2) **long-gap 兜底** — 输入 idle ≥ `auto_sync_gap_s`（默认 1.5s）也强制 sync，覆盖 mouse-look-only 段 / cinematic 段。回放时按时序通过 `InputBackend` 注入键鼠手柄，遇 sync 处暂停截图与录制帧做 dHash 比对（汉明距离 ≤ 10），匹配即续注入 → 自动吸收加载时间方差 + 单步动画延迟。Sync 超时 30s 暂停 console 等用户按 **R** 续 / **Q** 退（exit code 2）。
 
 **热键策略**：F7 = 停止录制；F8/F9 始终归 capture/survey；R/Q 仅 sync paused 态响应。所有 4 个 profile 的 `reserved_keys` 必须含 F7/F8/F9（F6 不再被 unicap 占用，profile 可继续保留也可移除）。回放期间 F7 不响应（要中止只能 Ctrl+C in console）。
 

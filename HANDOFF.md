@@ -1,252 +1,193 @@
-# Handoff: replay-scene v1.0 落地 + auto-test findings 修完
+# Handoff: record-scene v1.1 — auto-sync (no F6) + 4 bug fixes
 
-**Generated**: 2026-05-04 22:00
-**Branch**: `auto-play`（push 到 `origin/auto-play`，HEAD = `18b575f`，工作树**干净**唯一例外是 `uv.lock` mirror URL 噪音，未 commit）
-**Status**: replay-scene v1.0 + 全自动无人值守 + auto-test findings 全修；offline 33/33 PASS。两条主线（VLMDriver 30min FF7R + replay-scene 实机录回放）都等 sponsor 实机验收。
+**Generated**: 2026-05-04 17:12 CST
+**Branch**: `auto-play`
+**Status**: In Progress — code complete, **live-game E2E not yet run successfully**
 
-## Goal（本 session）
+## Goal
 
-回应 sponsor 请求"测试游戏时反复拉起游戏 + 进入某场景太繁琐"。走完 zero-review 全流程：req → impact → testplan → impl → verify → auto-test → 修 findings → commit + push。
+Replace v1.0 manual `F6` sync hotkey with auto-sync (every press + long-gap fallback), fix several bugs that surfaced during sponsor's first live record/replay session.
 
-## Completed（本 session）
+## Completed (committed earlier in session)
 
-### 主交付（2 个 commit）
+- [x] F6 hotkey removed from `recorder._hotkey_loop` — only F7 (stop) remains
+- [x] Auto-sync logic in `recorder._poll_loop`:
+  - long-gap fallback at gap start when input idle ≥ `auto_sync_gap_s` (default 1.5s)
+  - press-sync just before `key_down` / `mouse_button_down` / `gamepad_button_down`
+  - same-tick multi-press → 1 sync (one BMP, no extra dedup)
+- [x] `MANDATORY_RESERVED_KEYS` in `tools/auto_play/profile.py`: `{F6,F7,F8,F9}` → `{F7,F8,F9}`
+- [x] `scripts/verify_replay.py` test assertion updated to `{F7,F8,F9}` ⊆ reserved_keys
+- [x] All 33 offline tests pass on every change
 
-- `66af6bd feat: replay-scene v1.0 — 录制/回放游戏场景 + 全自动无人值守组合`
-  - 新增 `tools/replay/` 5 个 Python 文件（recorder + player + sync_match + schema + __init__）
-  - `--record-scene NAME` / `--replay-scene NAME` / `--auto-capture` 三个 launch flag
-  - 杀手组合：`--replay-scene foo --auto-play --auto-capture` = 0 按键无人值守
-  - InputBackend 扩展 mouse / gamepad `down` / `up` op（向后兼容）
-  - profile `MANDATORY_RESERVED_KEYS` 加 F6 / F7；4 个内置 profile 同步
-  - `pack` / `video` session 扫描加 `_*` 前缀过滤
-  - C++ 层零改动；不引新 dep（dHash 用 cv2 + numpy 自实现）
+## Completed this session (uncommitted — waiting for commit step)
 
-- `18b575f fix: replay-scene auto-test findings (BUG-003/004 + FEAT-001)`
-  - BUG-003：空字符串 / 纯空白 scene 名 → 早 fail
-  - BUG-004：scene 名禁 `..` / `/` / `\` / Win 文件名禁字符
-  - FEAT-001：新增 `scenes` 子命令列出已录场景
-
-### 文档
-
-- `docs/req/replay-scene.md` — requirements v1.0 (HIGH confidence)
-- `docs/designs/impact_20260504_replay-scene.md` — impact 分析
-- `docs/designs/testplan_20260504_replay-scene.md` — TPDD test plan
-- `docs/feedback/replay-scene_session_20260504.md` — auto-test session report (5 findings)
-- `CLAUDE.md` — 新章节"录制 / 回放（replay-scene）"
-
-### 验证
-
-- `scripts/verify_replay.py` — 33 个 offline 测试（capability + integration + offline E2E + finding-fix coverage）全绿
-- 没跑 `verify_auto_play.py`（per memory `feedback_no_auto_verify`）
+- [x] **Bug 1 fix** — WinError 32 on auto-sync BMP copy (sharing violation): `recorder._latest_scratch_bmp(min_age_s=0.1)` skips in-flight BMPs; `_emit_auto_sync` retries copy 3× / 50ms backoff
+- [x] **Bug 2 fix** — recorder caught zero key events from FF7R: `recorder._read_state()` swapped from `GetKeyboardState` (returns stale per-thread state in a windowless daemon thread) to 256× `GetAsyncKeyState(vk)` loop (physical key state)
+- [x] **Bug 3 fix** — replay's SendInput went to console, not game window: new `tools/window_manager.py:focus_game_window()` (SetForegroundWindow + SwitchToThisWindow + 300ms settle) called from `main.py:_run_replay`. 30s timeout (matches `force_borderless_async`). Fallback `wait_for_game_foreground()` polls until exe_basename matches — user can alt-tab without pressing Enter.
+- [x] **Bug 4 fix** — `_replay_frames/` left ~520 BMPs (~4 GB) after replay because rmtree silently skipped locked files: `main.py:_run_replay` finally now sleeps 300ms (let addon stop on cleared sidecar) then rmtree retries 3× / 100ms backoff with visible WARN if final attempt fails
+- [x] CLAUDE.md updated for press-sync + long-gap docstring
 
 ## Not Yet Done
 
-- [ ] **sponsor 30 min FF7R 实机验收**（两条主线一起）：
-  - **VLMDriver C 层** — 上一 session 落地，至今未实机：schema 错误率 ≤ 5% + watchdog 频率合理 + `[VLM-COST]` 数据写入
-  - **replay-scene v1.0** — 本 session 落地：录 FF7R 启动→进入陷落区脚本（按 F6 / F7）→ 第二天 `--replay-scene tutorial` 验证抵达；测 `--replay-scene + --auto-play + --auto-capture` 三连无人值守
-- [ ] **merge `auto-play` → `master`**（待两条主线实机过后；按 CLAUDE.md 风险规则，agent 不主动 merge）
-- [ ] **`scripts/verify_auto_play.py` 的 watchdog timing flake**（不阻塞 merge，前 session 起就偶发）
-- [ ] **`uv.lock` 噪音**（本地清华源切换；下次 `uv run` 又会变；属环境配置，不入 commit）
+- [ ] **Sponsor E2E live test** in FF7R: delete `D:\unicap_output\ff7remake_\_scenes\test\` then run `--record-scene test` (record arrow keys + Enter sequence to enter game), then `--replay-scene test` and verify game auto-plays through to the recorded endpoint
+- [ ] Decide whether to fix `tools/capture/capture_all.py:_thread_input` (same `GetKeyboardState` bug → `/kb` HDF5 column may be all-zero for daemon-thread captures, affects ML training data semantics)
+- [ ] Optional: clean up F6 references in `docs/req/replay-scene.md` and `docs/designs/*_replay-scene.md` (left as-is to preserve v1.0 design history)
 
-## Failed Approaches (Don't Repeat These)
+## Failed Approaches (Don't Repeat)
 
-### 本 session
+- **200ms dedup on press-sync** — initial draft skipped sync if previous sync was < 200ms ago. User correctly rejected: rapid combo (e.g. ENTER × 3 within 240ms) loses sync coverage on calls 2 and 3, and at replay time if the game stutters between presses, those keys get eaten because there's no dHash wait. Same-tick multi-press merging is the only dedup that survived.
+- **5s focus_game_window timeout** — too short. FF7R launcher → game PID handoff takes 10-30s on slow disks. Pulled to 30s to match `force_borderless_async`.
+- **`input()` after focus failure** — original fallback asked user to alt-tab then press Enter. User pointed out the Enter steals focus back to console. Replaced with `wait_for_game_foreground()` polling.
+- **`GetKeyboardState` in recorder daemon thread** — silently returns zeros because thread has no message queue. Bug only surfaced when sponsor saw `script.jsonl` had only 1 mouse_move event despite 3 ENTER presses. `GetAsyncKeyState` returns physical state regardless of thread.
+- **`shutil.rmtree(scratch, ignore_errors=True)` immediately on player exit** — addon was still finishing in-flight BMP write, file was locked, ignore_errors silently kept the file. 300ms grace + retry with visible failure warning.
 
-#### 1. 把 mouse_button_down/up 直接走 InputBackend op="click"
-
-`click` 是设计为 down+up 一起发 → 录回放时按 down 发会被强制带个 up → 时序错乱。
-**学到**：扩展 InputBackend 加 op="down" / "up" 才能支持回放分离时序（gamepad 同理加 button_down / button_up）。
-
-#### 2. ⚠ emoji 在 cmd_scenes 输出
-
-Windows GBK 终端 `print(...)` 在 stdout 重定向场景下 GBK 编码不识别 `⚠` → UnicodeEncodeError 把整个 verify 跑挂。
-**学到**：跨平台 console 输出**永远用 ASCII**（[!] / [OK] / [FAIL]），不要 emoji。survey.py 老代码里有 ✓ / ✗ 是历史包袱，新代码不要再用。
-
-#### 3. 试图自动跑 `verify_auto_play.py` 检验回归
-
-虽然出于"跨改动 input_backend.py 应顺手 spot-check"的好意跑了一次，但违反 memory `feedback_no_auto_verify`。
-**学到**：sponsor 明示不要主动跑 verify_auto_play.py — 即便是 spot-check 也要先问一句。本 session 在产出报告时已自检并标记，不再犯。
-
-### 上 session（仍生效）
-
-详见 `git log` `7a7b886` / `f854ccc` / `f7b8054` handoff。
-
-## Key Decisions（本 session）
+## Key Decisions
 
 | Decision | Rationale |
-|----------|-----------|
-| 范式选 B（时序 + 视觉同步点）而非 A（纯时序） | 启动场景的杀手是加载方差（启动器更新 / shader compile），纯时序一周就废；视觉校验点是行业标准 |
-| dHash + numpy 自实现，**不**引 Pillow | < 20 行代码够用；少一个 dep 就少一份维护负担 |
-| `MANDATORY_RESERVED_KEYS` 由 {F8,F9} 扩到 {F6,F7,F8,F9} | F6/F7 是 unicap 第 2 套全局 hotkey，profile 必须保留；外部 profile 极少（README 才发 1 周）所以可接受 schema break |
-| `--auto-play` **不**与 record/replay 互斥（sponsor 改判）| `--replay-scene + --auto-play + --auto-capture` 三连是杀手用法；技术上 auto-play 只在 F8 capture 阶段触发，与 record/replay 完全不冲突 |
-| 跳过 mouse-look 录制（FPS 锁鼠到中心 → GetCursorPos 等价 no-op） | 启动 → 进场景 99% 是菜单导航，FPS look 不是核心场景；文档明记限制 |
-| `_*` 前缀目录约定（`_scenes/` / `_recording_frames/`）| 与 `survey/` 一起被 `pack` / `video` 扫描排除；统一语义比一个个特判清晰 |
-| 录制 / 回放 scratch 目录用完 `rmtree` | BMP 按 timestamp 命名不会覆盖，30s 录制能涨 5GB；不清理是真实 disk hazard |
-| 错误消息用 ASCII `[错误]` / `[!]` 不用 emoji | Win GBK console encoding 问题；emoji 会 crash 子进程的 print(stdout) |
-| BUG-002 precheck 在 `cmd_deploy` 之后、`subprocess.Popen` 之前 | deploy 是幂等的（只写 ini / symlink），代价低；早 fail 在 game launch 前帮 sponsor 省 30s typo iteration |
-
-### 上 session 决策（仍生效）
-
-详见 `a1f829f` / `7a7b886` 的 handoff Key Decisions。
+|---|---|
+| Press-sync (not long-gap-only) | sponsor scenario: rapid menu navigation in FF7R. Long-gap (1.5s) misses every per-key animation slip. Per-press is rugged. |
+| No dedup beyond same-tick | bandwidth cost (~600MB sync pool / 30s recording) is trivial vs unicap's GB-scale dataset; rapid-combo coverage matters more |
+| Long-gap fallback retained | catches mouse-look-only segments (no input but loading/cinematic) where press-sync alone wouldn't fire |
+| GetAsyncKeyState 256× / tick | ~1ms / tick, ~3% CPU at 120Hz — fine. `_HOTKEY_VKS={VK_F7}` already proves GetAsyncKeyState works in this thread (F7 stop has been working). |
+| `min_age_s=0.1` (not 0.5 like sync_match) | recorder needs gap-end picture, can't be 500ms stale; 100ms = addon write time (50ms) + frame interval safety |
+| F6 NOT removed from profile YAMLs | extra entries in reserved_keys are harmless; sponsor's external profiles (if any) won't break |
 
 ## Current State
 
-**Working**:
-- 远端 `origin/auto-play` HEAD = `18b575f`，本地一致
-- 33/33 offline tests 全绿（`uv run python scripts/verify_replay.py`）
-- 4 个内置 profile load 通过（含新 F6/F7 reserved 校验）
-- 上 session VLMDriver / force_borderless / [CAPTURE] 频率改动**全部未动**
+**Working** (offline): All 33 verify_replay.py tests pass. Smoke imports clean.
 
-**Broken**: 无
+**Working** (live, partially verified): `--record-scene test` UI shows correct hint box. Console focus message shows when launching `--replay-scene`.
 
-**Uncommitted Changes**:
+**Not yet verified** (live): Full record → replay round trip in FF7R after all 4 bug fixes. Last live attempt prior to fixes 2/3/4 produced `(290 inputs / 2 syncs)` (long-gap-only era) and `(1 mouse_move / 0 syncs)` (GetKeyboardState era).
 
+**Uncommitted Changes** (5 files):
 ```
-~ Modified: uv.lock   (mirror URL 噪音，pypi.org → tuna 清华，不入 commit)
+M .env                      ← sponsor's env, leave alone
+M CLAUDE.md                 ← press-sync docstring
+M main.py                   ← focus_game_window integration + scratch cleanup
+M tools/replay/recorder.py  ← GetAsyncKeyState + BMP min_age + copy retry
+M tools/window_manager.py   ← focus_game_window, wait_for_game_foreground
 ```
 
 ## Files to Know
 
 | File | Why It Matters |
-|------|----------------|
-| `tools/replay/recorder.py` | 120Hz state diff → event；F6/F7 hotkey 监听；落 `script.jsonl` + `meta.json` |
-| `tools/replay/player.py` | 按 absolute t_rel 调度；event → Action；sync 等待 + paused R/Q |
-| `tools/replay/sync_match.py` | dHash 自实现 + `wait_for_match`（汉明距离 ≤ 10 视为同图） |
-| `tools/replay/schema.py` | `script.jsonl` event 类型 + `meta.json` 模型 + 校验（forward-compat 设计 — 未知字段不报） |
-| `main.py` | 新增 `_validate_launch_args` / `_validate_scene_name` / `_precheck_scene` / `_run_record` / `_run_replay` / `cmd_scenes` |
-| `tools/auto_play/input_backend.py` | mouse op +`down`/`up`；gamepad op +`button_down`/`button_up`（回放分离时序需要） |
-| `tools/auto_play/profile.py` | `MANDATORY_RESERVED_KEYS = {F6,F7,F8,F9}` |
-| `scripts/verify_replay.py` | sponsor 一条命令跑 33 个 offline 测试 |
-| `docs/req/replay-scene.md` | requirements v1.0（含 G-001~G-006 + scenarios + open questions） |
-| `docs/designs/impact_20260504_replay-scene.md` | impact 分析 + 决策表 |
-| `docs/designs/testplan_20260504_replay-scene.md` | TPDD + E2E 矩阵 |
-| `docs/feedback/replay-scene_session_20260504.md` | auto-test 5 findings（4 已修，1 是 v1.1 增强 list-scenes 已落） |
+|---|---|
+| `tools/replay/recorder.py` | Core auto-sync logic; `_poll_loop`, `_emit_auto_sync`, `_latest_scratch_bmp`, `_read_state` |
+| `tools/window_manager.py` | Game window focus management — both `force_borderless_async` (existing) and `focus_game_window` / `wait_for_game_foreground` (new this session) |
+| `main.py:_run_replay` (~line 657-700) | Replay flow: focus → recenter → InputBackend → ReplayPlayer → cleanup |
+| `tools/replay/player.py` | Time-driven event injection + sync wait. Untouched this session. |
+| `tools/replay/sync_match.py` | dHash + `wait_for_match`. `_read_latest_bmp(min_age_s=0.5)` was the inspiration for recorder's race-fix. |
+| `tools/auto_play/profile.py` | `MANDATORY_RESERVED_KEYS = {"F7","F8","F9"}` |
 
-## Code Context（关键 API）
+## Code Context
 
-### 杀手命令组合
-
-```bash
-# 全自动无人值守：replay → 自动 capture → bot 接管
-uv run main.py launch --replay-scene tutorial --auto-play --auto-capture
-
-# 单独使用
-uv run main.py launch --record-scene tutorial    # F6 标 sync, F7 停
-uv run main.py launch --replay-scene tutorial    # 缺 survey 自动跑
-uv run main.py scenes --game-dir DIR             # 列已录场景
-```
-
-### `tools/replay` 公共 API
-
+**Auto-sync trigger logic** (`recorder._poll_loop`):
 ```python
-from tools.replay import (
-    ReplayRecorder, ReplayPlayer, ReplayResult,
-    iter_events, load_meta, write_meta, validate_meta, RECORDER_VERSION,
-)
-
-# 录制
-rec = ReplayRecorder(scene_dir=..., sync_scratch_dir=..., game_dir=...,
-                     game_exe=..., api=..., window_size=..., mouse_origin=...,
-                     scene_name=...)
-rec.start(); rec.wait_until_done(); rec.save(); rec.close()
-
-# 回放
-player = ReplayPlayer(scene_dir=..., sync_scratch_dir=..., game_dir=...,
-                      backend=InputBackend(profile),
-                      current_window_size=...,
-                      paused_input_provider=None)  # None = real GetAsyncKeyState
-result: ReplayResult = player.run()
-# result.status: 'reached' | 'sync_miss_aborted' | 'user_abort' | 'script_error'
-# result.exit_code: 0 / 2 / 3 / 130
+if evts:
+    long_gap = (self._last_input_t_rel is not None
+                and t_rel - self._last_input_t_rel > self._auto_sync_gap_s)
+    has_press = any(e["type"] in _PRESS_EVENT_TYPES for e in evts)
+    # long-gap takes priority when both apply
+    if long_gap and self._last_input_t_rel is not None:
+        self._emit_auto_sync(self._last_input_t_rel + 0.1)
+    elif has_press:
+        self._emit_auto_sync(t_rel - 0.001)
+    self._events.extend(evts)
+    self._last_input_t_rel = t_rel
 ```
 
-### Schema
+**Press event types** that trigger sync:
+```python
+_PRESS_EVENT_TYPES = frozenset({
+    "key_down", "mouse_button_down", "gamepad_button_down",
+})
+```
 
-`script.jsonl` 每行 1 个 JSON event（type ∈ {key_down/up, mouse_move, mouse_button_down/up, gamepad_*, sync}）；`meta.json` 含 `name`/`version`/`recorded_at`/`recorder_version`/`game_exe`/`api`/`window_size`/`mouse_origin`/`vlm_fallback_enabled`/`syncs`（per-sync threshold + timeout 覆写）。详见 `docs/designs/impact_20260504_replay-scene.md` § 3 或直接读 `schema.py`。
+**Key API swap** in `_read_state`:
+```python
+# Was (broken in daemon thread):
+# kb_arr = (ctypes.c_ubyte * 256)()
+# _user32.GetKeyboardState(kb_arr)
+
+# Now:
+kb = [0] * 256
+for vk in range(256):
+    if _user32.GetAsyncKeyState(vk) & 0x8000:
+        kb[vk] = 0x80  # mimic GetKeyboardState's "high bit = down"
+```
+
+**Replay focus flow** (`main.py:_run_replay`):
+```python
+hwnd = focus_game_window(exe_basename=game_exe_name, timeout_s=30.0)
+if hwnd is None:
+    hwnd = wait_for_game_foreground(game_exe_name, timeout_s=60.0)
+    if hwnd is None:
+        return 2  # user didn't alt-tab in time
+recenter_cursor()
+# ... player.run() ...
+finally:
+    backend.close()
+    _set_state(game_dir, "idle")
+    time.sleep(0.3)              # let addon stop on cleared sidecar
+    if scratch.exists():
+        for attempt in range(3):
+            try: shutil.rmtree(scratch); break
+            except OSError as e:
+                if attempt == 2: print warning
+                else: time.sleep(0.1)
+```
 
 ## Resume Instructions
 
-### 接班 agent 第一件事
-
-```bash
-git status                 # 应见 modified uv.lock（mirror 噪音，不要 commit）
-git log --oneline -5       # 应见 18b575f → 66af6bd → a1f829f → 7a7b886 → f854ccc
-uv run python scripts/verify_replay.py  # 应 33/33 PASS
-```
-
-### sponsor 实机验收（核心 — 卡了一周）
-
-**两条主线一起跑**（推荐顺序：先 replay-scene 再 VLM，因为 replay-scene 简单）：
-
-```powershell
-# (1) replay-scene v1.0 实机验收
-uv run main.py launch --record-scene tutorial
-# F6 在每个加载界面 / 菜单切换前后按一下 → F7 停止
-# 检查 _scenes/tutorial/ 落了 script.jsonl + meta.json + sync_NN.bmp
-
-# 第二天（或重启电脑后）
-uv run main.py launch --replay-scene tutorial
-# 期望：自动到达陷落区，console 打印 [REPLAY] reached scene tutorial in Xs
-
-# 三连无人值守（杀手组合）
-uv run main.py launch --replay-scene tutorial --auto-play --auto-capture
-# 期望：replay 完成 → 自动 capture → bot 接管 → 一直跑到 F9
-
-# (2) VLMDriver C 层实机验收（接 a1f829f handoff，未变）
-uv sync --extra auto-play-vlm
-# 编辑 .env：填真 VLM_API_KEY；填完立刻 git update-index --skip-worktree .env
-uv run main.py launch --auto-play --driver vlm --profile ff7r
-# F8 → 30 min → F9
-type %TEMP%\unicap\auto_play.log | findstr "VLM-COST" | wc -l
-# 期望 ≥ 1500（30min × 60s × 1Hz × 0.85 success rate）
-```
-
-### 验收成功后 merge
-
-```powershell
-git checkout master
-git merge --no-ff auto-play -m "merge: auto-play — A 层 + force_borderless + C 层 VLMDriver + replay-scene v1.0"
-git push origin master
-```
+1. **Inspect uncommitted state**: `git diff --stat` should show the 5 files above. If anything else is modified, investigate before commit.
+2. **Run offline tests** to confirm nothing regressed: `uv run python scripts/verify_replay.py`
+   - Expected: `== 33/33 passed, 0 failed ==`
+   - If fail: probably encoding or import issue introduced by an edit
+3. **Commit + push** (the `/handoff-refresh` flow normally does this; if not, use `commit` skill)
+4. **Live E2E** (sponsor task — can't run in CI):
+   - Delete `D:\unicap_output\ff7remake_\_scenes\test` if it exists (it's a broken pre-fix artifact)
+   - Run: `uv run main.py launch --game-path "<ff7r exe>" --profile ff7 --record-scene test`
+   - Press ENTER several times in the game to advance launcher menus
+   - Press F7 in console (or game window — F7 is global)
+   - Expected console output:
+     ```
+     [REPLAY-REC] auto-sync S-01 at X.Xs (gap > 1.5s)
+     ... one auto-sync per press ...
+     [REPLAY-REC] saved ...\script.jsonl (NN inputs / MM syncs)
+     ```
+     `MM` should equal number of presses you made (+ a few long-gap firings)
+   - Then: `uv run main.py launch --game-path "..." --profile ff7 --replay-scene test`
+   - Expected:
+     ```
+     [REPLAY] 等待游戏窗口出现 (ff7remake_.exe, 最多 30s)...
+     [WINDOW] 已强制 borderless ...
+     [REPLAY] 已聚焦游戏窗口 (hwnd=0x...)
+     [REPLAY] sync S-01 matched (waited X.Xs, dist=N)  ← dist should be small but NOT all 0
+     ...
+     [REPLAY] reached scene test in X.Xs (recorded X.Xs, drift +X.Xs)
+     ```
+     The game should visibly auto-press through the same menu sequence
+   - After replay ends, check `D:\unicap_output\ff7remake_\_scenes\test\_replay_frames\` — should be **gone or empty** (cleanup fix verified)
+   - If `_replay_frames/` still has BMPs, the `[REPLAY] WARN: 清理 ... 失败` line in console says why; addon may need more than 300ms grace
 
 ## Setup Required
 
-无新设置。沿用上 session：
-- VS 2022 + MSBuild v143（C++ 编译，本 session 没动 C++）
-- `tools/capture/config.py` 的 `GAME_PATH` / `DATASET_ROOT`
-- `uv sync --extra auto-play-vlm`（VLM 路径）
+- Existing FF7R install at the path the sponsor has been using (E:\games\ff7remake\...\ff7remake_.exe)
+- Profile `ff7` exists (`profiles/ff7r.yaml`, exists in repo)
+- ReShade `dxgi.dll` already deployed (auto-deployed by `launch`)
 
 ## Edge Cases & Error Handling
 
-| 场景 | 行为 |
-|------|------|
-| `--record-scene foo` 但 `_scenes/foo/` 已有内容 | precheck `[错误] _scenes/foo/ 已存在内容，拒绝覆盖。先删它再录: rm -r ...`，**不**进游戏 launch |
-| `--replay-scene foo` 但 scene 不存在 | precheck `[错误] replay scene 不存在: ...\n  缺少 script.jsonl 或 meta.json`，**不**进游戏 launch |
-| `--record-scene ""` 或 `"   "` | `[错误] --record-scene 不能为空` |
-| `--record-scene "../escape"` | `[错误] --record-scene 名字不能含 '..'（防路径穿越）` |
-| `--record-scene "foo/bar"` | `[错误] --record-scene 名字含非法字符 ['/']` |
-| sync 超时 30s | console 红字 paused，等用户 R 续 / Q 退（exit 2） |
-| Ctrl+C in record/replay | 干净停（exit 130） |
-| FPS 游戏锁鼠到中心 | mouse_move event 录到 `[center, center]` → 回放 SetCursorPos 等价 no-op；启动 / 菜单场景不受影响 |
-| `--replay-scene` + 缺 survey | G-005 自动调 `survey_mod.run`；survey 失败 exit 3 |
-| 录完 `_recording_frames/` | recorder.close() 强制 rmtree（避免 5GB 涨）|
-| 回放 paused 态 | 仅响应 R / Q（不响应游戏内任何键） |
-| F6/F7 在回放期间按下 | 不响应（设计如此 — 用户回放期不该重新录）|
-
-### 上 session（仍生效）
-
-详见 `a1f829f` 那版 handoff 的 Edge Cases 段。
+- **Same-tick multi-press**: 1 sync emitted, BMP reflects that frame. ✓ tested
+- **Long-gap + press in same tick**: long-gap branch wins (sync at gap start, not press time). Subsequent presses still get their own sync if they're > 1 tick apart.
+- **All sync BMPs `frame=null`**: addon never wrote BMPs to scratch. Means `fc_output_dir.txt` sidecar wasn't picked up. Check `recorder.start()` writes the sidecar before threads launch.
+- **`focus_game_window` finds wrong window**: matches by exe basename via `_query_image_basename`, so launchers (Steam / FF7R) sharing exe name with the game would conflict. Not seen in practice.
 
 ## Warnings
 
-### 本 session 新增
-
-- **mouse-look 录制无效** — FPS 游戏锁鼠到屏幕中心，GetCursorPos 永远返中心。**仅菜单 / 导航场景适用**。文档已明记，scenarios S-001 ~ S-004 都是菜单 / 加载导向。如果 sponsor 想录战斗内 mouse look 操作 — v1.0 不行，得 v2.0 接 raw input 或 VLM 兜底。
-- **`MANDATORY_RESERVED_KEYS` 扩容**（{F8,F9} → {F6,F7,F8,F9}）— 现有 4 profile 都已加，但**外部用户自管的 profile**（README 才发 1 周，应该极少）会因升级炸 load_profile。Sponsor 如果有外部 profile，记得给它的 reserved_keys 加 F6/F7。
-- **录制 BMP 涨盘**：录制期间 addon 持续往 `_recording_frames/` 落 BMP（timestamp 命名不覆盖）；**30s 录制 ≈ 5GB**；recorder.close() 必 rmtree 清理。如果 Ctrl+C 异常退出且没走 finally 路径（极少），需手工 `rm -r _scenes/*/_recording_frames/`。
-- **dHash 阈值 10 是默认**，per-sync 可在 `meta.json` 的 `syncs.<id>.hamming_threshold` 覆写；FF7R / DOOM 不同游戏可能需要不同阈值。第一次实机如果 sync miss 频繁，第一招就是放宽阈值（10→15→20）或拉长 timeout（30s→60s）。
-- **emoji 在 cmd_scenes 输出会 crash GBK 终端**。本 session 已替换 ⚠ → `[!]`。新代码也别用 emoji 在 print() 里 — Win console encoding 问题反复出现。
-
-### 上 session（仍生效）
-
-详见 `7a7b886` / `f7b8054` / `a1f829f` 的 handoff Warnings 段（`SetWindowLongPtrW` c_ssize_t、`force_borderless` 不能同步阻塞、`settle_delay_s=2.0` 别砍、`[CAPTURE]` 14s 频率别动、`--force-borderless` 默认 True 别改、`--vlm-api-key` 留 shell history、`api_key` 不暴露 property、DeepSeek 无 vision、`.env` tracked 后填真 key 前必须 `git update-index --skip-worktree .env` 等）。
+- **DO NOT remove F6 from profile YAMLs** — tested working with F6 still in `reserved_keys` lists. Removing requires editing 4 files and might break sponsor's external profiles.
+- **`GetAsyncKeyState` reads 256 keys per tick** — looks like overhead but verified ~1ms / tick at 120Hz. If you want to optimize, only loop over `_VK_TO_NAME.keys()` (≈ 80 keys) but make sure mouse-button VKs (0x01/0x02/0x04) and any vk in `_GAMEPAD_BIT_NAMES` consumers stay covered.
+- **`_recording_frames/` cleanup** is in `recorder.close()` (existing code, unchanged), uses `shutil.rmtree(..., ignore_errors=True)`. The same race fix applied to `_replay_frames` should arguably apply here too — but record stops on user F7 (not a tight sidecar/rmtree race) so it tends to work. Verify if you re-record and see leftover `_recording_frames/` BMPs.
+- **Stale doc files**: `docs/req/replay-scene.md` and `docs/designs/*_replay-scene.md` still describe F6 manual sync as the v1.0 design. Left intentionally — they document v1.0, this session implements v1.1. CLAUDE.md is the authoritative current-state doc.
+- **`tools/capture/capture_all.py` has the same GetKeyboardState bug** (`_thread_input`, line 76). NOT fixed here. If sponsor cares about HDF5 `/kb` data integrity for ML training, that's a separate fix. Same one-line API swap will work.

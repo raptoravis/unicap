@@ -599,7 +599,7 @@ def _run_record(args, game_dir: Path, game_name: str, dataset_root: Path,
     print(f"┌─ 录制场景脚本: {scene_name} ─────────────────────────────┐")
     print(f"│  F7  停止录制                                         │")
     print(f"│  Ctrl+C  中止录制（不保存）                           │")
-    print(f"│  sync 自动按 long-gap 检测（默认 1.5s 无输入触发）     │")
+    print(f"│  sync 自动: 每按键触发 + long-gap 1.5s 兜底            │")
     print(f"│  [!] 录制中 F8/F9 不响应 capture                        │")
     print(f"└──────────────────────────────────────────────────────┘\n")
 
@@ -654,6 +654,25 @@ def _run_replay(args, game_dir: Path, game_name: str, dataset_root: Path,
         print(f"[REPLAY] profile load failed: {e}", flush=True)
         return 2
 
+    # Pull game window to foreground (otherwise SendInput goes to the console).
+    # Timeout matches force_borderless_async — launcher → game handoff can take
+    # 10-30s on slow disks / first-time loads.
+    game_exe_name = Path(getattr(args, "game_path", str(GAME_PATH))).name
+    from tools.window_manager import focus_game_window, wait_for_game_foreground
+    print(f"[REPLAY] 等待游戏窗口出现 ({game_exe_name}, 最多 30s)...", flush=True)
+    hwnd = focus_game_window(exe_basename=game_exe_name, timeout_s=30.0)
+    if hwnd is None:
+        print(f"[REPLAY] WARN: 30s 内自动定位游戏窗口失败。"
+              f"请手动 alt-tab 到游戏，replay 将在检测到游戏前台后自动开始（60s 超时，无需回车）。",
+              flush=True)
+        hwnd = wait_for_game_foreground(game_exe_name, timeout_s=60.0)
+        if hwnd is None:
+            print("[REPLAY] 60s 内仍未检测到游戏在前台 — 中止 replay", flush=True)
+            return 2
+        print(f"[REPLAY] 检测到游戏在前台 (hwnd=0x{hwnd:x})，开始 replay", flush=True)
+    else:
+        print(f"[REPLAY] 已聚焦游戏窗口 (hwnd=0x{hwnd:x})", flush=True)
+
     # Recenter cursor before injecting first event
     recenter_cursor()
 
@@ -673,12 +692,20 @@ def _run_replay(args, game_dir: Path, game_name: str, dataset_root: Path,
     finally:
         backend.close()
         _set_state(game_dir, "idle")
-        # Best-effort: clean up replay scratch dir
+        # Let addon see the cleared sidecar and finish its in-flight BMP write
+        # before we rmtree (otherwise the locked file gets skipped silently).
+        time.sleep(0.3)
         if scratch.exists():
-            try:
-                shutil.rmtree(scratch, ignore_errors=True)
-            except OSError:
-                pass
+            for attempt in range(3):
+                try:
+                    shutil.rmtree(scratch)
+                    break
+                except OSError as e:
+                    if attempt == 2:
+                        print(f"[REPLAY] WARN: 清理 {scratch} 失败: {e}",
+                              flush=True)
+                    else:
+                        time.sleep(0.1)
     return result.exit_code
 
 

@@ -65,6 +65,16 @@ _user32.MonitorFromWindow.restype = wintypes.HANDLE
 _user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_MONITORINFO)]
 _user32.GetMonitorInfoW.restype = wintypes.BOOL
 
+_SW_RESTORE = 9
+
+_user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+_user32.SetForegroundWindow.restype = wintypes.BOOL
+_user32.GetForegroundWindow.restype = wintypes.HWND
+_user32.SwitchToThisWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
+_user32.SwitchToThisWindow.restype = None
+_user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+_user32.ShowWindow.restype = wintypes.BOOL
+
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 _kernel32.OpenProcess.restype = wintypes.HANDLE
@@ -161,6 +171,45 @@ def force_borderless(pid: int, exe_basename: str | None = None,
     _user32.SetWindowPos(hwnd, _HWND_TOP, x, y, w, h,
                          _SWP_FRAMECHANGED | _SWP_SHOWWINDOW | _SWP_NOZORDER)
     return True
+
+
+def focus_game_window(exe_basename: str | None = None,
+                      pid: int = 0,
+                      timeout_s: float = 5.0) -> int | None:
+    """Find game window (by pid or exe basename) and pull it to foreground.
+
+    Required before replay's SendInput — otherwise the console window is fg
+    and all keyboard events get eaten by the terminal instead of the game.
+    Returns hwnd on success, None if not found.
+    """
+    hwnd = _find_main_window(pid, exe_basename, timeout_s)
+    if not hwnd:
+        return None
+    _user32.ShowWindow(hwnd, _SW_RESTORE)
+    _user32.SetForegroundWindow(hwnd)
+    _user32.SwitchToThisWindow(hwnd, True)
+    time.sleep(0.3)
+    return hwnd
+
+
+def wait_for_game_foreground(exe_basename: str, timeout_s: float = 60.0) -> int | None:
+    """Poll GetForegroundWindow until a window owned by `exe_basename` is in
+    the foreground (e.g. user manually alt-tabbed to the game). Returns hwnd
+    or None on timeout. No SetForegroundWindow call — caller already brought
+    it to fg, we just detect when that happened.
+    """
+    target = exe_basename.lower()
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        hwnd = _user32.GetForegroundWindow()
+        if hwnd:
+            wpid = wintypes.DWORD()
+            _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+            img = _query_image_basename(wpid.value)
+            if img and img == target:
+                return hwnd
+        time.sleep(0.3)
+    return None
 
 
 def force_borderless_async(pid: int, exe_basename: str | None = None,

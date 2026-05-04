@@ -6,10 +6,14 @@ Polling cadence: 120 Hz (matches capture_all._thread_input). Each tick:
   - XInput           → optional gamepad state
 Diff against previous snapshot → emit only changed-bit events.
 
-F7 = stop. (No F6: sync points are auto-emitted whenever input idles for
-`auto_sync_gap_s` seconds, which is exactly where loading screens / menu
-transitions sit. The recorder copies the newest BMP from sync_scratch_dir
-as sync_NN.bmp at gap end and inserts a sync event into the script.)
+F7 = stop. Sync points are auto-emitted by two mechanisms:
+  1. press-sync: every key/mouse-button/gamepad-button DOWN event emits a sync
+     just before the press, so player dHash-confirms the pre-press picture
+     before injecting (rugged against per-key game stutter / animation slip).
+     Multiple presses in the same poll tick coalesce to one sync (same BMP).
+  2. long-gap fallback: if input idles for `auto_sync_gap_s` seconds, emit a
+     sync at gap start. Catches loading screens / cutscenes where input is
+     entirely absent (mouse-look-only games, cinematic gaps).
 
 Sync frame source: addon writes BMPs continuously to `sync_scratch_dir` while
 fc_output_dir.txt is set. After F7 (or on close()), the scratch dir is
@@ -95,6 +99,11 @@ VK_F7 = 0x76
 # Don't emit F7 as a key event (would self-trigger on stop).
 _HOTKEY_VKS = {VK_F7}
 
+# Press events trigger per-press sync (subject to dedup).
+_PRESS_EVENT_TYPES = frozenset({
+    "key_down", "mouse_button_down", "gamepad_button_down",
+})
+
 
 @dataclass(slots=True)
 class _State:
@@ -116,9 +125,16 @@ def _is_pressed(byte: int) -> bool:
 
 def _read_state() -> _State:
     s = _State()
-    kb_arr = (ctypes.c_ubyte * 256)()
-    _user32.GetKeyboardState(kb_arr)
-    s.kb = list(kb_arr)
+    # GetAsyncKeyState returns the *physical* key state, independent of the
+    # caller thread's message queue. GetKeyboardState would return all zeros
+    # in a daemon polling thread (no window → no message queue → no keyboard
+    # messages dispatched to update the per-thread state). 256 syscalls/tick
+    # × 120Hz ≈ 30k syscalls/s ≈ 3% CPU — fine.
+    kb = [0] * 256
+    for vk in range(256):
+        if _user32.GetAsyncKeyState(vk) & 0x8000:
+            kb[vk] = 0x80  # mimic GetKeyboardState's "high bit = currently down"
+    s.kb = kb
     pt = _Point()
     _user32.GetCursorPos(ctypes.byref(pt))
     s.mouse = (pt.x, pt.y)
@@ -371,7 +387,7 @@ class ReplayRecorder:
     # ── polling loops ──────────────────────────────────────────────────────
 
     def _poll_loop(self) -> None:
-        """120Hz state diff. Auto-emits sync at long input gaps. Runs until stop_evt set."""
+        """120Hz state diff. Auto-emits sync (press + long-gap). Runs until stop_evt set."""
         prev = _read_state()
         while not self._stop_evt.is_set():
             time.sleep(self._poll_period)
@@ -379,9 +395,15 @@ class ReplayRecorder:
             t_rel = time.monotonic() - (self._t_start or time.monotonic())
             evts = _diff_events(prev, cur, t_rel)
             if evts:
-                if (self._last_input_t_rel is not None
-                        and t_rel - self._last_input_t_rel > self._auto_sync_gap_s):
+                long_gap = (self._last_input_t_rel is not None
+                            and t_rel - self._last_input_t_rel > self._auto_sync_gap_s)
+                has_press = any(e["type"] in _PRESS_EVENT_TYPES for e in evts)
+                # long-gap takes priority when both apply (fires earlier in time
+                # than press would). Same-tick multi-press → 1 sync (one BMP).
+                if long_gap and self._last_input_t_rel is not None:
                     self._emit_auto_sync(self._last_input_t_rel + 0.1)
+                elif has_press:
+                    self._emit_auto_sync(t_rel - 0.001)
                 self._events.extend(evts)
                 self._last_input_t_rel = t_rel
             prev = cur
@@ -411,11 +433,19 @@ class ReplayRecorder:
             self._events.append({"type": "sync", "id": sid, "frame": None,
                                  "t_rel": t_rel, "description": ""})
             return
-        try:
-            shutil.copy2(frame_path, self.scene_dir / frame_name)
-        except OSError as e:
-            log.warning("[REPLAY-REC] auto-sync %s: copy failed: %s — frame=null",
-                        sid, e)
+        # Retry copy on sharing violation — addon may still be writing the BMP
+        last_err: Exception | None = None
+        for attempt in range(3):
+            try:
+                shutil.copy2(frame_path, self.scene_dir / frame_name)
+                last_err = None
+                break
+            except OSError as e:
+                last_err = e
+                time.sleep(0.05)
+        if last_err is not None:
+            log.warning("[REPLAY-REC] auto-sync %s: copy failed after retries: %s — frame=null",
+                        sid, last_err)
             self._events.append({"type": "sync", "id": sid, "frame": None,
                                  "t_rel": t_rel, "description": ""})
             return
@@ -424,9 +454,16 @@ class ReplayRecorder:
         self._events.append({"type": "sync", "id": sid, "frame": frame_name,
                              "t_rel": t_rel, "description": ""})
 
-    def _latest_scratch_bmp(self) -> Path | None:
+    def _latest_scratch_bmp(self, min_age_s: float = 0.1) -> Path | None:
+        """Newest *BackBuffer.bmp at least `min_age_s` old (avoid addon write race).
+
+        Addon takes ~50ms to write a 1920x1080 BMP; 100ms covers that plus a
+        frame interval of safety margin. The selected frame is at most 100ms
+        older than the gap-end moment — visually indistinguishable.
+        """
         if not self.sync_scratch_dir.is_dir():
             return None
+        now = time.time()
         latest: Path | None = None
         latest_mt = -1.0
         for p in self.sync_scratch_dir.iterdir():
@@ -435,6 +472,8 @@ class ReplayRecorder:
             try:
                 m = p.stat().st_mtime
             except OSError:
+                continue
+            if now - m < min_age_s:
                 continue
             if m > latest_mt:
                 latest_mt = m
