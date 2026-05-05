@@ -313,7 +313,14 @@ class ReplayRecorder:
 
     def wait_until_done(self, timeout: float | None = None) -> None:
         """Block until F7 pressed (or external stop()). Returns; caller calls save() then close()."""
-        self._stop_evt.wait(timeout)
+        if timeout is not None:
+            self._stop_evt.wait(timeout)
+            return
+        # Poll with a short timeout so SIGINT (Ctrl+C) can be delivered between
+        # waits. On Windows, Event.wait(None) parks the main thread in a kernel
+        # wait that delays SIGINT until the wait returns.
+        while not self._stop_evt.wait(0.1):
+            pass
 
     @property
     def auto_sync_gap_s(self) -> float:
