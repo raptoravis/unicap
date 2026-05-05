@@ -72,7 +72,9 @@ loop driven entirely by in-game hotkeys:
 
 要重做 survey：删 `DATASET_ROOT/<game>/survey/recommended_skip.txt`，下次 F8 会重跑 survey。
 
-Each capture session writes to `DATASET_ROOT/<game_name>/<YYYYMMDD_HHMMSS>/frames/` with a matching `inputs.jsonl`. F9 停止后默认只生成 `video.mp4`；HDF5 打包需 `launch --pack` 显式开启，或事后用 `pack --game-dir DIR` 子命令批量补齐。`video` / `pack` 子命令都是"扫游戏目录、缺啥补啥、已存在跳过"。
+Each capture session writes to `DATASET_ROOT/<game_name>/<YYYYMMDD_HHMMSS>/frames/` with a matching `inputs.jsonl`. F9 停止后默认**仅落帧**（不生成 video，不打包 HDF5）；要即时生成视频加 `--video`，要即时打包加 `--pack`，事后批量用 `video --game-dir DIR` / `pack --game-dir DIR` 子命令补齐。`video` / `pack` 子命令都是"扫游戏目录、缺啥补啥、已存在跳过"。
+
+`--capture-duration N`（默认 **30s**，0 = 不限时）：F8 一次会自动 roll —— 到时间就如同自动按 F9 + 自动按 F8，开始新 session（新目录）。F9 才终止整轮。结合 `--auto-play --auto-capture` = 长跑无人值守把超长 session 切成等长片段，便于后续 ML 训练 batch 化。`--capture-duration 0` 退化到旧行为（F8 → F9 之间一段，自己定长度）。
 
 Capture defaults (FPS=30, 1920×1080) 是 `main.py` 顶部常量；1920×1080 匹配 FF7R 的 scene RT 原生分辨率，省掉一次 worker resize（参考 perf commit b7021ed → 19.4 fps）。
 

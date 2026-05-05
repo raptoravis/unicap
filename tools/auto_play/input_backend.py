@@ -30,8 +30,20 @@ log = logging.getLogger("unicap.auto_play")
 INPUT_MOUSE = 0
 INPUT_KEYBOARD = 1
 
+KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_SCANCODE = 0x0008
+
+# VKs that need KEYEVENTF_EXTENDEDKEY when sent via scan code (E0-prefixed).
+# Without this, RCtrl/RAlt collapse to LCtrl/LAlt and arrow keys don't work
+# in raw-input-aware games.
+_EXTENDED_VKS = frozenset({
+    0x21, 0x22, 0x23, 0x24,        # PgUp PgDn End Home
+    0x25, 0x26, 0x27, 0x28,        # arrow keys
+    0x2D, 0x2E,                    # Insert Delete
+    0x90,                          # NumLock
+    0xA3, 0xA5,                    # RCtrl RAlt
+})
 MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
@@ -85,6 +97,9 @@ class _Input(ctypes.Structure):
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(_Input), ctypes.c_int)
 _user32.SendInput.restype = wintypes.UINT
+_user32.MapVirtualKeyW.argtypes = (wintypes.UINT, wintypes.UINT)
+_user32.MapVirtualKeyW.restype = wintypes.UINT
+_MAPVK_VK_TO_VSC = 0
 
 
 # ── VK code map (alphanumerics + common keys) ────────────────────────────────
@@ -244,8 +259,17 @@ class InputBackend:
 
     @staticmethod
     def _send_key(vk: int, up: bool) -> None:
-        flags = KEYEVENTF_KEYUP if up else 0
-        ki = _KeybdInput(wVk=vk, wScan=0, dwFlags=flags, time=0, dwExtraInfo=None)
+        # Send via scan code + KEYEVENTF_SCANCODE so games using Raw Input or
+        # DirectInput (id Tech 7, most modern FPS) actually see the keypress.
+        # Pure virtual-key SendInput (wVk, no SCANCODE flag) only lands in the
+        # Win32 message queue and is invisible to raw-input listeners.
+        scan = _user32.MapVirtualKeyW(vk, _MAPVK_VK_TO_VSC)
+        flags = KEYEVENTF_SCANCODE
+        if vk in _EXTENDED_VKS:
+            flags |= KEYEVENTF_EXTENDEDKEY
+        if up:
+            flags |= KEYEVENTF_KEYUP
+        ki = _KeybdInput(wVk=0, wScan=scan, dwFlags=flags, time=0, dwExtraInfo=None)
         inp = _Input(type=INPUT_KEYBOARD, ii=_InputUnion(ki=ki))
         _user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_Input))
 

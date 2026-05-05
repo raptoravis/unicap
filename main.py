@@ -9,7 +9,7 @@ Hotkeys (GetAsyncKeyState polls globally — game window doesn't need focus):
 Usage:
   uv run main.py launch [--game-path P] [--game-name N]
                         [--dataset-root R] [--ui-mode {no-ui,ui,both}]
-                        [--no-hints] [--no-video] [--pack]
+                        [--no-hints] [--video] [--pack] [--capture-duration N]
   uv run main.py video  --game-dir DIR [--fps N]
   uv run main.py pack   --game-dir DIR [--no-depth]
 
@@ -415,6 +415,22 @@ def _start_auto_play(args, frames_dir: Path, game_exe_stem: str):
     except Exception as e:
         print(f"[AUTO-PLAY] profile 加载失败：{e} — 关闭 auto-play 续 capture")
         return None
+
+    # Pull game window to foreground before bot starts injecting — otherwise
+    # SendInput goes to whatever window has focus (often the unicap console),
+    # so the bot mashes WASD into the terminal and the game sees nothing.
+    from tools.window_manager import focus_game_window, wait_for_game_foreground
+    game_exe_name = Path(getattr(args, "game_path", str(GAME_PATH))).name
+    hwnd = focus_game_window(exe_basename=game_exe_name, timeout_s=5.0)
+    if hwnd is None:
+        print(f"[AUTO-PLAY] WARN: 5s 内无法定位游戏窗口；请手动 alt-tab 到游戏 "
+              f"({game_exe_name}，60s 超时)", flush=True)
+        hwnd = wait_for_game_foreground(game_exe_name, timeout_s=60.0)
+        if hwnd is None:
+            print("[AUTO-PLAY] 60s 内仍未检测到游戏前台 — 关闭 auto-play 续 capture",
+                  flush=True)
+            return None
+    print(f"[AUTO-PLAY] 已聚焦游戏窗口 (hwnd=0x{hwnd:x})", flush=True)
 
     try:
         runner = AutoPlayRunner(
@@ -847,7 +863,12 @@ def _interactive_loop(args, game_dir: Path, game_name: str, dataset_root: Path,
             if not ok:
                 print("[F8] survey 未完成，已取消采集。再次按 F8 重试")
                 continue
-        _run_capture(args, game_dir, game_name, dataset_root, just_surveyed=ran_survey)
+        stopped_by_f9 = _run_capture(args, game_dir, game_name, dataset_root,
+                                     just_surveyed=ran_survey)
+        if not stopped_by_f9:
+            # --capture-duration timer fired: roll into a fresh session next iter
+            print("[CAPTURE] 单次时长到，自动开下一段（F9 终止整轮）", flush=True)
+            skip_next_f8_wait = True
 
 
 def _run_survey(args, game_dir: Path, game_name: str, dataset_root: Path) -> bool:
@@ -908,7 +929,10 @@ def _write_skip_pulse(game_dir: Path, skip: int):
         print(f"[WARN] 无法写 fc_skip_count.txt: {e}")
 
 
-def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path, just_surveyed: bool):
+def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path,
+                 just_surveyed: bool) -> bool:
+    """Return True if F9 stopped the capture (loop should wait for next F8),
+    False if --capture-duration timer fired (loop auto-rolls into a new session)."""
     _set_state(game_dir, "capturing")
     tag = datetime.now().strftime("%Y%m%d_%H%M%S")
     session_dir = dataset_root / game_name / tag
@@ -917,15 +941,35 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path, just_
     video_out  = session_dir / "video.mp4"
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n[CAPTURE] 开始采集 (F9 停止) → {session_dir}", flush=True)
+    duration = float(getattr(args, "capture_duration", 30.0))
+    if duration > 0:
+        print(f"\n[CAPTURE] 开始采集 (单次 {duration:.0f}s 自动 roll；F9 终止整轮) → {session_dir}",
+              flush=True)
+    else:
+        print(f"\n[CAPTURE] 开始采集 (F9 停止；无时长上限) → {session_dir}", flush=True)
     if just_surveyed:
         time.sleep(0.5)  # let the post-survey skip pulse settle
 
     auto_play_runner = _start_auto_play(args, frames_dir, game_exe_stem=game_name)
 
     t_cap = time.perf_counter()
+    f9_event = threading.Event()
     stop_event = threading.Event()
-    quit_watcher = _spawn_f9_watcher(stop_event)
+    quit_watcher = _spawn_f9_watcher(f9_event)
+
+    # F9 watcher sets f9_event; we bridge that into the capture stop_event so we
+    # can also let a duration timer trip stop_event without conflating signals.
+    def _bridge_f9() -> None:
+        f9_event.wait()
+        stop_event.set()
+    threading.Thread(target=_bridge_f9, daemon=True).start()
+
+    timer: threading.Timer | None = None
+    if duration > 0:
+        timer = threading.Timer(duration, stop_event.set)
+        timer.daemon = True
+        timer.start()
+
     try:
         capture_all.run(
             fps=CAP_FPS,
@@ -936,14 +980,20 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path, just_
             stop_event=stop_event,
         )
     finally:
+        if timer is not None:
+            timer.cancel()
         quit_watcher.set()
         if auto_play_runner is not None:
             auto_play_runner.stop()
         _set_state(game_dir, "idle")
-    print(f"[CAPTURE] 总耗时 {_fmt_dur(time.perf_counter() - t_cap)}", flush=True)
 
-    if getattr(args, "video", True):
-        print("[VIDEO] 开始生成 video.mp4（如不需要可加 --no-video 跳过）…")
+    stopped_by_f9 = f9_event.is_set()
+    reason = "F9 停止" if stopped_by_f9 else "时长到自动 roll"
+    print(f"[CAPTURE] 总耗时 {_fmt_dur(time.perf_counter() - t_cap)}（{reason}）",
+          flush=True)
+
+    if getattr(args, "video", False):
+        print("[VIDEO] 开始生成 video.mp4（--no-video 可跳过）…")
         t_video = time.perf_counter()
         _make_video(frames_dir, video_out, fps=0, glob_pat="*BackBuffer.png")
         # --mask-ui: 额外生成 video_masked.mp4
@@ -956,7 +1006,7 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path, just_
                         glob_pat="*BackBufferUI.png")
         print(f"[VIDEO] 总耗时 {_fmt_dur(time.perf_counter() - t_video)}")
     else:
-        print("[VIDEO] --no-video 跳过；待会儿运行：")
+        print("[VIDEO] launch 默认不生成（加 --video 可即时生成），待会儿运行：")
         print(f"        uv run main.py video \"{dataset_root / game_name}\"")
 
     print(f"[会话] {session_dir}")
@@ -975,6 +1025,8 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path, just_
     else:
         print("[PACK] launch 默认不打包（加 --pack 可即时打包），待会儿运行：")
         print(f"       uv run main.py pack \"{dataset_root / game_name}\"")
+
+    return stopped_by_f9
 
 
 # ── Video + pack ──────────────────────────────────────────────────────────────
@@ -1327,8 +1379,12 @@ def main():
                    help="启动后把游戏窗口强制 borderless 撑满显示器（默认开启）— "
                         "避免 DXGI fullscreen-exclusive 让 DWM 暂停 console 渲染；"
                         "--no-force-borderless 保留游戏自己的窗口模式")
-    p.add_argument("--video", action=argparse.BooleanOptionalAction, default=True,
-                   help="F9 停止采集后生成 video.mp4（默认开启；--no-video 跳过）")
+    p.add_argument("--video", action=argparse.BooleanOptionalAction, default=False,
+                   help="F9 停止采集后立即生成 video.mp4（默认不生成；事后用 "
+                        "uv run main.py video DIR 批量补齐）")
+    p.add_argument("--capture-duration", type=float, default=30.0, metavar="SECONDS",
+                   help="单次 capture 时长（秒）；到时自动停当前会话 + 直接开下一段（新目录），"
+                        "F9 才终止整轮。0 = 不限时（仅 F9 停）。默认 30")
     p.add_argument("--mask-ui", action="store_true",
                    help="同时生成 video_masked.mp4：depth==0|>=0.999 像素置黑（reverse-Z UI/sky mask）")
     p.add_argument("--pack", action="store_true",
