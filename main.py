@@ -766,6 +766,27 @@ def cmd_launch(args):
         if getattr(args, "auto_play", False):
             print("[AUTO-PLAY] --ui-mode 默认 both（bot/watchdog 看 post-UI BMP）", flush=True)
 
+    # Show VLM config (base_url / model / budget / api_key presence) up front
+    # so sponsors can sanity-check before pressing F8. Importing vlm_driver also
+    # triggers its module-level load_dotenv() side effect — config from .env
+    # becomes visible here, and a missing python-dotenv prints its setup hint.
+    if getattr(args, "auto_play", False) and getattr(args, "driver", "") == "vlm":
+        from tools.auto_play import vlm_driver  # noqa: F401  (side-effect import)
+        base = (getattr(args, "vlm_base_url", None)
+                or os.environ.get("VLM_BASE_URL") or "(SDK default)")
+        model = (getattr(args, "vlm_model", None)
+                 or os.environ.get("VLM_MODEL") or "(unset)")
+        api_key_present = bool(getattr(args, "vlm_api_key", None)
+                                or os.environ.get("VLM_API_KEY"))
+        budget = getattr(args, "vlm_budget_per_hour", 60)
+        print(f"[AUTO-PLAY] VLM endpoint base_url={base} model={model} "
+              f"budget={budget}/h api_key={'set' if api_key_present else 'MISSING'}",
+              flush=True)
+        if not api_key_present:
+            print("[AUTO-PLAY] WARN: VLM_API_KEY 未读到 — F8 后第一次调用会降级 "
+                  "KeepAliveDriver。检查 .env 是否在 cwd 或祖先目录，或加 --vlm-api-key",
+                  flush=True)
+
     game_dir, game_exe, game_name, dataset_root, api = cmd_deploy(args)
     _precheck_scene(args, dataset_root, game_name)
 
