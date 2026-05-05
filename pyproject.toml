@@ -23,6 +23,19 @@ auto-play-vlm = [
     # Loads .env file (VLM_API_KEY / VLM_BASE_URL / VLM_MODEL) at module import.
     "python-dotenv>=1.0",
 ]
+auto-play-ocr = [
+    # Windows.Media.Ocr via winrt — used by watchdog C arm to detect
+    # on-screen "M Back" / "ESC Close" / "<KEY> Skip" dismiss prompts and
+    # trigger VLM consultant. Free, system-bundled OCR (no extra models /
+    # downloads), supports en + zh + ja out of the box on Windows 10+.
+    # Per-namespace winrt packages are mandatory (the legacy umbrella
+    # `winrt` package is deprecated since 2024).
+    "winrt-runtime",
+    "winrt-Windows.Foundation",
+    "winrt-Windows.Graphics.Imaging",
+    "winrt-Windows.Media.Ocr",
+    "winrt-Windows.Storage.Streams",
+]
 
 [dependency-groups]
 dev = [

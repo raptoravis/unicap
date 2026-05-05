@@ -15,9 +15,14 @@ from typing import TYPE_CHECKING, Any
 import cv2
 import numpy as np
 
-from tools.auto_play.driver import Observation
+from tools.auto_play.driver import Action, Observation
 from tools.auto_play.keep_alive import step_to_actions
 from tools.auto_play.vlm_driver import BudgetExhausted
+
+try:
+    from tools.auto_play import ocr_detector
+except Exception:  # pragma: no cover — defensive: ocr_detector itself imports lazily
+    ocr_detector = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
     from tools.auto_play.input_backend import InputBackend
@@ -53,9 +58,27 @@ class StaticFrameWatchdog:
     # anywhere), the scene is stuck despite per-frame motion. Catches
     # tutorial popups / dialog windows where the underlying game scene
     # freezes but cinematic-style elements keep animating in place.
-    _LONG_WINDOW_SAMPLES = 4         # → window = sample_period_s * (N-1) ≈ 9-12s
+    _LONG_WINDOW_SAMPLES = 3         # → window = sample_period_s * (N-1) ≈ 4-6s
     _LONG_WINDOW_MEAN_CAP = 0.04     # mean diff vs N-old frame
     _LONG_WINDOW_RATIO_CAP = 0.30    # moved-pixel ratio vs N-old frame
+
+    # UI-mask arm: when --ui-mode=both, BackBufferUI.png (post-UI) ⊖
+    # BackBuffer.png (pre-UI) yields a per-pixel "is this a UI overlay" mask.
+    # Frame-diff arms can't classify split-screen tutorial popups (left half
+    # live game animates, right half popup GIF animates) — but the spatial
+    # ratio of UI pixels is unambiguous (popup covers ~30-50% of screen,
+    # normal HUD covers ~5-10%, fullscreen menu 70%+). Trigger when overlay
+    # is large enough to plausibly block gameplay AND persists across samples.
+    _UI_MASK_PIXEL_THRESHOLD = 30          # per-channel max diff to count as UI
+    _UI_MASK_RATIO_TRIGGER = 0.20          # ≥20% UI pixels = popup-sized
+    _UI_MASK_CONSECUTIVE = 2               # × sample_period_s = persist time
+
+    # OCR arm: every N samples, run Windows.Media.Ocr on the latest frame and
+    # check for explicit dismiss-prompt text ("M Back" / "ESC Close" / etc.).
+    # When matched, inject the key directly (OCR's match is ground-truth-ish;
+    # bypass VLM to save latency/cost). Sampled less often than other arms
+    # because OCR costs 100-500ms CPU.
+    _OCR_SAMPLE_INTERVAL = 4               # × sample_period_s ≈ 8s
 
     def __init__(
         self,
@@ -94,6 +117,10 @@ class StaticFrameWatchdog:
         self._frame_history: collections.deque = collections.deque(
             maxlen=self._LONG_WINDOW_SAMPLES,
         )
+        # UI-mask arm consecutive trigger counter.
+        self._ui_mask_consecutive = 0
+        # OCR arm sample counter (mod _OCR_SAMPLE_INTERVAL).
+        self._ocr_tick_counter = 0
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -193,6 +220,57 @@ class StaticFrameWatchdog:
                     )
                     self._trigger_recovery(long_mean, long_moved)
                     self._frame_history.clear()
+                    continue
+
+            # UI-mask arm — only fires under --ui-mode=both (needs both pre-UI
+            # BackBuffer.png AND post-UI BackBufferUI.png at the same frame).
+            # Pair lookup returns (None, None) when one or both missing → arm
+            # silently disabled (no warning, no trigger).
+            bb_img, ui_img = self._read_latest_pair()
+            if bb_img is not None and ui_img is not None \
+                    and bb_img.shape == ui_img.shape:
+                ui_diff = np.abs(
+                    bb_img.astype(np.int16) - ui_img.astype(np.int16)
+                ).max(axis=2)
+                ui_mask_ratio = float(
+                    (ui_diff > self._UI_MASK_PIXEL_THRESHOLD).mean()
+                )
+                if ui_mask_ratio >= self._UI_MASK_RATIO_TRIGGER:
+                    self._ui_mask_consecutive += 1
+                    if self._ui_mask_consecutive >= self._UI_MASK_CONSECUTIVE:
+                        log.info(
+                            "[WATCHDOG] UI-mask static (%.1fs): "
+                            "ui_ratio=%.1f%% — 当作 popup",
+                            self._sample_period_s * self._UI_MASK_CONSECUTIVE,
+                            ui_mask_ratio * 100,
+                        )
+                        self._trigger_recovery(ui_mask_ratio, ui_mask_ratio)
+                        self._ui_mask_consecutive = 0
+                else:
+                    self._ui_mask_consecutive = 0
+
+            # OCR arm — every _OCR_SAMPLE_INTERVAL samples, scan for explicit
+            # dismiss-prompt text. Match → inject key directly (no VLM round-
+            # trip; OCR's match is the literal on-screen hint). Disabled when
+            # winrt-Windows.Media.Ocr is not installed.
+            self._ocr_tick_counter += 1
+            if (ocr_detector is not None
+                    and self._ocr_tick_counter >= self._OCR_SAMPLE_INTERVAL):
+                self._ocr_tick_counter = 0
+                key = ocr_detector.detect_dismiss_prompt(current)
+                if key:
+                    log.info(
+                        "[WATCHDOG] OCR dismiss-prompt key=%s — 直接注入", key,
+                    )
+                    self._trigger_count += 1
+                    try:
+                        self._backend.inject(Action(
+                            kind="key",
+                            payload={"vk": key, "event": "press"},
+                            duration_ms=80,
+                        ))
+                    except Exception as e:
+                        log.warning("[WATCHDOG] OCR inject 异常: %s", e)
 
     # Frames younger than this are likely still being written by the addon →
     # cv2.imdecode would fail mid-write. 500ms is comfortably longer than
@@ -245,6 +323,63 @@ class StaticFrameWatchdog:
         if img is None:
             return None
         # Subsample to 320x180 for cheap diff
+        h, w = img.shape[:2]
+        if w > 320:
+            img = cv2.resize(img, (320, max(1, int(h * 320 / w))),
+                             interpolation=cv2.INTER_AREA)
+        return img
+
+    # Two PNG mtimes from the same frame should land within ~100ms of each
+    # other (addon writes both back-to-back in on_reshade_present). Anything
+    # wider = different frames, can't pair them safely.
+    _PAIR_MAX_MTIME_GAP_S = 0.4
+
+    def _read_latest_pair(self) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """Read latest BackBuffer.png + BackBufferUI.png pair from the same
+        frame (under --ui-mode=both). Returns (bb, ui) when both are present
+        AND their mtimes are within _PAIR_MAX_MTIME_GAP_S; (None, None)
+        otherwise (no warning — UI-mask arm silently inactive in single-stream
+        modes)."""
+        if not self._frames_dir.is_dir():
+            return None, None
+        now = time.time()
+        latest_ui_mtime = -1.0
+        latest_ui_path: Path | None = None
+        latest_bb_mtime = -1.0
+        latest_bb_path: Path | None = None
+        for p in self._frames_dir.iterdir():
+            if not p.name.endswith(".png"):
+                continue
+            try:
+                m = p.stat().st_mtime
+            except OSError:
+                continue
+            if now - m < self._BMP_MIN_AGE_S:
+                continue
+            if "BackBufferUI" in p.name:
+                if m > latest_ui_mtime:
+                    latest_ui_mtime, latest_ui_path = m, p
+            else:
+                if m > latest_bb_mtime:
+                    latest_bb_mtime, latest_bb_path = m, p
+        if latest_ui_path is None or latest_bb_path is None:
+            return None, None
+        if abs(latest_ui_mtime - latest_bb_mtime) > self._PAIR_MAX_MTIME_GAP_S:
+            return None, None
+        bb = self._decode_subsampled(latest_bb_path)
+        ui = self._decode_subsampled(latest_ui_path)
+        return bb, ui
+
+    def _decode_subsampled(self, path: Path) -> np.ndarray | None:
+        try:
+            data = np.fromfile(str(path), dtype=np.uint8)
+        except OSError:
+            return None
+        if data.size < 100:
+            return None
+        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        if img is None:
+            return None
         h, w = img.shape[:2]
         if w > 320:
             img = cv2.resize(img, (320, max(1, int(h * 320 / w))),

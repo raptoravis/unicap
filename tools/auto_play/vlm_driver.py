@@ -425,6 +425,62 @@ __GAME_INSTRUCTIONS__
 """
 
 
+_PATROL_PROMPT_TEMPLATE = """You are an UI-overlay detector for unicap auto-play. Your ONLY job: scan the current game frame and answer "is there a UI overlay/popup/menu blocking gameplay that needs dismissing?"
+
+If YES → return ONE action that presses the EXACT dismiss key shown on screen.
+If NO → return empty actions [].
+
+Default to NO when uncertain. The auto-play bot keeps the character moving on its own; your job is ONLY to unstick popups.
+
+# What counts as YES (overlay needs dismissing)
+
+- Tutorial popup with title + description + key hint (e.g. "M Back", "ESC Back", "Press B to close")
+- Fullscreen menu (dark panel covering screen with selectable options)
+- Pause / system menu (settings, save/load, quit options)
+- Dialog box waiting for player input (e.g. "Press SPACE to continue")
+- Inventory / map screen
+- Death / Game Over screen with respawn prompt
+- Half-screen tutorial popup (panel covering one side with a "<KEY> Back" hint at the bottom — even when the rest of the screen still shows the live game world, the player is locked out)
+
+# What counts as NO (do nothing)
+
+- Normal gameplay HUD (health bar, minimap, command list at bottom)
+- Cinematic / cutscene with letterbox bars
+- Loading screen (no UI to dismiss)
+- Combat scene (enemies visible, no popup overlay)
+- Open exploration / character standing in environment
+
+# Rules
+
+1. ⚠️ HIGHEST PRIORITY — if you see explicit dismiss text like `<KEY> Back` / `<KEY> Close` / `<KEY> Cancel` / `<KEY> Skip` / `Press <KEY> to dismiss` / `按 <KEY> 返回`, output that EXACT key (do not assume — read the hint).
+2. ESC is dangerous — only output ESC when you confirmed a fullscreen menu (dark panel + option list visible AND no live game scene behind). Never output ESC for HUD overlays.
+3. NEVER output F8 / F9 (unicap hotkeys).
+4. NEVER output story-quit / save-and-quit keys.
+5. Output ONLY one JSON object: {"reasoning": "<one sentence>", "actions": [...]}. No prose, no code fence.
+6. Output ONLY key actions (no mouse / gamepad / wait — patrol is for dismissing UI, nothing else).
+7. Cap each `duration_ms` at 200ms (these are taps, not holds).
+8. Default to {"reasoning": "no overlay detected", "actions": []} when uncertain — false positives create more problems than missed popups (a wrong key press can OPEN a menu that wasn't there).
+
+# Examples
+
+YES — tutorial popup with hint "M Back":
+{"reasoning":"tutorial popup 'Locking Onto Targets' with 'M Back' hint at bottom-right, dismiss with M","actions":[{"kind":"key","payload":{"vk":"M","event":"press"},"duration_ms":80}]}
+
+YES — fullscreen menu confirmed:
+{"reasoning":"fullscreen menu (dark panel + option list), dismiss with ESC","actions":[{"kind":"key","payload":{"vk":"ESC","event":"press"},"duration_ms":80}]}
+
+NO — HUD only:
+{"reasoning":"normal gameplay HUD visible, no overlay","actions":[]}
+
+NO — uncertain:
+{"reasoning":"unclear scene, default to no action","actions":[]}
+
+# GAME OPERATION GUIDE (same controls as main bot — use to identify dismiss keys)
+
+__GAME_INSTRUCTIONS__
+"""
+
+
 class VLMDriver(BotDriver):
     """OpenAI-compatible vision-language model driver. Configuration comes
     from VLM_API_KEY / VLM_BASE_URL / VLM_MODEL env vars (loadable via .env);
@@ -487,6 +543,13 @@ class VLMDriver(BotDriver):
         # Plain string replacement — the template has literal JSON examples
         # with `{` and `}`, so str.format() chokes.
         self._system_prompt = _SYSTEM_PROMPT_TEMPLATE.replace(
+            "__GAME_INSTRUCTIONS__",
+            self._game_instructions or "(no game-specific guide provided)",
+        )
+        # Patrol prompt: shorter, conservative, dismiss-only. Used by the
+        # hybrid runner's patrol thread (~12s tick) to catch popups that
+        # frame-diff-based watchdog misses (e.g. FF7R split-screen tutorial).
+        self._patrol_prompt = _PATROL_PROMPT_TEMPLATE.replace(
             "__GAME_INSTRUCTIONS__",
             self._game_instructions or "(no game-specific guide provided)",
         )
@@ -556,11 +619,23 @@ class VLMDriver(BotDriver):
         return self._client
 
     def next_actions(self, observation: Observation) -> list[Action]:
+        return self._run_once(self._system_prompt, tag="VLM")
+
+    def patrol_check(self, observation: Observation) -> list[Action]:
+        """Dismiss-only check using the conservative patrol prompt. Returns
+        [] when no overlay detected; returns 1 key action when one is. Shares
+        budget + client + frames source with `next_actions`."""
+        return self._run_once(self._patrol_prompt, tag="PATROL")
+
+    def _run_once(self, system_prompt: str, *, tag: str) -> list[Action]:
+        """Single VLM call with the given system prompt. Both the regular
+        decision loop and the patrol consultant funnel through here so they
+        share budget tracking, client init, and frame read logic."""
         self._budget.check()
 
         frame = self._read_latest_frame()
         if frame is None:
-            log.debug("[VLM] frames_dir 无可读 BMP — skip tick")
+            log.debug("[%s] frames_dir 无可读 BMP — skip tick", tag)
             return []
 
         client = self._ensure_client()  # may raise BudgetExhausted
@@ -569,7 +644,7 @@ class VLMDriver(BotDriver):
             ".jpg", subsampled, [int(cv2.IMWRITE_JPEG_QUALITY), 85],
         )
         if not ok:
-            log.warning("[VLM] cv2.imencode 失败 — skip tick")
+            log.warning("[%s] cv2.imencode 失败 — skip tick", tag)
             return []
         b64_data = base64.standard_b64encode(buf.tobytes()).decode("ascii")
 
@@ -581,7 +656,7 @@ class VLMDriver(BotDriver):
                 max_tokens=1024,
                 response_format={"type": "json_object"},
                 messages=[
-                    {"role": "system", "content": self._system_prompt},
+                    {"role": "system", "content": system_prompt},
                     {
                         "role": "user",
                         "content": [
@@ -606,7 +681,7 @@ class VLMDriver(BotDriver):
             stats.latency_s = time.monotonic() - t0
             stats.schema_ok = False
             self._budget.record(stats)
-            log.warning("[VLM] API 调用异常: %s — skip tick", e)
+            log.warning("[%s] API 调用异常: %s — skip tick", tag, e)
             return []
 
         stats.latency_s = time.monotonic() - t0
@@ -629,16 +704,16 @@ class VLMDriver(BotDriver):
             text = response.choices[0].message.content
         except (AttributeError, IndexError):
             text = None
-        actions = self._parse_text_to_actions(text, stats)
+        actions = self._parse_text_to_actions(text, stats, tag=tag)
         self._budget.record(stats)
         return actions
 
     def _parse_text_to_actions(
-        self, text: Any, stats: _CallStats,
+        self, text: Any, stats: _CallStats, *, tag: str = "VLM",
     ) -> list[Action]:
         if not text:
             stats.schema_ok = False
-            log.warning("[VLM] response 无 text 内容 — drop")
+            log.warning("[%s] response 无 text 内容 — drop", tag)
             return []
         if not isinstance(text, str):
             text = str(text)
@@ -648,13 +723,13 @@ class VLMDriver(BotDriver):
         except json.JSONDecodeError as e:
             stats.schema_ok = False
             log.warning(
-                "[VLM] JSON 解析失败: %s text=%r — drop", e, text[:200],
+                "[%s] JSON 解析失败: %s text=%r — drop", tag, e, text[:200],
             )
             return []
         actions_data = data.get("actions") or []
         reasoning = data.get("reasoning") or ""
         if reasoning:
-            log.info("[VLM] reasoning: %s", reasoning[:160])
+            log.info("[%s] reasoning: %s", tag, reasoning[:160])
 
         actions: list[Action] = []
         for i, a in enumerate(actions_data):
@@ -664,17 +739,17 @@ class VLMDriver(BotDriver):
                 dur = int(a["duration_ms"])
             except (KeyError, TypeError, ValueError) as e:
                 log.warning(
-                    "[VLM] action[%d]=%r 字段缺失/类型错: %s — drop this action",
-                    i, a, e,
+                    "[%s] action[%d]=%r 字段缺失/类型错: %s — drop this action",
+                    tag, i, a, e,
                 )
                 continue
             if kind not in ("key", "mouse", "gamepad", "wait"):
-                log.warning("[VLM] action[%d] kind=%r 非法 — drop", i, kind)
+                log.warning("[%s] action[%d] kind=%r 非法 — drop", tag, i, kind)
                 continue
             if not isinstance(payload, dict):
                 log.warning(
-                    "[VLM] action[%d] payload 非 dict (%s) — drop",
-                    i, type(payload).__name__,
+                    "[%s] action[%d] payload 非 dict (%s) — drop",
+                    tag, i, type(payload).__name__,
                 )
                 continue
             actions.append(Action(kind=kind, payload=payload, duration_ms=dur))

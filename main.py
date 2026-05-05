@@ -452,7 +452,7 @@ def _start_auto_play(args, frames_dir: Path, game_exe_stem: str):
             vlm_api_key=getattr(args, "vlm_api_key", None) or None,
             vlm_base_url=getattr(args, "vlm_base_url", None) or None,
             vlm_model=getattr(args, "vlm_model", None) or None,
-            vlm_budget_per_hour=getattr(args, "vlm_budget_per_hour", 60),
+            vlm_budget_per_hour=getattr(args, "vlm_budget_per_hour", 360),
         )
         runner.start()
     except NotImplementedError as e:
@@ -547,9 +547,9 @@ def cmd_launch(args):
                  or os.environ.get("VLM_MODEL") or "(unset)")
         api_key_present = bool(getattr(args, "vlm_api_key", None)
                                 or os.environ.get("VLM_API_KEY"))
-        budget = getattr(args, "vlm_budget_per_hour", 60)
+        budget = getattr(args, "vlm_budget_per_hour", 360)
         tag = "VLM endpoint" if args.driver == "vlm" \
-              else "hybrid VLM (watchdog 静帧触发时介入)"
+              else "hybrid VLM (12s patrol + watchdog 触发介入)"
         print(f"[AUTO-PLAY] {tag} base_url={base} model={model} "
               f"budget={budget}/h api_key={'set' if api_key_present else 'MISSING'}",
               flush=True)
@@ -1153,8 +1153,10 @@ def main():
                    help="auto-play profile 名 (profiles/<name>.yaml)；不传则按 exe 名 fuzzy match，回落 _default")
     p.add_argument("--auto-play-debug", action="store_true",
                    help="auto-play 详细 log（每次注入都打到 auto_play.log）")
-    p.add_argument("--vlm-budget-per-hour", type=int, default=60,
-                   help="VLM driver 每小时调用上限（默认 60；耗尽自动降级 keep-alive）")
+    p.add_argument("--vlm-budget-per-hour", type=int, default=360,
+                   help="VLM 每小时调用上限（默认 360 = hybrid 12s patrol 300/h "
+                        "+ watchdog/UI-mask/OCR 触发 60/h 余量；纯 vlm 1Hz 模式 "
+                        "建议拉到 3600；耗尽自动降级 keep-alive）")
 
     p = sub.add_parser("video", help="批量生成游戏目录下所有缺失的 video.mp4 / video_ui.mp4")
     p.add_argument("--game-dir", default="", metavar="DIR",

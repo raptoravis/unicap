@@ -68,12 +68,10 @@ keep_alive:
     - {action: move_forward, duration_ms: 2000}
 
 watchdog:
-  sample_period_s: 3.0
-  static_diff_threshold: 0.003   # 阈值收紧：VLM 思考时画面 diff ~0.002，
-                                 # 老阈值 0.008 把"VLM 正在等响应"当卡死，
-                                 # 频繁触发 recovery 反而把游戏节奏踢乱。
-  consecutive_static_required: 4 # 12s 才触发，给 VLM 充分决策窗口
-                                 # （单次决策 ~3-4s，4 个采样周期=覆盖 3 次决策）
+  sample_period_s: 2.0           # 30s capture session 里多留响应窗口；
+                                 # short-window=8s, long-window=4s 累积
+  static_diff_threshold: 0.003   # 阈值收紧：VLM 思考时画面 diff ~0.002
+  consecutive_static_required: 4 # 8s 才触发，给 VLM 充分决策窗口
 
 vlm:
   decision_period_s: 0.5    # VLM 拿到 response 立即发下一帧（实际节奏受网络

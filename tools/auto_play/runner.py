@@ -101,7 +101,11 @@ class AutoPlayRunner:
         self._backend = InputBackend(profile, debug=debug)
         # `hybrid` = keep_alive runs the main loop; the watchdog gets a VLM
         # consultant that fires only when frames go static (so VLM cost is
-        # bounded by watchdog trigger rate, not 1 Hz).
+        # bounded by watchdog trigger rate, not 1 Hz). The patrol thread
+        # additionally polls VLM every 12s (independent of watchdog) to catch
+        # popups that frame-diff detection misses (e.g. FF7R split-screen
+        # tutorial: left half live game + right half popup with GIF preview —
+        # neither global, local-only, nor long-window static checks fire).
         vlm_for_watchdog: VLMDriver | None = None
         if driver_name == "keep-alive":
             self._driver = create_driver(driver_name, profile)
@@ -132,6 +136,13 @@ class AutoPlayRunner:
             frames_dir=frames_dir, profile=profile, input_backend=self._backend,
             log_path=log_path, vlm_driver=vlm_for_watchdog,
         )
+        # Hybrid-mode patrol: same VLM client as watchdog, separate prompt
+        # (dismiss-only). 12s period × 60min ≈ 300 calls/h — leave ~60 calls/h
+        # headroom for watchdog/UI-mask/OCR triggers, hence default budget 360.
+        self._patrol_vlm: VLMDriver | None = vlm_for_watchdog
+        self._patrol_period_s = 12.0
+        self._patrol_disabled = False
+        self._patrol_thread: threading.Thread | None = None
 
         self._stop_evt = threading.Event()
         self._driver_thread: threading.Thread | None = None
@@ -175,6 +186,15 @@ class AutoPlayRunner:
             target=self._driver_loop, name="auto-play-driver", daemon=True,
         )
         self._driver_thread.start()
+        if self._patrol_vlm is not None:
+            self._patrol_thread = threading.Thread(
+                target=self._patrol_loop, name="auto-play-patrol", daemon=True,
+            )
+            self._patrol_thread.start()
+            log.info(
+                "[PATROL] 启动 period=%.1fs (hybrid mode dismiss-only consultant)",
+                self._patrol_period_s,
+            )
 
     def stop(self, timeout_s: float = 3.0) -> None:
         if self._stopped:
@@ -185,6 +205,11 @@ class AutoPlayRunner:
             self._watchdog.stop(timeout_s=timeout_s)
         except Exception as e:
             log.warning("[AUTO-PLAY] watchdog stop 异常: %s", e)
+        if self._patrol_thread is not None:
+            self._patrol_thread.join(timeout=timeout_s)
+            if self._patrol_thread.is_alive():
+                log.warning("[PATROL] thread join 超时 (%.1fs)", timeout_s)
+            self._patrol_thread = None
         if self._driver_thread is not None:
             self._driver_thread.join(timeout=timeout_s)
             if self._driver_thread.is_alive():
@@ -208,6 +233,56 @@ class AutoPlayRunner:
             and self._driver_thread.is_alive()
             and not self._stop_evt.is_set()
         )
+
+    def _patrol_loop(self) -> None:
+        """Hybrid-mode supplementary VLM consultant. Every patrol_period_s,
+        ask the VLM 'is there an overlay/popup that needs dismissing?' (using
+        the conservative patrol prompt that returns [] when uncertain).
+        Independent of watchdog static-frame detection — covers cases where
+        frame-diff statistics can't classify the screen as stuck (split-screen
+        tutorial popups, animated overlays, etc.).
+
+        On BudgetExhausted: permanently disable patrol for the rest of the
+        session (capture continues; watchdog may still trigger via fallback
+        recovery)."""
+        if self._patrol_vlm is None:
+            return
+        # Stagger first tick so patrol doesn't fire at the same instant as
+        # watchdog's first sample — reduces concurrent VLM calls.
+        first_delay = max(2.0, self._patrol_period_s / 2)
+        self._stop_evt.wait(first_delay)
+        while not self._stop_evt.is_set():
+            if self._patrol_disabled:
+                return
+            t0 = time.monotonic()
+            try:
+                obs = Observation(timestamp=time.time(), profile=self._profile)
+                actions = self._patrol_vlm.patrol_check(obs) or []
+            except BudgetExhausted as e:
+                log.warning(
+                    "[PATROL] VLM 不可用 (%s) — 本 session 后续不再 patrol", e,
+                )
+                self._patrol_disabled = True
+                return
+            except Exception as e:
+                log.warning("[PATROL] 决策异常: %s — 本次跳过", e)
+                actions = []
+
+            if actions:
+                log.info(
+                    "[PATROL] 检测到 overlay → 注入 %d action(s)", len(actions),
+                )
+                for a in actions:
+                    if self._stop_evt.is_set():
+                        return
+                    try:
+                        self._backend.inject(a)
+                    except Exception as e:
+                        log.warning("[PATROL] inject 异常: %s", e)
+
+            elapsed = time.monotonic() - t0
+            sleep_s = max(0.5, self._patrol_period_s - elapsed)
+            self._stop_evt.wait(sleep_s)
 
     def _driver_loop(self) -> None:
         period = max(0.05, self._driver.decision_period_s)
