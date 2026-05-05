@@ -40,7 +40,14 @@ log = logging.getLogger("unicap.replay")
 
 @dataclass(slots=True)
 class MetaModel:
-    """meta.json structure. `syncs` is per-sync-id overrides for thresholds."""
+    """meta.json structure. `syncs` is per-sync-id overrides for thresholds.
+
+    `observed_inputs` is the union of every input the recorder saw fired during
+    this session — "the player at least once pressed each of these". It's a
+    capability *minimum*, not the game's full input space. Useful as a starting
+    point for a profile.controls map and (eventually) as a hard constraint on
+    the VLM driver's output space.
+    """
 
     name: str
     version: int
@@ -52,6 +59,7 @@ class MetaModel:
     mouse_origin: tuple[int, int] = (0, 0)
     vlm_fallback_enabled: bool = False
     syncs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    observed_inputs: dict[str, list[str]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -80,6 +88,7 @@ def load_meta(path: Path) -> MetaModel:
         mouse_origin=tuple(raw.get("mouse_origin", [0, 0])),  # type: ignore[arg-type]
         vlm_fallback_enabled=bool(raw.get("vlm_fallback_enabled", False)),
         syncs=dict(raw.get("syncs", {})),
+        observed_inputs=dict(raw.get("observed_inputs", {})),
     )
 
 
@@ -93,6 +102,54 @@ def validate_meta(raw: dict[str, Any]) -> None:
     ws = raw.get("window_size")
     if not (isinstance(ws, (list, tuple)) and len(ws) == 2 and all(isinstance(x, int) for x in ws)):
         raise ValueError(f"meta.json: window_size 必须是 [int, int]，实际 {ws!r}")
+
+
+def aggregate_observed_inputs(events: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Walk `events` once, return the union of every input channel that fired.
+
+    Outputs a dict with sorted lists per channel:
+      - kb: virtual-key friendly names (W, SPACE, SHIFT, ...)
+      - mouse_buttons: left | right | middle
+      - gamepad_buttons: A | B | DPAD_UP | ...
+      - gamepad_sticks / gamepad_triggers: left | right (which side ever moved)
+
+    Empty channels are omitted from the dict so meta.json stays compact for
+    keyboard-only sessions.
+    """
+    kb: set[str] = set()
+    mouse_btns: set[str] = set()
+    gp_btns: set[str] = set()
+    gp_sticks: set[str] = set()
+    gp_trigs: set[str] = set()
+    for e in events:
+        t = e.get("type")
+        if t == "key_down":
+            v = e.get("vk")
+            if isinstance(v, str):
+                kb.add(v)
+        elif t == "mouse_button_down":
+            b = e.get("button")
+            if isinstance(b, str):
+                mouse_btns.add(b)
+        elif t == "gamepad_button_down":
+            b = e.get("button")
+            if isinstance(b, str):
+                gp_btns.add(b)
+        elif t == "gamepad_stick":
+            s = e.get("side")
+            if isinstance(s, str):
+                gp_sticks.add(s)
+        elif t == "gamepad_trigger":
+            s = e.get("side")
+            if isinstance(s, str):
+                gp_trigs.add(s)
+    out: dict[str, list[str]] = {}
+    if kb:         out["kb"] = sorted(kb)
+    if mouse_btns: out["mouse_buttons"] = sorted(mouse_btns)
+    if gp_btns:    out["gamepad_buttons"] = sorted(gp_btns)
+    if gp_sticks:  out["gamepad_sticks"] = sorted(gp_sticks)
+    if gp_trigs:   out["gamepad_triggers"] = sorted(gp_trigs)
+    return out
 
 
 def iter_events(jsonl_path: Path) -> Iterator[dict[str, Any]]:

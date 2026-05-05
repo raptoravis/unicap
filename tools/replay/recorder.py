@@ -33,7 +33,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from tools.replay.schema import MetaModel, RECORDER_VERSION, SCHEMA_VERSION, write_meta
+from tools.replay.schema import (
+    MetaModel,
+    RECORDER_VERSION,
+    SCHEMA_VERSION,
+    aggregate_observed_inputs,
+    write_meta,
+)
 
 
 log = logging.getLogger("unicap.replay")
@@ -337,6 +343,7 @@ class ReplayRecorder:
         # meta.json — aggregate per-sync settings (defaults; recorder doesn't
         # know per-sync overrides yet — sponsor edits manually if needed)
         sync_ids = sorted({e["id"] for e in self._events if e.get("type") == "sync"})
+        observed = aggregate_observed_inputs(self._events)
         meta = MetaModel(
             name=self.scene_name,
             version=SCHEMA_VERSION,
@@ -349,6 +356,7 @@ class ReplayRecorder:
             vlm_fallback_enabled=False,
             syncs={sid: {"hamming_threshold": 16, "timeout_s": 30}
                    for sid in sync_ids},
+            observed_inputs=observed,
         )
         write_meta(self.scene_dir / "meta.json", meta)
 
