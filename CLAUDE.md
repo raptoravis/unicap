@@ -139,7 +139,7 @@ After a survey completes, Python writes the recommended skip to `fc_skip_count.t
 
 **`capture_all.py`** — two threads:
 
-- **input thread** — samples keyboard (`GetKeyboardState`), mouse (`GetCursorPos`), XInput gamepad at 120 Hz; writes `inputs.jsonl` on stop
+- **input thread** — samples keyboard (`GetAsyncKeyState`), mouse (`GetCursorPos`), XInput gamepad at 120 Hz; writes `inputs.jsonl` on stop
 - **main thread** — writes `fc_output_dir.txt` so the addon writes frames directly to `frames/`; monitors frame count; stops when external `stop_event` is set (F9 watcher in `main.py`) or optional `duration` elapses
 
 The addon handles all timing and frame output; `capture_all.py` only records inputs and monitors progress.
@@ -204,7 +204,7 @@ uv run main.py launch --game-path "...DOOMEternalx64vk.exe" --ui-mode ui --auto-
 | `--profile NAME` | `profiles/<NAME>.yaml`；不传则 exe 名 fuzzy match |
 | `--auto-play-debug` | 详细 log（每次注入打到 `%TEMP%/unicap/auto_play.log`） |
 
-**注入通路**：bot 的 input 走 OS 级 SendInput（键鼠）+ ViGEm（虚拟手柄，软依赖）。`capture_all._thread_input` 用 `GetKeyboardState`/`XInput` 采集，自然录到 `inputs.jsonl` — **bot 输入与人类输入无差别**。
+**注入通路**：bot 的 input 走 OS 级 SendInput（键鼠）+ ViGEm（虚拟手柄，软依赖）。`capture_all._thread_input` 用 `GetAsyncKeyState`/`XInput` 采集，自然录到 `inputs.jsonl` — **bot 输入与人类输入无差别**。
 
 **架构**：
 - `tools/auto_play/driver.py` — `BotDriver` ABC + `Action` / `Observation` 数据契约
