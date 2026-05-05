@@ -85,6 +85,17 @@ def _fmt_dur(seconds: float) -> str:
     return f"{seconds:.1f}s"
 
 
+# ── Self-invocation helper ────────────────────────────────────────────────────
+# Used in user-facing hints. Returns the right way for the user to re-invoke
+# this CLI given how *this* process was started — `unicap.exe ...` if running
+# as a Nuitka standalone, `uv run main.py ...` otherwise.
+
+def _self_cmd() -> str:
+    if getattr(sys, "frozen", False) or "__compiled__" in globals():
+        return Path(sys.argv[0]).name  # e.g. "unicap.exe"
+    return "uv run main.py"
+
+
 # ── State sidecar (Python → addon) ────────────────────────────────────────────
 
 def _set_state(game_dir: Path, state: str) -> None:
@@ -1007,7 +1018,7 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path,
         print(f"[VIDEO] 总耗时 {_fmt_dur(time.perf_counter() - t_video)}")
     else:
         print("[VIDEO] launch 默认不生成（加 --video 可即时生成），待会儿运行：")
-        print(f"        uv run main.py video \"{dataset_root / game_name}\"")
+        print(f"        {_self_cmd()} video --game-dir \"{dataset_root / game_name}\"")
 
     print(f"[会话] {session_dir}")
     if getattr(args, "pack", False):
@@ -1024,7 +1035,7 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path,
         print(f"[PACK] 总耗时 {_fmt_dur(time.perf_counter() - t_pack)}")
     else:
         print("[PACK] launch 默认不打包（加 --pack 可即时打包），待会儿运行：")
-        print(f"       uv run main.py pack \"{dataset_root / game_name}\"")
+        print(f"       {_self_cmd()} pack --game-dir \"{dataset_root / game_name}\"")
 
     return stopped_by_f9
 
@@ -1194,7 +1205,7 @@ def _make_video(frames_dir: Path, output: Path, fps: float = 0,
 
 def cmd_video(args):
     if not args.game_dir:
-        sys.exit("[错误] video 需要游戏目录参数：uv run main.py video --game-dir <DIR>")
+        sys.exit(f"[错误] video 需要游戏目录参数：{_self_cmd()} video --game-dir <DIR>")
 
     game_dir = Path(args.game_dir)
     if not game_dir.is_dir():
@@ -1255,7 +1266,7 @@ def cmd_pack(args):
         return
 
     if not args.game_dir:
-        sys.exit("[错误] pack 需要游戏目录参数：uv run main.py pack --game-dir <DIR>")
+        sys.exit(f"[错误] pack 需要游戏目录参数：{_self_cmd()} pack --game-dir <DIR>")
 
     game_dir = Path(args.game_dir)
     if not game_dir.is_dir():
@@ -1306,7 +1317,7 @@ def cmd_pack(args):
 def cmd_scenes(args):
     """List recorded replay scenes under <game_dir>/_scenes/."""
     if not args.game_dir:
-        sys.exit("[错误] scenes 需要游戏目录参数：uv run main.py scenes --game-dir <DIR>")
+        sys.exit(f"[错误] scenes 需要游戏目录参数：{_self_cmd()} scenes --game-dir <DIR>")
     game_dir = Path(args.game_dir)
     if not game_dir.is_dir():
         sys.exit(f"[错误] 游戏目录不存在：{game_dir}")
@@ -1380,8 +1391,8 @@ def main():
                         "避免 DXGI fullscreen-exclusive 让 DWM 暂停 console 渲染；"
                         "--no-force-borderless 保留游戏自己的窗口模式")
     p.add_argument("--video", action=argparse.BooleanOptionalAction, default=False,
-                   help="F9 停止采集后立即生成 video.mp4（默认不生成；事后用 "
-                        "uv run main.py video DIR 批量补齐）")
+                   help=f"F9 停止采集后立即生成 video.mp4（默认不生成；事后用 "
+                        f"{_self_cmd()} video --game-dir DIR 批量补齐）")
     p.add_argument("--capture-duration", type=float, default=30.0, metavar="SECONDS",
                    help="单次 capture 时长（秒）；到时自动停当前会话 + 直接开下一段（新目录），"
                         "F9 才终止整轮。0 = 不限时（仅 F9 停）。默认 30")
