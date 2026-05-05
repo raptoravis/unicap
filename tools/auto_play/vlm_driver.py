@@ -72,13 +72,21 @@ log = logging.getLogger("unicap.auto_play")
 
 
 # Load .env from CWD or ancestor directories on module import. python-dotenv
-# is part of the auto-play-vlm extra; if it's missing we silently fall back to
-# whatever the shell has already exported.
+# is part of the auto-play-vlm extra; if it's missing we fall back to whatever
+# the shell already exported AND warn loudly — silent skip used to leave
+# sponsors thinking "my .env exists, why is VLM_API_KEY unset?".
 try:
     from dotenv import load_dotenv as _load_dotenv
     _load_dotenv()
 except ImportError:
-    pass
+    import sys as _sys
+    print(
+        "[VLM] python-dotenv 未安装 — .env 文件不会被自动加载。\n"
+        "      装法：uv sync --extra auto-play-vlm   "
+        "(或 pip install \"unicap[auto-play-vlm]\")\n"
+        "      不装的话需手动 export VLM_API_KEY / VLM_BASE_URL / VLM_MODEL 到 shell",
+        file=_sys.stderr, flush=True,
+    )
 
 
 VLM_API_KEY_ENV = "VLM_API_KEY"

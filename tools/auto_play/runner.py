@@ -130,6 +130,17 @@ class AutoPlayRunner:
         print(f"[AUTO-PLAY] driver={self._driver_name} profile={self._profile.name}"
               f" gamepad={'vigem_ok' if self._backend.gamepad_available else 'unavailable'}",
               flush=True)
+        # Surface VLM config so sponsors can sanity-check which endpoint /
+        # model is actually in effect (base_url + model resolve from CLI flags
+        # → env vars → .env at construction; printing the resolved value here
+        # avoids guesswork).
+        if self._driver_name == "vlm":
+            base = getattr(self._driver, "base_url", None) or "(SDK default)"
+            model = getattr(self._driver, "model_name", "") or "(unset)"
+            budget = getattr(getattr(self._driver, "_budget", None),
+                             "max_calls_per_hour", "?")
+            print(f"[AUTO-PLAY] VLM endpoint base_url={base} model={model}"
+                  f" budget={budget}/h", flush=True)
 
         self._stop_evt.clear()
         self._driver.on_start()
