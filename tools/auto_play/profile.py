@@ -28,15 +28,17 @@ REQUIRED_WATCHDOG_KEYS = {
 REQUIRED_INPUT_KEYS = {"prefer_gamepad", "mouse_sensitivity"}
 REQUIRED_VLM_KEYS = {"game_instructions", "frame_subsample_long_edge"}
 
-# F7 = replay record stop, F8/F9 = capture start/stop. These three are unicap's
-# hotkeys — auto-play (and replay player's input injection) must NEVER inject
-# them. Profile may add more entries (e.g. F6) but cannot remove these three.
-MANDATORY_RESERVED_KEYS = {"F7", "F8", "F9"}
+# F8/F9 = capture start/stop. These two are unicap's hotkeys — auto-play
+# must NEVER inject them. Profile may add more entries but cannot remove these.
+MANDATORY_RESERVED_KEYS = {"F8", "F9"}
 
 VALID_STEP_ACTIONS = {
     "move_forward", "move_back", "move_left", "move_right",
     "turn", "attack", "interact", "jump",
     "press_key", "stick_jitter", "wait",
+    # `dismiss_ui` resolves to controls.dismiss_ui — the per-game "back / close
+    # current UI / return to gameplay" key. ff7r=M, most other games=ESC.
+    "dismiss_ui",
 }
 
 

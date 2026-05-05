@@ -242,9 +242,11 @@ Use when you want to observe before acting (cutscene playing, animation finishin
 3. NEVER pick a "no" / "quit" / "permanent" story option. If a binary "yes/no" prompt blocks progress, prefer Enter / continue / skip — produce frames, do not finish the game.
 4. Output 1-6 actions per tick. More than that and the runner cannot keep up at 1 Hz.
 5. Cap each `duration_ms` at 2000ms (hard limit 5000ms). Smaller is better — you re-decide every ~1s anyway.
-6. If the screen looks like a menu or pause screen, your first action should usually be ESC or Enter to dismiss it and return to gameplay.
-7. If the screen is a cutscene (no HUD, cinematic letterbox bars), output `wait` for ~500ms — let the camera resolve before acting. After 2-3 waits, hit Enter to skip if still cinematic.
-8. If you cannot tell what is on screen (loading screen, mostly black, transition), default to "move forward 1500ms then small random turn" — keeps frames flowing without committing to a direction.
+6. ESC is dangerous — only press it when you are CERTAIN the screen is a fullscreen menu. The bar for "fullscreen menu" is high: a dark/solid panel covers most of the screen AND there is a list of selectable text options (Settings / Inventory / Save / Quit / etc) AND no live game scene is visible behind it. HUD elements (health bar, minimap, skill icons, dialog box, command list, interact prompt) DO NOT count as a menu — they are part of normal gameplay. Default action when uncertain: walk forward, NOT ESC.
+7. ESC anti-loop: if your *previous* tick output ESC and the current screen is still not a clearly fullscreen menu, your next response MUST NOT contain ESC. Pressing ESC twice on a non-menu screen typically *opens* the menu — you would create the very problem you tried to fix. Walk forward instead and re-evaluate next tick.
+8. If the screen is a cutscene (no HUD, cinematic letterbox bars), output `wait` for ~500ms — let the camera resolve before acting. After 2-3 waits, hit Enter to skip if still cinematic.
+9. If you cannot tell what is on screen (loading screen, mostly black, transition), default to "move forward 1500ms then small random turn" — keeps frames flowing without committing to a direction.
+10. ⚠️ HIGHEST PRIORITY — explicit dismiss prompts. If ANYWHERE on the screen (corner, bottom bar, popup edge) you see a key-hint of the form `<KEY> Back` / `<KEY> Close` / `<KEY> Cancel` / `<KEY> Exit` / `<KEY> Skip` / `Press <KEY> to dismiss` / `按 <KEY> 返回` — that is the game telling you exactly which key dismisses the current overlay. Output that exact key as your FIRST action, with `event: "press"` and `duration_ms: 80`. This rule overrides every other state recipe below — when an explicit hint exists, follow it. Common examples: "M Back", "ESC Back", "Enter Skip", "Space to continue", "F to interact". Half-screen tutorial popups (a colored panel covering one side with a title + animated demo + a "<KEY> Back" hint at the bottom) are NOT gameplay even when the rest of the screen still shows the game world — the player is locked out until the dismiss key is pressed.
 
 # Output discipline
 
@@ -324,15 +326,36 @@ For `kind: "wait"` — payload is always `{}`; `duration_ms` is how long to paus
  ]}
 ```
 
-## State: "Menu / pause / inventory / map"
+## State: "Fullscreen menu" (only when you see a dark panel covering >70% of screen + list of text options + no live game scene)
 
 ```
-{"reasoning":"map open, dismiss with M then resume",
+{"reasoning":"fullscreen menu confirmed (dark panel + option list visible), close with ESC",
  "actions":[
-   {"kind":"key","payload":{"vk":"M","event":"press"},"duration_ms":80},
    {"kind":"key","payload":{"vk":"ESC","event":"press"},"duration_ms":80}
  ]}
 ```
+
+If you see HUD overlay (health bar, minimap, dialog text on top of the live scene) — that is NOT a menu, do NOT press ESC. Treat as "Open exploration" or "Combat".
+
+## State: "Tutorial / overlay popup with explicit dismiss key" (very common — read the key hint!)
+
+A colored panel covers one side of the screen (often the right half) with a title (e.g. "Locking Onto Targets"), an animated demo image, descriptive text, AND a key hint at the bottom-right such as `M Back`, `ESC Back`, `B Close`, `Press F to dismiss`, etc. Your character may still be visible on the other half of the screen and may even keep playing an idle animation — that is irrelevant, the player input is gated until you dismiss the popup. ALWAYS press EXACTLY the key shown in the hint (do not assume — read it):
+
+```
+// FF7R example — hint says "M Back"
+{"reasoning":"tutorial popup 'Locking Onto Targets', hint reads 'M Back', dismiss with M",
+ "actions":[
+   {"kind":"key","payload":{"vk":"M","event":"press"},"duration_ms":80}
+ ]}
+
+// Generic example — hint says "ESC Back" or "ESC Close"
+{"reasoning":"tutorial overlay with 'ESC Back' hint at bottom-right, dismiss with ESC",
+ "actions":[
+   {"kind":"key","payload":{"vk":"ESC","event":"press"},"duration_ms":80}
+ ]}
+```
+
+Look for the hint text BEFORE deciding the screen is "gameplay with HUD". If a `<KEY> Back` / `<KEY> Close` / `<KEY> Cancel` style hint exists, the screen is NOT in gameplay state regardless of what else is visible. Different games use different keys (ESC, M, B, F, Space, Enter) — always READ the on-screen hint, never default to a single key.
 
 ## State: "Dialog choice" (text box with prompts)
 

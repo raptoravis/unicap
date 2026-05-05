@@ -13,8 +13,9 @@ controls:
   counter: mouse_right    # 自定义
   interact: E
   jump: SPACE             # 也用作披风滑翔
+  dismiss_ui: ESC         # 退当前 UI / 关菜单
 
-reserved_keys: [F6, F7, F8, F9]
+reserved_keys: [F8, F9]
 
 input:
   prefer_gamepad: false
@@ -34,9 +35,9 @@ keep_alive:
     - {action: interact,     duration_ms: 200}
     - {action: wait,         duration_ms: 700}
   recovery:
-    - {action: press_key, payload: {vk: ESC},   duration_ms: 100}
+    - {action: dismiss_ui, duration_ms: 100}
     - {action: wait,      duration_ms: 200}
-    - {action: press_key, payload: {vk: ESC},   duration_ms: 100}
+    - {action: dismiss_ui, duration_ms: 100}
     - {action: press_key, payload: {vk: SPACE}, duration_ms: 100}
     # 连续 4 次同向大转向 ≈ 180° 调头
     - {action: turn, duration_ms: 100, payload: {direction: left, magnitude: 2.0}}

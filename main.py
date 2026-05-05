@@ -72,7 +72,7 @@ CAP_HEIGHT = 1080
 CAP_FPS    = 30
 SURVEY_FPS = 1.0   # Python wait cadence during survey sweep
 
-VK_F7, VK_F8, VK_F9 = 0x76, 0x77, 0x78
+VK_F8, VK_F9 = 0x77, 0x78
 _user32 = ctypes.WinDLL("user32")
 
 
@@ -523,241 +523,9 @@ def cmd_deploy(args):
     return game_dir, game_exe, game_name, dataset_root, api
 
 
-# ── Replay (record/playback scene) ────────────────────────────────────────────
-
-_SCENE_NAME_FORBIDDEN = set(r'/\:*?"<>|')
-
-
-def _validate_scene_name(flag: str, name) -> None:
-    """Reject empty / whitespace-only / path-separator-bearing scene names.
-    None means the flag wasn't passed — that's fine, caller decides.
-    Rejecting `..` substring blocks both `../foo` traversal and the rare
-    `foo..bar` weird-name case (acceptable over-rejection for safety)."""
-    if name is None:
-        return
-    if not name.strip():
-        sys.exit(f"[错误] {flag} 不能为空")
-    if name != name.strip():
-        sys.exit(f"[错误] {flag} 名字不能含前后空白：{name!r}")
-    if ".." in name:
-        sys.exit(f"[错误] {flag} 名字不能含 '..'（防路径穿越）：{name!r}")
-    bad = [c for c in name if c in _SCENE_NAME_FORBIDDEN]
-    if bad:
-        sys.exit(f"[错误] {flag} 名字含非法字符 {sorted(set(bad))}：{name!r}")
-
-
-def _validate_launch_args(args) -> None:
-    """Enforce mutual exclusion between --record-scene and --replay-scene.
-    --auto-play is allowed with either (or neither): bot runs in the F8-triggered
-    capture phase that follows record/replay completion."""
-    record = getattr(args, "record_scene", None)
-    replay = getattr(args, "replay_scene", None)
-    _validate_scene_name("--record-scene", record)
-    _validate_scene_name("--replay-scene", replay)
-    if record and replay:
-        sys.exit("[错误] --record-scene 与 --replay-scene 不能同时使用")
-
-
-def _precheck_scene(args, dataset_root: Path, game_name: str) -> None:
-    """Fail fast on bad scene names before launching the game (saves 30s).
-    Replay: scene must exist with script.jsonl + meta.json.
-    Record: scene_dir must be empty/absent (refuse to overwrite)."""
-    record = getattr(args, "record_scene", None)
-    replay = getattr(args, "replay_scene", None)
-    if record:
-        scene_dir = _scene_dir_for(dataset_root, game_name, record)
-        if scene_dir.exists() and any(scene_dir.iterdir()):
-            sys.exit(
-                f"[错误] _scenes/{record}/ 已存在内容，拒绝覆盖。"
-                f" 先删它再录: rm -r \"{scene_dir}\""
-            )
-    elif replay:
-        scene_dir = _scene_dir_for(dataset_root, game_name, replay)
-        script = scene_dir / "script.jsonl"
-        meta = scene_dir / "meta.json"
-        if not script.is_file() or not meta.is_file():
-            sys.exit(
-                f"[错误] replay scene 不存在: {scene_dir}"
-                f"\n        缺少 script.jsonl 或 meta.json — 检查 --replay-scene 名字是否拼对"
-            )
-
-
-def _scene_dir_for(dataset_root: Path, game_name: str, scene_name: str) -> Path:
-    return dataset_root / game_name / "_scenes" / scene_name
-
-
-def _scratch_dir_for(scene_dir: Path, kind: str) -> Path:
-    """kind: 'recording' or 'replay' — keeps record/replay scratch separated."""
-    return scene_dir / f"_{kind}_frames"
-
-
-def _get_window_size() -> tuple[int, int]:
-    """Capture defaults are pinned to scene RT native res (CAP_WIDTH × CAP_HEIGHT).
-    HWND-rect lookup adds complexity for marginal value — recorded BMPs come from
-    the addon at CAP_WIDTH × CAP_HEIGHT regardless of game window size, and
-    SetCursorPos uses screen coords (independent of window size)."""
-    return (CAP_WIDTH, CAP_HEIGHT)
-
-
-def _read_cursor_pos() -> tuple[int, int]:
-    from ctypes import wintypes as _wt
-    pt = _wt.POINT()
-    _user32.GetCursorPos(ctypes.byref(pt))
-    return pt.x, pt.y
-
-
-def _run_record(args, game_dir: Path, game_name: str, dataset_root: Path,
-                scene_name: str) -> None:
-    from tools.replay import ReplayRecorder
-
-    scene_dir = _scene_dir_for(dataset_root, game_name, scene_name)
-    if scene_dir.exists() and any(scene_dir.iterdir()):
-        print(f"[REPLAY-REC] {scene_dir} 已存在内容；先删它再录: rm -r \"{scene_dir}\"")
-        sys.exit(2)
-    scratch = _scratch_dir_for(scene_dir, "recording")
-
-    game_exe_name = Path(getattr(args, "game_path", str(GAME_PATH))).name
-    api = _resolve_api(getattr(args, "api", "auto"),
-                       Path(getattr(args, "game_path", str(GAME_PATH))))
-    window_size = _get_window_size()
-    mouse_origin = _read_cursor_pos()
-
-    print()
-    print(f"┌─ 录制场景脚本: {scene_name} ─────────────────────────────┐")
-    print(f"│  F7  停止录制                                         │")
-    print(f"│  Ctrl+C  中止录制（不保存）                           │")
-    print(f"│  sync 自动: 每按键触发 + long-gap 1.5s 兜底            │")
-    print(f"│  [!] 录制中 F8/F9 不响应 capture                        │")
-    print(f"└──────────────────────────────────────────────────────┘\n")
-
-    rec = ReplayRecorder(
-        scene_dir=scene_dir,
-        sync_scratch_dir=scratch,
-        game_dir=game_dir,
-        game_exe=game_exe_name,
-        api=api,
-        window_size=window_size,
-        mouse_origin=mouse_origin,
-        scene_name=scene_name,
-    )
-    _set_state(game_dir, "recording")
-    rec.start()
-    try:
-        rec.wait_until_done()
-        rec.save()
-    except KeyboardInterrupt:
-        print("[REPLAY-REC] Ctrl+C 中止 — 不保存", flush=True)
-    finally:
-        rec.close()
-        _set_state(game_dir, "idle")
-
-
-def _run_replay(args, game_dir: Path, game_name: str, dataset_root: Path,
-                scene_name: str) -> int:
-    from tools.replay import ReplayPlayer
-    from tools.replay.player import recenter_cursor
-    from tools.auto_play.input_backend import InputBackend
-    from tools.auto_play.profile import load_profile
-
-    scene_dir = _scene_dir_for(dataset_root, game_name, scene_name)
-    script_path = scene_dir / "script.jsonl"
-    if not script_path.is_file():
-        print(f"[REPLAY] script not found: {script_path}", flush=True)
-        return 2
-
-    # NOTE: survey cache check is deferred to _interactive_loop (line ~826),
-    # which runs survey on-demand before the first capture. Running it here
-    # would fire before the game window is up — addon never sees survey
-    # sidecar writes → survey times out and aborts replay.
-
-    profile_name = getattr(args, "profile", "") or game_name
-    try:
-        profile = load_profile(profile_name, fallback=True)
-    except Exception as e:
-        print(f"[REPLAY] profile load failed: {e}", flush=True)
-        return 2
-
-    # Pull game window to foreground (otherwise SendInput goes to the console).
-    # Timeout matches force_borderless_async — launcher → game handoff can take
-    # 10-30s on slow disks / first-time loads.
-    game_exe_name = Path(getattr(args, "game_path", str(GAME_PATH))).name
-    from tools.window_manager import focus_game_window, wait_for_game_foreground
-    print(f"[REPLAY] 等待游戏窗口出现 ({game_exe_name}, 最多 30s)...", flush=True)
-    hwnd = focus_game_window(exe_basename=game_exe_name, timeout_s=30.0)
-    if hwnd is None:
-        print(f"[REPLAY] WARN: 30s 内自动定位游戏窗口失败。"
-              f"请手动 alt-tab 到游戏，replay 将在检测到游戏前台后自动开始（60s 超时，无需回车）。",
-              flush=True)
-        hwnd = wait_for_game_foreground(game_exe_name, timeout_s=60.0)
-        if hwnd is None:
-            print("[REPLAY] 60s 内仍未检测到游戏在前台 — 中止 replay", flush=True)
-            return 2
-        print(f"[REPLAY] 检测到游戏在前台 (hwnd=0x{hwnd:x})，开始 replay", flush=True)
-    else:
-        print(f"[REPLAY] 已聚焦游戏窗口 (hwnd=0x{hwnd:x})", flush=True)
-
-    # Recenter cursor before injecting first event
-    recenter_cursor()
-
-    backend = InputBackend(profile, debug=False)
-    scratch = _scratch_dir_for(scene_dir, "replay")
-    cur_window = _get_window_size()
-    player = ReplayPlayer(
-        scene_dir=scene_dir,
-        sync_scratch_dir=scratch,
-        game_dir=game_dir,
-        backend=backend,
-        current_window_size=cur_window,
-    )
-    _set_state(game_dir, "replaying")
-    try:
-        result = player.run()
-    finally:
-        backend.close()
-        _set_state(game_dir, "idle")
-        # Poll for scratch-dir BMP count to stabilize before rmtree. Player
-        # already cleared fc_output_dir.txt in its finally; here we wait until
-        # the count stays put across a 0.6s window (= addon has finished its
-        # in-flight write). Hard cap 5s in case the addon is hung on heavy I/O.
-        if scratch.exists():
-            stable_window_s = 0.6
-            sample_period_s = 0.15
-            deadline = time.monotonic() + 5.0
-            prev_count = -1
-            stable_since: float | None = None
-            while time.monotonic() < deadline:
-                try:
-                    count = sum(1 for _ in scratch.iterdir())
-                except OSError:
-                    count = prev_count  # transient; treat as no change
-                now = time.monotonic()
-                if count == prev_count:
-                    if stable_since is None:
-                        stable_since = now
-                    elif now - stable_since >= stable_window_s:
-                        break
-                else:
-                    prev_count = count
-                    stable_since = None
-                time.sleep(sample_period_s)
-            for attempt in range(3):
-                try:
-                    shutil.rmtree(scratch)
-                    break
-                except OSError as e:
-                    if attempt == 2:
-                        print(f"[REPLAY] WARN: 清理 {scratch} 失败: {e}",
-                              flush=True)
-                    else:
-                        time.sleep(0.2)
-    return result.exit_code
-
-
 # ── Subcommand: launch (interactive) ──────────────────────────────────────────
 
 def cmd_launch(args):
-    _validate_launch_args(args)
-
     # Resolve --ui-mode default: 'both' under --auto-play (bot/watchdog need
     # post-UI BMP for HUD / menus / death screens), else 'no-ui' (pre-UI clean
     # scene RT). cmd_deploy reads args.ui_mode so resolve before deploying.
@@ -770,7 +538,8 @@ def cmd_launch(args):
     # so sponsors can sanity-check before pressing F8. Importing vlm_driver also
     # triggers its module-level load_dotenv() side effect — config from .env
     # becomes visible here, and a missing python-dotenv prints its setup hint.
-    if getattr(args, "auto_play", False) and getattr(args, "driver", "") == "vlm":
+    if getattr(args, "auto_play", False) and \
+            getattr(args, "driver", "") in ("vlm", "hybrid"):
         from tools.auto_play import vlm_driver  # noqa: F401  (side-effect import)
         base = (getattr(args, "vlm_base_url", None)
                 or os.environ.get("VLM_BASE_URL") or "(SDK default)")
@@ -779,16 +548,17 @@ def cmd_launch(args):
         api_key_present = bool(getattr(args, "vlm_api_key", None)
                                 or os.environ.get("VLM_API_KEY"))
         budget = getattr(args, "vlm_budget_per_hour", 60)
-        print(f"[AUTO-PLAY] VLM endpoint base_url={base} model={model} "
+        tag = "VLM endpoint" if args.driver == "vlm" \
+              else "hybrid VLM (watchdog 静帧触发时介入)"
+        print(f"[AUTO-PLAY] {tag} base_url={base} model={model} "
               f"budget={budget}/h api_key={'set' if api_key_present else 'MISSING'}",
               flush=True)
         if not api_key_present:
-            print("[AUTO-PLAY] WARN: VLM_API_KEY 未读到 — F8 后第一次调用会降级 "
-                  "KeepAliveDriver。检查 .env 是否在 cwd 或祖先目录，或加 --vlm-api-key",
+            print("[AUTO-PLAY] WARN: VLM_API_KEY 未读到 — F8 后 VLM 介入会失败并降级"
+                  " profile.recovery。检查 .env 是否在 cwd 或祖先目录，或加 --vlm-api-key",
                   flush=True)
 
     game_dir, game_exe, game_name, dataset_root, api = cmd_deploy(args)
-    _precheck_scene(args, dataset_root, game_name)
 
     print(f"\n[启动] {game_exe}  (api={api})")
     env = {**os.environ, "RESHADE_BASE_PATH_OVERRIDE": str(UNICAP_TEMP)}
@@ -841,27 +611,8 @@ def cmd_launch(args):
         print("│  Ctrl+C  退出 main.py（不会关闭游戏）                 │")
         print("└──────────────────────────────────────────────────────┘\n")
 
-    replay_exit_code: int | None = None
     try:
-        # G-001 / G-002: pre-loop record/replay phase. Only record↔replay is mutex;
-        # --auto-play composes with either. _validate_launch_args enforces that.
-        record_scene = getattr(args, "record_scene", None)
-        replay_scene = getattr(args, "replay_scene", None)
-        if record_scene:
-            _run_record(args, game_dir, game_name, dataset_root, record_scene)
-        elif replay_scene:
-            replay_exit_code = _run_replay(args, game_dir, game_name,
-                                           dataset_root, replay_scene)
-            if replay_exit_code != 0:
-                # On replay failure don't fall through to F8 idle; surface the error
-                sys.exit(replay_exit_code)
-
-        # --auto-capture: skip the first F8 wait, jump straight into capture.
-        # Combined with --replay-scene + --auto-play: full unattended pipeline
-        # (replay reaches scene → auto F8 → capture + bot 接管).
-        auto_capture_first = bool(getattr(args, "auto_capture", False))
-        _interactive_loop(args, game_dir, game_name, dataset_root,
-                          auto_capture_first=auto_capture_first)
+        _interactive_loop(args, game_dir, game_name, dataset_root)
     except KeyboardInterrupt:
         print("\n[退出] Ctrl+C，main.py 退出。游戏继续运行。")
     finally:
@@ -871,16 +622,15 @@ def cmd_launch(args):
             print("[VULKAN] HKCU 注册表已清理")
 
 
-def _interactive_loop(args, game_dir: Path, game_name: str, dataset_root: Path,
-                      auto_capture_first: bool = False):
+def _interactive_loop(args, game_dir: Path, game_name: str, dataset_root: Path):
     ui_mode = getattr(args, "ui_mode", "no-ui")
     needs_survey = ui_mode != "ui"  # ui 模式直接抓 BackBuffer，无需 skip
-    skip_next_f8_wait = auto_capture_first
+    skip_next_f8_wait = False
 
     while True:
         _set_state(game_dir, "idle")
         if skip_next_f8_wait:
-            print("[AUTO-CAPTURE] 跳过 F8 等待，直接开始采集 (F9 仍可停)", flush=True)
+            print("[CAPTURE] 自动开下一段 (F9 终止整轮)", flush=True)
             skip_next_f8_wait = False
         else:
             suffix = "（首次自动 survey）" if needs_survey else f"（mode={ui_mode}，无需 survey）"
@@ -1335,48 +1085,6 @@ def cmd_pack(args):
     print(f"\n[DONE] 打包 {packed}，跳过 {skipped}，失败 {failed}；总耗时 {_fmt_dur(time.perf_counter() - t_total)}")
 
 
-def cmd_scenes(args):
-    """List recorded replay scenes under <game_dir>/_scenes/."""
-    if not args.game_dir:
-        sys.exit(f"[错误] scenes 需要游戏目录参数：{_self_cmd()} scenes --game-dir <DIR>")
-    game_dir = Path(args.game_dir)
-    if not game_dir.is_dir():
-        sys.exit(f"[错误] 游戏目录不存在：{game_dir}")
-
-    scenes_dir = game_dir / "_scenes"
-    if not scenes_dir.is_dir():
-        print(f"[SCENES] {scenes_dir} 不存在 — 该游戏还没录过场景")
-        return
-
-    scenes = sorted(d for d in scenes_dir.iterdir() if d.is_dir())
-    if not scenes:
-        print(f"[SCENES] {scenes_dir} 为空 — 该游戏还没录过场景")
-        return
-
-    from tools.replay import iter_events, load_meta
-
-    print(f"[SCENES] 找到 {len(scenes)} 个场景（{scenes_dir}）：\n")
-    for s in scenes:
-        meta_path = s / "meta.json"
-        script_path = s / "script.jsonl"
-        if not meta_path.is_file() or not script_path.is_file():
-            print(f"  {s.name:<24}  [!] 不完整（缺 meta.json 或 script.jsonl）")
-            continue
-        try:
-            meta = load_meta(meta_path)
-            sync_count = 0
-            input_count = 0
-            for evt in iter_events(script_path):
-                if evt.get("type") == "sync":
-                    sync_count += 1
-                else:
-                    input_count += 1
-            print(f"  {s.name:<24}  {meta.recorded_at}  "
-                  f"{input_count} events / {sync_count} syncs")
-        except Exception as e:
-            print(f"  {s.name:<24}  [!] 解析失败: {e}")
-
-
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1394,7 +1102,7 @@ def main():
     parser.add_argument("--version", action="version", version=f"unicap v{VERSION}")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("launch", help="部署 + 启动游戏 + 进入交互式 F7/F8/F9 工作流")
+    p = sub.add_parser("launch", help="部署 + 启动游戏 + 进入交互式 F8/F9 工作流")
     p.add_argument("--game-path", default=str(GAME_PATH))
     p.add_argument("--game-name", default="", help="游戏名（输出路径第一级，默认从 exe 推导）")
     p.add_argument("--dataset-root", default="", metavar="PATH")
@@ -1428,10 +1136,11 @@ def main():
                    help="--pack 时同时打包 /normal（默认不打包）")
     p.add_argument("--auto-play", action="store_true",
                    help="启用自动玩游戏 bot（capture 期间持续注入输入；F9 停止时一并停）")
-    p.add_argument("--driver", choices=["keep-alive", "vlm"], default="keep-alive",
-                   help="auto-play driver: keep-alive=哑 bot（默认）, "
-                        "vlm=OpenAI-compatible 视觉大脑（需 .env 设 VLM_API_KEY / "
-                        "VLM_BASE_URL / VLM_MODEL；预算耗尽自动降级 keep-alive）")
+    p.add_argument("--driver", choices=["keep-alive", "vlm", "hybrid"], default="keep-alive",
+                   help="auto-play driver: keep-alive=哑 bot（默认，最便宜，纯 profile sequence）；"
+                        "vlm=纯 VLM 驱动每秒决策（贵且慢）；"
+                        "hybrid=keep-alive 主跑 + VLM 仅在 watchdog 静帧触发时介入做关键决策"
+                        "（推荐 — 平衡成本与智能；预算耗尽自动降级 profile.recovery）")
     p.add_argument("--vlm-api-key", default=None,
                    help="覆盖 .env 的 VLM_API_KEY（一次性测试用；注意：会留 "
                         "shell history / process list 痕迹，常态请用 .env）")
@@ -1446,18 +1155,6 @@ def main():
                    help="auto-play 详细 log（每次注入都打到 auto_play.log）")
     p.add_argument("--vlm-budget-per-hour", type=int, default=60,
                    help="VLM driver 每小时调用上限（默认 60；耗尽自动降级 keep-alive）")
-    p.add_argument("--record-scene", default=None, metavar="NAME",
-                   help="录制场景脚本到 _scenes/<NAME>/；F7 停止录制；sync 自动按 long-gap 检测（默认 1.5s）；"
-                        "录完进入正常 idle 等 F8。与 --replay-scene 互斥；可与 --auto-play 同用"
-                        "（auto-play 在 F8 capture 阶段才生效，不污染 record）")
-    p.add_argument("--replay-scene", default=None, metavar="NAME",
-                   help="自动回放 _scenes/<NAME>/ 到目标场景；缺 survey 自动跑；"
-                        "回放完进入正常 idle 等 F8。与 --record-scene 互斥；可与 --auto-play 同用"
-                        "（典型组合：replay → 到达场景 → F8 capture+auto-play 无人值守）")
-    p.add_argument("--auto-capture", action="store_true",
-                   help="跳过首次 F8 等待，replay 完成（或 launch 启动）后直接开始 capture。"
-                        "与 --replay-scene + --auto-play 三连 = 全自动无人值守"
-                        "（replay 到场景 → 自动 capture → bot 接管）")
 
     p = sub.add_parser("video", help="批量生成游戏目录下所有缺失的 video.mp4 / video_ui.mp4")
     p.add_argument("--game-dir", default="", metavar="DIR",
@@ -1482,14 +1179,9 @@ def main():
     p.add_argument("--check-frames", default="0,99,499")
     p.add_argument("--check-out", default=str(DATASET_ROOT / "spot_checks"))
 
-    p = sub.add_parser("scenes", help="列出 _scenes/ 下所有已录回放场景及其元信息")
-    p.add_argument("--game-dir", default="", metavar="DIR",
-                   help="dataset-root 下的游戏目录（其下含 _scenes/ 子目录）")
-
     args = parser.parse_args()
     print(f"unicap v{VERSION}", flush=True)
-    {"launch": cmd_launch, "video": cmd_video, "pack": cmd_pack,
-     "scenes": cmd_scenes}[args.cmd](args)
+    {"launch": cmd_launch, "video": cmd_video, "pack": cmd_pack}[args.cmd](args)
 
 
 if __name__ == "__main__":

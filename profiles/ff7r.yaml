@@ -3,6 +3,8 @@ description: |
   Final Fantasy VII Remake / Intergrade — UE4，DX12。
   KB+M 配置：WASD 跑动 + 鼠标视角 + 鼠标左键攻击 + Space 闪避 + E 互动。
   FF7R 的 cinematic 模式很常见，watchdog 触发率会偏高 — 正常现象。
+  推荐 driver=hybrid（keep_alive 主跑 + VLM 只在静帧 12s 时介入解卡，
+  既便宜又能处理菜单/卡位等复杂场景）。
 
 controls:
   move_forward: W
@@ -13,8 +15,9 @@ controls:
   attack: mouse_left
   interact: E
   jump: SPACE             # FF7R 不支持跳，但 keep_alive sequence 不调用
+  dismiss_ui: M           # FF7R 退 UI 用 M（不是 ESC，ESC 会打开系统菜单）
 
-reserved_keys: [F6, F7, F8, F9]
+reserved_keys: [F8, F9]
 
 input:
   prefer_gamepad: false
@@ -29,6 +32,13 @@ keep_alive:
     - {action: attack,       duration_ms: 250}
     - {action: turn,         duration_ms: 600, payload: {direction: random, magnitude: 1.5}}
     - {action: move_left,    duration_ms: 800}
+    # NOTE: an earlier version inserted a periodic "M heartbeat" here so the
+    # blind bot would proactively dismiss tutorial popups. Removed: M is NOT
+    # idempotent in FF7R — pressing it during normal gameplay opens the map
+    # screen and the closing tap doesn't always reliably return to gameplay
+    # (sometimes lands on a sub-tab). Net effect was forcing the bot into
+    # menus 7s out of every 14s. dismiss_ui belongs in `recovery` (only
+    # triggered after watchdog confirms a UI lockup), not in the main loop.
     - {action: move_forward, duration_ms: 1500}
     - {action: interact,     duration_ms: 200}
     - {action: turn,         duration_ms: 700, payload: {direction: random, magnitude: 1.2}}
@@ -39,14 +49,14 @@ keep_alive:
     - {action: attack,       duration_ms: 250}
     - {action: wait,         duration_ms: 600}
   recovery:
-    # FF7R 卡住时常见原因：1) 误进了菜单/地图/状态界面 — 必须按 M 才能回到 3D 场景
-    # 2) cutscene 卡 — ENTER 跳过 3) 撞墙 — 调头 + 后退脱困
-    - {action: press_key, payload: {vk: M},     duration_ms: 100}   # FF7R: 退 UI → 3D 场景
-    - {action: wait,      duration_ms: 250}
-    - {action: press_key, payload: {vk: ENTER}, duration_ms: 100}   # 跳过对话/cutscene
-    - {action: wait,      duration_ms: 200}
-    - {action: press_key, payload: {vk: ESC},   duration_ms: 100}   # 兜底退菜单
-    - {action: press_key, payload: {vk: ESC},   duration_ms: 100}
+    # 卡住时常见原因：1) 误进了菜单/UI — 用 dismiss_ui (FF7R=M) 退 2) cutscene
+    # 卡 — ENTER 跳过 3) 撞墙 — 调头 + 后退脱困
+    # 注意：FF7R 里 ESC 是 *打开* 系统菜单的键，所以 dismiss_ui=M（在 controls
+    # 里声明）。recovery 里不要塞 ESC，否则游戏正常时会把角色推进菜单。
+    - {action: dismiss_ui, duration_ms: 100}                        # 退 UI → 3D 场景
+    - {action: wait,       duration_ms: 250}
+    - {action: press_key,  payload: {vk: ENTER}, duration_ms: 100}  # 跳过对话/cutscene
+    - {action: wait,       duration_ms: 200}
     # 连续 4 次同向大转向 ≈ 180° 调头（mouse_sensitivity=0.8 → 每次 ~480px dx）
     - {action: turn, duration_ms: 100, payload: {direction: left, magnitude: 2.0}}
     - {action: turn, duration_ms: 100, payload: {direction: left, magnitude: 2.0}}
@@ -59,18 +69,73 @@ keep_alive:
 
 watchdog:
   sample_period_s: 3.0
-  static_diff_threshold: 0.008
-  consecutive_static_required: 2   # 6s 触发 — 教学弹窗暂停游戏后立即 static，
-                                   # 早点按 M 退掉。cutscene 误触发也无害
-                                   # （recovery 第一步先按 M 退 UI，第二步 ENTER
-                                   # 推进 cutscene — 都是想要的）
+  static_diff_threshold: 0.003   # 阈值收紧：VLM 思考时画面 diff ~0.002，
+                                 # 老阈值 0.008 把"VLM 正在等响应"当卡死，
+                                 # 频繁触发 recovery 反而把游戏节奏踢乱。
+  consecutive_static_required: 4 # 12s 才触发，给 VLM 充分决策窗口
+                                 # （单次决策 ~3-4s，4 个采样周期=覆盖 3 次决策）
 
 vlm:
+  decision_period_s: 0.5    # VLM 拿到 response 立即发下一帧（实际节奏受网络
+                            # 延迟限制 ~2-3s/decision；这里写 0.5 = 不要等
+                            # 满 1s 才发，把空闲时间压缩到接近 0）
   game_instructions: |
-    Final Fantasy VII Remake (UE4 / DX12). Action-RPG. WASD moves Cloud relative
-    to camera. Mouse turns the camera. Left-click is basic attack (combos by
-    repeated clicks). E interacts with NPCs/objects. ESC opens menu.
-    Goal: explore the current area; engage simple enemies; do NOT enter major
-    story choices. If a cutscene or "press X to advance" appears, hit Enter
-    to skip. Avoid permanent decisions (don't pick story options).
+    Final Fantasy VII Remake (UE4 / DX12). Action-RPG. KB+M controls:
+      WASD = Cloud moves relative to camera
+      Mouse = turns camera
+      Left-click = basic attack (combo by repeated clicks)
+      Space = dodge / roll
+      E = interact with NPCs / objects (when interact prompt is visible)
+      Enter = advance dialog / skip cutscene prompt
+      ESC = opens system menu (DO NOT press unless you are certain you want
+            to OPEN the menu — see scene-recognition cues below)
+
+    SCENE RECOGNITION (FF7R-specific cues — use these to decide):
+
+      Gameplay (HUD visible, no menu) — most common state. You will see one
+      or more of: a thin character portrait + HP bar at top-left; a minimap
+      or compass; an interact-prompt button icon ("E" or controller glyph)
+      somewhere on screen; the live 3D scene fills the whole viewport. Your
+      response: walk forward + occasional turn + occasional left-click. NEVER
+      press ESC in this state — it would *open* the system menu.
+
+      Combat (HUD + battle UI). On top of normal gameplay HUD you will see a
+      battle command list at lower-left ("攻击/魔法/物品" or "Attack/Magic/Item"),
+      and ATB gauges. Enemy HP bar appears top-of-screen. Your response:
+      mash left-click, occasionally back away with S. Do NOT press ESC.
+
+      Dialog / cutscene. Black letterbox bars top+bottom, dialog text box at
+      bottom of screen, no HUD, no minimap. Your response: a single Enter
+      press to advance, or wait 500ms if still mid-camera-pan.
+
+      Fullscreen menu (ONLY this state warrants ESC). Dark/solid panel
+      covering >70% of the screen + visible list of options ("System / Items
+      / Materia / Save" or similar). The live game scene is hidden or
+      heavily darkened behind. Your response: ESC to close.
+
+      Map / inventory screen. Similar to fullscreen menu but specifically
+      for FF7R press M to close (NOT ESC — ESC may go to a sub-menu).
+
+      Tutorial popup (extremely common in Chapter 1 — DO NOT MISTAKE FOR
+      GAMEPLAY). FF7R drops half-screen blue tutorial panels constantly:
+      right half of the screen is a blue panel with a blue title at the
+      top (e.g. "Locking Onto Targets" / "Battle Settings" / "Punisher
+      Mode"), a small animated GIF demo, several lines of explanatory
+      text, AND a button hint at the bottom-right reading **"M Back"**.
+      The left half still shows Cloud (often in idle animation) and the
+      HUD elements (health bar, button hints in top-left corner like
+      "R Evade / Ctrl Guard"). The animation on Cloud + GIF in the panel
+      makes this LOOK like gameplay — it is NOT. Cloud is locked, input
+      is consumed by the popup. ALWAYS press M to dismiss. Recognition
+      cues (any one is enough): blue panel covering right half + "M Back"
+      text in bottom-right + blue title text at top-right.
+
+    DO NOT enter story choices, save-and-quit dialogs, or "Are you sure
+    you want to give up?" prompts. The session must run unattended for
+    minutes; permanent decisions break that.
+
+    On uncertain frames (transitions, loading, dim corridors with no clear
+    HUD), default to walking forward + small random turn. Do not pick ESC
+    as the "safe" default — it is the *least* safe key in FF7R because it
+    pulls you out of gameplay.
   frame_subsample_long_edge: 512

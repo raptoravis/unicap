@@ -13,8 +13,9 @@ controls:
   attack: mouse_left
   interact: E
   jump: SPACE
+  dismiss_ui: ESC         # back / close current UI (most games)
 
-reserved_keys: [F6, F7, F8, F9]   # 强制保留：F6/F7=replay record/stop, F8/F9=capture start/stop
+reserved_keys: [F8, F9]   # 强制保留：F8/F9=capture start/stop（unicap 自身热键）
 
 input:
   prefer_gamepad: false
@@ -37,10 +38,10 @@ keep_alive:
     - {action: move_forward, duration_ms: 1500}
     - {action: wait,         duration_ms: 500}
   recovery:
-    - {action: press_key, payload: {vk: ESC},   duration_ms: 100}
-    - {action: wait,      duration_ms: 200}
-    - {action: press_key, payload: {vk: ESC},   duration_ms: 100}
-    - {action: press_key, payload: {vk: SPACE}, duration_ms: 100}
+    - {action: dismiss_ui, duration_ms: 100}
+    - {action: wait,       duration_ms: 200}
+    - {action: dismiss_ui, duration_ms: 100}
+    - {action: press_key,  payload: {vk: SPACE}, duration_ms: 100}
     # 连续 4 次同向大转向 ≈ 180° 调头
     - {action: turn, duration_ms: 100, payload: {direction: left, magnitude: 2.0}}
     - {action: turn, duration_ms: 100, payload: {direction: left, magnitude: 2.0}}

@@ -33,10 +33,6 @@ uv sync                                         # install Python deps (first tim
 uv run main.py launch                           # primary flow: deploy + launch + F8/F9 loop
 uv run main.py launch --ui-mode ui              # capture post-UI BackBuffer only (no survey)
 uv run main.py launch --ui-mode both            # both pre-UI and post-UI streams (needs survey)
-uv run main.py launch --record-scene tutorial   # 录制场景脚本（F7 停；sync 自动 long-gap 检测）；落 _scenes/tutorial/
-uv run main.py launch --replay-scene tutorial   # 自动回放到目标场景（缺 survey 自动跑）；之后 F8 capture
-uv run main.py launch --replay-scene tutorial --auto-play --auto-capture   # 全自动无人值守
-uv run main.py scenes --game-dir DIR             # 列出 _scenes/ 已录场景 + 元信息
 uv run main.py launch --api vulkan              # Vulkan-only games (DOOM 2016/Eternal etc.)
 uv run main.py launch --auto-play               # auto-play bot 持续注入输入（无人值守采集）
 uv run main.py video  --game-dir DIR            # encode frames → MP4 (post-hoc, batch)
@@ -74,7 +70,7 @@ loop driven entirely by in-game hotkeys:
 
 Each capture session writes to `DATASET_ROOT/<game_name>/<YYYYMMDD_HHMMSS>/frames/` with a matching `inputs.jsonl`. F9 停止后默认**仅落帧**（不生成 video，不打包 HDF5）；要即时生成视频加 `--video`，要即时打包加 `--pack`，事后批量用 `video --game-dir DIR` / `pack --game-dir DIR` 子命令补齐。`video` / `pack` 子命令都是"扫游戏目录、缺啥补啥、已存在跳过"。
 
-`--capture-duration N`（默认 **30s**，0 = 不限时）：F8 一次会自动 roll —— 到时间就如同自动按 F9 + 自动按 F8，开始新 session（新目录）。F9 才终止整轮。结合 `--auto-play --auto-capture` = 长跑无人值守把超长 session 切成等长片段，便于后续 ML 训练 batch 化。`--capture-duration 0` 退化到旧行为（F8 → F9 之间一段，自己定长度）。
+`--capture-duration N`（默认 **30s**，0 = 不限时）：F8 一次会自动 roll —— 到时间就如同自动按 F9 + 自动按 F8，开始新 session（新目录）。F9 才终止整轮。结合 `--auto-play` = 长跑无人值守把超长 session 切成等长片段，便于后续 ML 训练 batch 化。`--capture-duration 0` 退化到旧行为（F8 → F9 之间一段，自己定长度）。
 
 Capture defaults (FPS=30, 1920×1080) 是 `main.py` 顶部常量；1920×1080 匹配 FF7R 的 scene RT 原生分辨率，省掉一次 worker resize（参考 perf commit b7021ed → 19.4 fps）。
 
@@ -164,22 +160,6 @@ The addon handles all timing and frame output; `capture_all.py` only records inp
 2. `frame_capture` (shared library, MSVC, CXX17) → `dist/frame_capture.addon`
 3. `shaders` (custom target, always runs) → copies `.fx` files to `dist/unicap-shaders/Shaders/`
 
-### 录制 / 回放（replay-scene）— 反复进入测试场景
-
-`--record-scene NAME` / `--replay-scene NAME` 解决"测试时反复拉起游戏 + 进入某场景"的繁琐操作。范式 = 时序回放 + 视觉同步点：录制时连续 polling 键鼠手柄输入，**F7** 结束；sync 锚点**全自动**生成，两个机制并存：(1) **press-sync** — 每个 key/mouse-button/gamepad-button **press** 事件触发 sync（按键前夕拷帧），同 tick 多键合并为 1 个 sync；(2) **long-gap 兜底** — 输入 idle ≥ `auto_sync_gap_s`（默认 1.5s）也强制 sync，覆盖 mouse-look-only 段 / cinematic 段。回放时按时序通过 `InputBackend` 注入键鼠手柄，遇 sync 处暂停截图与录制帧做 dHash 比对（汉明距离 ≤ 10），匹配即续注入 → 自动吸收加载时间方差 + 单步动画延迟。Sync 超时 30s 暂停 console 等用户按 **R** 续 / **Q** 退（exit code 2）。
-
-**热键策略**：F7 = 停止录制；F8/F9 始终归 capture/survey；R/Q 仅 sync paused 态响应。所有 4 个 profile 的 `reserved_keys` 必须含 F7/F8/F9（F6 不再被 unicap 占用，profile 可继续保留也可移除）。回放期间 F7 不响应（要中止只能 Ctrl+C in console）。
-
-**已知限制**：mouse-look 录制无效 — FPS 游戏锁鼠到屏幕中心，`GetCursorPos` 永远返中心，回放时等于 no-op。设计仅支持菜单 / 导航 / 简单移动场景。
-
-**布局**：`DATASET_ROOT/<game>/_scenes/<name>/` 含 `script.jsonl`（event 流）+ `meta.json`（窗口尺寸 / 游戏 / 时间戳 / per-sync 阈值）+ `sync_NN.bmp`（视觉锚点）。`_*` 前缀子目录不进 `pack` / `video` 扫描。回放前缺 `survey/recommended_skip.txt` 自动跑 survey（exit code 3 if 失败）。
-
-**互斥**：`--record-scene` 与 `--replay-scene` 不能同时给（操作模式不同）。`--auto-play` 与两者都兼容 — 它只在 F8 capture 阶段生效，不污染 record/replay 本身。
-
-**全自动无人值守组合**：`--replay-scene foo --auto-play --auto-capture` 三连 = replay 自动到达场景 → `--auto-capture` 跳过 F8 等待 → capture 立即启动 → `--auto-play` bot 接管。从命令行起到无人值守采集，零按键。`--auto-capture` 也可单独用（`launch --auto-capture`）= 启动游戏后立即开 capture，省掉一次 F8。
-
-**模块**：`tools/replay/`（recorder.py / player.py / sync_match.py / schema.py / __init__.py）；`scripts/verify_replay.py` = sponsor 一条命令跑 23 个 offline 测试。Live-game E2E（FF7R 录 + 第二天回放）由 sponsor 实机验收。
-
 ### 自动玩游戏（auto-play）— 无人值守采集
 
 `--auto-play` 让 bot 在 capture 期间持续注入输入（移动、转向、攻击），实现长时间无人值守采集。两层架构 + 4 个内置 profile + 通用 OS 级输入注入。
@@ -211,7 +191,7 @@ uv run main.py launch --game-path "...DOOMEternalx64vk.exe" --ui-mode ui --auto-
 **架构**：
 - `tools/auto_play/driver.py` — `BotDriver` ABC + `Action` / `Observation` 数据契约
 - `tools/auto_play/input_backend.py` — SendInput + vgamepad，单 Lock 串行化所有注入
-- `tools/auto_play/profile.py` — YAML schema 校验；F7/F8/F9 强制 `reserved_keys`
+- `tools/auto_play/profile.py` — YAML schema 校验；F8/F9 强制 `reserved_keys`
 - `tools/auto_play/keep_alive.py` — `KeepAliveDriver` + 公共 `step_to_actions(profile, step, rng)`（watchdog 复用）
 - `tools/auto_play/watchdog.py` — `StaticFrameWatchdog` 后台线程；连续静帧 → profile 声明的 recovery 序列
 - `tools/auto_play/runner.py` — `AutoPlayRunner` 编排 driver + watchdog + lifecycle，集成在 `_run_capture` 的 finally

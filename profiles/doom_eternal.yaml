@@ -14,8 +14,9 @@ controls:
   interact: E
   jump: SPACE
   dash: SHIFT             # 自定义控制
+  dismiss_ui: ESC         # DOOM Eternal 退 menu / overlay 用 ESC
 
-reserved_keys: [F6, F7, F8, F9]
+reserved_keys: [F8, F9]
 
 input:
   prefer_gamepad: false
@@ -35,10 +36,10 @@ keep_alive:
     - {action: turn,         duration_ms: 500, payload: {direction: random, magnitude: 1.0}}
     - {action: attack,       duration_ms: 400}
   recovery:
-    - {action: press_key, payload: {vk: ESC},   duration_ms: 100}
-    - {action: wait,      duration_ms: 200}
-    - {action: press_key, payload: {vk: ESC},   duration_ms: 100}
-    - {action: press_key, payload: {vk: SPACE}, duration_ms: 100}
+    - {action: dismiss_ui, duration_ms: 100}
+    - {action: wait,       duration_ms: 200}
+    - {action: dismiss_ui, duration_ms: 100}
+    - {action: press_key,  payload: {vk: SPACE}, duration_ms: 100}
     # 连续 4 次同向大转向 ≈ 180° 调头（DOOM mouse_sensitivity=1.5 → 每次 ~900px dx）
     - {action: turn, duration_ms: 100, payload: {direction: left, magnitude: 1.5}}
     - {action: turn, duration_ms: 100, payload: {direction: left, magnitude: 1.5}}

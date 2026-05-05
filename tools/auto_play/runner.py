@@ -99,9 +99,13 @@ class AutoPlayRunner:
             logging.getLogger("unicap.auto_play").setLevel(logging.DEBUG)
 
         self._backend = InputBackend(profile, debug=debug)
+        # `hybrid` = keep_alive runs the main loop; the watchdog gets a VLM
+        # consultant that fires only when frames go static (so VLM cost is
+        # bounded by watchdog trigger rate, not 1 Hz).
+        vlm_for_watchdog: VLMDriver | None = None
         if driver_name == "keep-alive":
             self._driver = create_driver(driver_name, profile)
-        else:
+        elif driver_name == "vlm":
             self._driver = create_driver(
                 driver_name, profile,
                 api_key=vlm_api_key,
@@ -110,9 +114,23 @@ class AutoPlayRunner:
                 budget_per_hour=vlm_budget_per_hour,
                 frames_dir=frames_dir,
             )
+        elif driver_name == "hybrid":
+            self._driver = create_driver("keep-alive", profile)
+            vlm_for_watchdog = create_driver(
+                "vlm", profile,
+                api_key=vlm_api_key,
+                base_url=vlm_base_url,
+                model=vlm_model,
+                budget_per_hour=vlm_budget_per_hour,
+                frames_dir=frames_dir,
+            )
+        else:
+            raise ValueError(
+                f"未知 driver: {driver_name!r} (支持: keep-alive, vlm, hybrid)"
+            )
         self._watchdog = StaticFrameWatchdog(
             frames_dir=frames_dir, profile=profile, input_backend=self._backend,
-            log_path=log_path,
+            log_path=log_path, vlm_driver=vlm_for_watchdog,
         )
 
         self._stop_evt = threading.Event()
@@ -133,13 +151,21 @@ class AutoPlayRunner:
         # Surface VLM config so sponsors can sanity-check which endpoint /
         # model is actually in effect (base_url + model resolve from CLI flags
         # → env vars → .env at construction; printing the resolved value here
-        # avoids guesswork).
+        # avoids guesswork). In hybrid mode the VLM lives inside the watchdog,
+        # not as the main driver, so reach into it explicitly.
+        vlm_for_print = None
         if self._driver_name == "vlm":
-            base = getattr(self._driver, "base_url", None) or "(SDK default)"
-            model = getattr(self._driver, "model_name", "") or "(unset)"
-            budget = getattr(getattr(self._driver, "_budget", None),
+            vlm_for_print = self._driver
+        elif self._driver_name == "hybrid":
+            vlm_for_print = getattr(self._watchdog, "_vlm_driver", None)
+        if vlm_for_print is not None:
+            base = getattr(vlm_for_print, "base_url", None) or "(SDK default)"
+            model = getattr(vlm_for_print, "model_name", "") or "(unset)"
+            budget = getattr(getattr(vlm_for_print, "_budget", None),
                              "max_calls_per_hour", "?")
-            print(f"[AUTO-PLAY] VLM endpoint base_url={base} model={model}"
+            tag = "VLM endpoint" if self._driver_name == "vlm" \
+                  else "hybrid VLM (watchdog 触发时介入)"
+            print(f"[AUTO-PLAY] {tag} base_url={base} model={model}"
                   f" budget={budget}/h", flush=True)
 
         self._stop_evt.clear()

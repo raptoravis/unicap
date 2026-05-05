@@ -4,6 +4,7 @@ recovery Actions when frames go static for too long.
 
 from __future__ import annotations
 
+import collections
 import logging
 import random
 import threading
@@ -14,28 +15,68 @@ from typing import TYPE_CHECKING, Any
 import cv2
 import numpy as np
 
+from tools.auto_play.driver import Observation
 from tools.auto_play.keep_alive import step_to_actions
+from tools.auto_play.vlm_driver import BudgetExhausted
 
 if TYPE_CHECKING:
     from tools.auto_play.input_backend import InputBackend
     from tools.auto_play.profile import GameProfile
+    from tools.auto_play.vlm_driver import VLMDriver
 
 
 log = logging.getLogger("unicap.auto_play")
 
 
 class StaticFrameWatchdog:
+    # A pixel counts as "moved" if its strongest channel differs by more than
+    # this many gray levels — picks up real motion, ignores compression noise.
+    _PIXEL_MOTION_THRESHOLD = 30  # out of 255
+
+    # Local-motion arm of the static detector: if fewer than this fraction of
+    # pixels actually moved, treat the scene as frozen even when overall mean
+    # diff is non-trivial. Catches the "tutorial GIF over a frozen scene" /
+    # "animated dialog cursor" case that the global-mean test misses.
+    _LOCAL_MOTION_RATIO_CAP = 0.05  # 5% of pixels
+
+    # ...but only when overall activity is also genuinely low. Loading
+    # fade-ins, scene transitions, and uniform brightness ramps shift every
+    # pixel slightly (mean ≈ 0.02-0.04, moved ≈ 0%) — we do NOT want to call
+    # those static, the scene is mid-change. Keep the cap tight enough to
+    # exclude them while still letting frozen-scene-with-overlay through.
+    _LOCAL_MOTION_MEAN_CAP = 0.025  # normalized 0-1
+
+    # Long-window check: even when every frame-to-frame transition looks
+    # active (e.g. character idle-loop animation + HUD pulse + tutorial GIF),
+    # compare the *current* frame against the one captured N samples ago. If
+    # the long-window diff is small (= the player hasn't really gone
+    # anywhere), the scene is stuck despite per-frame motion. Catches
+    # tutorial popups / dialog windows where the underlying game scene
+    # freezes but cinematic-style elements keep animating in place.
+    _LONG_WINDOW_SAMPLES = 4         # → window = sample_period_s * (N-1) ≈ 9-12s
+    _LONG_WINDOW_MEAN_CAP = 0.04     # mean diff vs N-old frame
+    _LONG_WINDOW_RATIO_CAP = 0.30    # moved-pixel ratio vs N-old frame
+
     def __init__(
         self,
         frames_dir: Path,
         profile: "GameProfile",
         input_backend: "InputBackend",
         log_path: Path | None = None,
+        vlm_driver: "VLMDriver | None" = None,
     ) -> None:
         self._frames_dir = frames_dir
         self._profile = profile
         self._backend = input_backend
         self._log_path = log_path
+        # Optional VLM consultant. When set, _trigger_recovery asks the VLM for
+        # actions before falling back to profile.recovery — this is the "hybrid"
+        # driver mode: keep_alive runs the main loop cheap and fast; VLM only
+        # weighs in on the rare static-frame events ("the bot got stuck, what
+        # do you see?"). On BudgetExhausted we permanently disable VLM and use
+        # profile.recovery for the rest of the session.
+        self._vlm_driver = vlm_driver
+        self._vlm_disabled = False
 
         wd_cfg = profile.watchdog
         self._sample_period_s = float(wd_cfg.get("sample_period_s", 5.0))
@@ -49,6 +90,10 @@ class StaticFrameWatchdog:
             profile.keep_alive.get("recovery") or []
         )
         self._rng = random.Random(0xCA75)
+        # Ring buffer of the last N samples for long-window comparison.
+        self._frame_history: collections.deque = collections.deque(
+            maxlen=self._LONG_WINDOW_SAMPLES,
+        )
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -94,19 +139,60 @@ class StaticFrameWatchdog:
                 consecutive_static = 0
                 continue
 
-            diff = float(
-                np.abs(prev_frame.astype(np.int16) - current.astype(np.int16))
-                .mean() / 255.0
-            )
+            diff_3d = np.abs(prev_frame.astype(np.int16) - current.astype(np.int16))
+            mean_diff = float(diff_3d.mean() / 255.0)
+            # Per-pixel max-across-channels → 2D map of "did this pixel really move".
+            diff_2d = diff_3d.max(axis=2)
+            moved_ratio = float((diff_2d > self._PIXEL_MOTION_THRESHOLD).mean())
             prev_frame = current
 
-            if diff <= self._diff_threshold:
+            # Two-arm short-window static detection. Either:
+            #   global: total activity is below threshold (the original test)
+            #   local-only: a tiny fraction of pixels moved meaningfully AND
+            #               overall activity stayed moderate — characteristic
+            #               of a frozen scene with a small overlay animation
+            #               (FF7R tutorial GIF, dialog cursor blink, etc.)
+            global_static = mean_diff <= self._diff_threshold
+            local_only = (moved_ratio < self._LOCAL_MOTION_RATIO_CAP
+                          and mean_diff < self._LOCAL_MOTION_MEAN_CAP)
+            is_short_static = global_static or local_only
+
+            if is_short_static:
                 consecutive_static += 1
                 if consecutive_static >= self._consecutive_required:
-                    self._trigger_recovery(diff)
+                    self._trigger_recovery(mean_diff, moved_ratio)
                     consecutive_static = 0
+                    self._frame_history.clear()  # reset to avoid double-firing
+                    self._frame_history.append(current)
+                    continue
             else:
                 consecutive_static = 0
+
+            # Long-window check — only meaningful once history is full. Compare
+            # current vs oldest in window: if very little has changed, the
+            # player isn't getting anywhere despite per-frame motion (tutorial
+            # popup / dialog window with idle animations underneath).
+            self._frame_history.append(current)
+            if len(self._frame_history) == self._frame_history.maxlen:
+                oldest = self._frame_history[0]
+                long_3d = np.abs(oldest.astype(np.int16) - current.astype(np.int16))
+                long_mean = float(long_3d.mean() / 255.0)
+                long_2d = long_3d.max(axis=2)
+                long_moved = float(
+                    (long_2d > self._PIXEL_MOTION_THRESHOLD).mean()
+                )
+                long_window_s = (
+                    self._sample_period_s * (self._frame_history.maxlen - 1)
+                )
+                if (long_mean < self._LONG_WINDOW_MEAN_CAP
+                        and long_moved < self._LONG_WINDOW_RATIO_CAP):
+                    log.info(
+                        "[WATCHDOG] long-window static (%.0fs): "
+                        "long_mean=%.4f long_moved=%.1f%% — 当作卡死",
+                        long_window_s, long_mean, long_moved * 100,
+                    )
+                    self._trigger_recovery(long_mean, long_moved)
+                    self._frame_history.clear()
 
     # Frames younger than this are likely still being written by the addon →
     # cv2.imdecode would fail mid-write. 500ms is comfortably longer than
@@ -165,11 +251,31 @@ class StaticFrameWatchdog:
                              interpolation=cv2.INTER_AREA)
         return img
 
-    def _trigger_recovery(self, diff: float) -> None:
+    def _trigger_recovery(self, mean_diff: float, moved_ratio: float) -> None:
         self._trigger_count += 1
+        diag = f"mean={mean_diff:.4f} moved={moved_ratio*100:.1f}%"
+        # Hybrid path: ask VLM what to do; on success inject its actions and
+        # return without running profile.recovery. On any failure fall through.
+        if self._vlm_driver is not None and not self._vlm_disabled:
+            actions = self._consult_vlm()
+            if actions:
+                log.info(
+                    "[WATCHDOG] static-frame 触发 #%d %s → VLM 决策 (%d actions)",
+                    self._trigger_count, diag, len(actions),
+                )
+                for action in actions:
+                    try:
+                        self._backend.inject(action)
+                    except Exception as e:
+                        log.warning("[WATCHDOG] VLM action inject 异常: %s", e)
+                    if self._stop_evt.is_set():
+                        return
+                return
+            # else: VLM returned no actions or threw — fall through to profile.recovery
+
         log.info(
-            "[WATCHDOG] static-frame 触发 #%d diff=%.4f → 注入 recovery (%d 步)",
-            self._trigger_count, diff, len(self._recovery_steps),
+            "[WATCHDOG] static-frame 触发 #%d %s → 注入 recovery (%d 步)",
+            self._trigger_count, diag, len(self._recovery_steps),
         )
         for step in self._recovery_steps:
             try:
@@ -184,3 +290,21 @@ class StaticFrameWatchdog:
                     log.warning("[WATCHDOG] recovery inject 异常: %s", e)
                 if self._stop_evt.is_set():
                     return
+
+    def _consult_vlm(self) -> list[Any]:
+        """Ask the VLM driver for actions. Returns [] on any failure (caller
+        falls back to profile.recovery). On BudgetExhausted, disable VLM for
+        the rest of the session."""
+        try:
+            obs = Observation(timestamp=time.time(), profile=self._profile)
+            return list(self._vlm_driver.next_actions(obs) or [])
+        except BudgetExhausted as e:
+            log.warning(
+                "[WATCHDOG] VLM 不可用 (%s) — 本 session 后续 trigger 不再调 VLM",
+                e,
+            )
+            self._vlm_disabled = True
+            return []
+        except Exception as e:
+            log.warning("[WATCHDOG] VLM 决策异常: %s — 本次降级 profile.recovery", e)
+            return []

@@ -28,6 +28,11 @@ controls:    # 必填 dict
     # 'mouse' | 'gamepad_rstick'
   attack / interact / jump:
     # 同上
+  dismiss_ui:
+    # "back / close current UI" 键，被 dismiss_ui action 解析。
+    # FF7R=M, DOOM Eternal/Batman/_default=ESC。
+    # 推荐选游戏内"明确的退 UI 键"，避免选有副作用的键
+    # （如 FF7R 不能用 ESC，因为 ESC 会 *打开* 系统菜单）。
 
 reserved_keys:   # 必填 list[str]
   # 必须包含 F8, F9（unicap 自身热键，bot 永不注入）
@@ -60,9 +65,10 @@ vlm:
 | `move_forward` / `move_back` / `move_left` / `move_right` | (none) | 按住 controls.move_<dir> 持续 duration_ms |
 | `turn`          | `{direction: left\|right\|random, magnitude: float}` | 鼠标 dx 扰动或右摇杆 X |
 | `attack` / `interact` / `jump` | (none) | 按 controls.<name> 一次 |
-| `press_key`     | `{vk: <name>}`                                  | 按指定键一次（用于 ESC、ENTER 等） |
-| `stick_jitter`  | (none)                                          | 左摇杆随机扰动（仅 prefer_gamepad） |
-| `wait`          | (none)                                          | 空转 duration_ms |
+| `dismiss_ui`    | (none) | 按 controls.dismiss_ui 一次（"back / close UI" 键，泛化跨游戏；建议只在 `recovery` 中用，主 sequence 不要主动触发，否则在 gameplay 中可能误开 UI） |
+| `press_key`     | `{vk: <name>}` | 按指定键一次（用于 ENTER 等不在 controls 里的） |
+| `stick_jitter`  | (none) | 左摇杆随机扰动（仅 prefer_gamepad） |
+| `wait`          | (none) | 空转 duration_ms |
 
 ## 内置 profile
 

@@ -48,6 +48,14 @@ def step_to_actions(
         ctrl = controls.get(ctrl_key)
         return _press_control(ctrl, dur)
 
+    if action_name == "dismiss_ui":
+        # Per-game "back / close current UI" key. FF7R=M, most others=ESC.
+        # Profile authors set controls.dismiss_ui to keep recovery / sequence
+        # YAML portable across games (don't hardcode press_key vk:M for FF7R
+        # only to discover the same step needs vk:ESC for DOOM Eternal).
+        ctrl = controls.get("dismiss_ui")
+        return _press_control(ctrl, dur)
+
     if action_name == "press_key":
         vk = payload.get("vk")
         if not vk:
