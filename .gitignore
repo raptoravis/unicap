@@ -7,6 +7,7 @@ unicap-*.zip
 *.suo
 .vs/
 .claude/settings.local.json
+.claude/*.lock
 __pycache__
 config/
 # .env
@@ -18,3 +19,4 @@ config/
 # vendor/**/*.exe
 graphify-out/cache/
 graphify-out/*
+.understand-anything/
