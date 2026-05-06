@@ -244,6 +244,25 @@ Use when you want to observe before acting (cutscene playing, animation finishin
 5. Cap each `duration_ms` at 3000ms (hard limit 5000ms). Real VLM tick rate is gated by API latency (3-4s round-trip), NOT 1 Hz — durations under 1s leave the bot idle until the next tick lands.
 6. ESC is dangerous — only press it when you are CERTAIN the screen is a fullscreen menu. The bar for "fullscreen menu" is high: a dark/solid panel covers most of the screen AND there is a list of selectable text options (Settings / Inventory / Save / Quit / etc) AND no live game scene is visible behind it. HUD elements (health bar, minimap, skill icons, dialog box, command list, interact prompt) DO NOT count as a menu — they are part of normal gameplay. Default action when uncertain: walk forward, NOT ESC.
 7. ESC anti-loop: if your *previous* tick output ESC and the current screen is still not a clearly fullscreen menu, your next response MUST NOT contain ESC. Pressing ESC twice on a non-menu screen typically *opens* the menu — you would create the very problem you tried to fix. Walk forward instead and re-evaluate next tick.
+
+7b. ⚠️⚠️ **MENU-KEY GATE — applies to ALL keys that toggle UI: M, ESC, ENTER (at non-dialog screens), TAB, BACKSPACE, F1, F2**. These keys cause more bot lockups than any other category because pressing them in gameplay *opens* a menu / map / photo-mode / save dialog, after which the bot rarely escapes (each subsequent press in the wrong sub-screen opens *another* layer instead of closing). **Hard rule**:
+
+    Before outputting ANY of {M, ESC, ENTER, TAB, BACKSPACE, F1, F2}, you must verify ALL THREE conditions:
+      a) A dark/solid panel covers ≥60% of the screen, OR a colored half-screen popup with a title and key-hint.
+      b) NO HUD elements (health bar, minimap, command list at bottom-left, interact prompts like "E to interact") visible.
+      c) An explicit on-screen key hint matches the key you're about to press (e.g. "M Back", "Enter Confirm", "ESC Close").
+
+    If even ONE condition is not met, do NOT output a menu key. Walk forward (W) instead. The cost of "missing one menu by accident" (next tick re-evaluates) is far smaller than "opening a menu by accident" (5+ ticks of trying to escape, often unsuccessfully).
+
+    Specifically for FF7R: F1 = Save dialog, F2 = Photo Mode (both visible as bottom-right hints in normal gameplay — DO NOT press them), M = Map (toggle; press when you mean to OPEN map, not close gameplay UI), TAB = unused but reserved.
+
+7c. ⚠️ **DISMISS-KEY ESCALATION — when stuck in a menu, cycle keys instead of repeating**. If you've already tried one dismiss key (M/ENTER/ESC/TAB) and the screen is STILL showing the same menu on the next tick, the key clearly didn't work — repeating it is wasted bandwidth. Cycle through this order on successive ticks until one works:
+      tick N:   M           (FF7R Main Menu standard close)
+      tick N+1: TAB         (FF7R Map / sub-tab close)
+      tick N+2: BACKSPACE   (sub-menu back-out in some FF7R screens)
+      tick N+3: ESC         (last resort — toggles main menu)
+      tick N+4: ENTER       (acknowledges any dialog blocking dismiss)
+    After all 5 fail, output W 2500ms — the bot may not actually be in a menu and your visual classification is wrong.
 8. If the screen is a cutscene (no HUD, cinematic letterbox bars), output `wait` for ~500ms — let the camera resolve before acting. After 2-3 waits, hit Enter to skip if still cinematic.
 9. If you cannot tell what is on screen (loading screen, mostly black, transition), default to "move forward 2500ms then small random turn" — keeps frames flowing without committing to a direction.
 

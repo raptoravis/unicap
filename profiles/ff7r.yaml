@@ -99,23 +99,30 @@ keep_alive:
     - {action: move_left,    duration_ms: 1200}
     - {action: move_forward, duration_ms: 1500}
 
-    # 5) 末端兜底：仅按 M（dismiss_ui），不按 ESC。
+    # NOTE: recovery 100% 纯 movement —— 末尾不按任何 menu 相关键
+    # (无 ESC, 无 M, 无 ENTER, 无 Tab, 无 Backspace)。
     #
-    # 历史教训：曾经在末尾加 `press_key: ESCAPE` 作"万一 OCR 漏检 menu"的兜底，
-    # 但实际 watchdog 经常在纯 gameplay 里误触发（local-only 静帧 / UI-mask 等
-    # 假阳性），ESC 在 gameplay 中是 *打开* Main Menu 的键 —— 末尾这个 ESC
-    # 反而把 bot 从 gameplay 推进了菜单，VLM 看到菜单后陷入"按 M / ENTER 但
-    # 画面没退"的死循环（VLM 单帧看不到自己上次按键效果）。
-    # M 在 gameplay 中按下打开 map 副屏然后再按 M 退出，副作用相对小；
-    # ESC 完全删除。如果真的进了菜单，由 main loop 的 VLM 看图决策处理。
-    - {action: dismiss_ui, duration_ms: 100}
-    - {action: wait,       duration_ms: 300}
+    # 历史教训（按时间顺序）：
+    # 1) 曾经头部 `ESC × 3` 作"退菜单"兜底 → 实测 ESC 在 gameplay 中 *打开*
+    #    Main Menu，连按 3 次 = 开/关/开三次，后面所有 movement 全被菜单
+    #    吞掉。已删除。
+    # 2) 改成末尾"单次 ESC + M"兜底 → 仍然在 gameplay 误触发开菜单。已删除。
+    # 3) 再缩成末尾仅 `dismiss_ui (M)` → 实测 M 在 gameplay 中**打开 Map
+    #    副屏**！VLM 看到 map (dark panel + 视觉特征跟 Main Menu 类似) 输出
+    #    M 试图关闭，但 FF7R 的 Map 退出键是 Tab 不是 M → 陷入死循环 4 分钟
+    #    (log 19:09:48 → 19:11:52)。
+    #
+    # 教训：watchdog 误触发是常态 (local-only 静帧 / UI-mask 假阳性等)，
+    # recovery 必须假定 "bot 还在 gameplay 中" 跑，绝不能主动按任何会触发
+    # 菜单/UI/photo-mode 的键。物理脱困靠 movement (S + 4 连 turn + W) 已
+    # 经够用；如果 bot 真的进了菜单，让 main loop 的 VLM 看图决策处理。
 
 watchdog:
-  sample_period_s: 2.0           # 30s capture session 里多留响应窗口；
-                                 # short-window=8s, long-window=4s 累积
+  sample_period_s: 2.0           # short-window=10s (5×2), long-window=4s (2×2)
   static_diff_threshold: 0.003   # 阈值收紧：VLM 思考时画面 diff ~0.002
-  consecutive_static_required: 4 # 8s 才触发，给 VLM 充分决策窗口
+  consecutive_static_required: 5 # 10s 才触发，减少 normal gameplay 误触发率
+                                 # (4 → 5：误触发开菜单的连锁灾难比"晚 2s
+                                 # 触发真正的卡死"代价大得多)
 
 vlm:
   decision_period_s: 0.5    # VLM 拿到 response 立即发下一帧（实际节奏受网络
