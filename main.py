@@ -452,7 +452,7 @@ def _start_auto_play(args, frames_dir: Path, game_exe_stem: str):
             vlm_api_key=getattr(args, "vlm_api_key", None) or None,
             vlm_base_url=getattr(args, "vlm_base_url", None) or None,
             vlm_model=getattr(args, "vlm_model", None) or None,
-            vlm_budget_per_hour=getattr(args, "vlm_budget_per_hour", 360),
+            vlm_budget_per_hour=getattr(args, "vlm_budget_per_hour", 10),
         )
         runner.start()
     except NotImplementedError as e:
@@ -547,7 +547,7 @@ def cmd_launch(args):
                  or os.environ.get("VLM_MODEL") or "(unset)")
         api_key_present = bool(getattr(args, "vlm_api_key", None)
                                 or os.environ.get("VLM_API_KEY"))
-        budget = getattr(args, "vlm_budget_per_hour", 360)
+        budget = getattr(args, "vlm_budget_per_hour", 10)
         tag = "VLM endpoint" if args.driver == "vlm" \
               else "hybrid VLM (12s patrol + watchdog 触发介入)"
         print(f"[AUTO-PLAY] {tag} base_url={base} model={model} "
@@ -723,7 +723,7 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path,
     video_out  = session_dir / "video.mp4"
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    duration = float(getattr(args, "capture_duration", 30.0))
+    duration = float(getattr(args, "capture_duration", 60.0))
     if duration > 0:
         print(f"\n[CAPTURE] 开始采集 (单次 {duration:.0f}s 自动 roll；F9 终止整轮) → {session_dir}",
               flush=True)
@@ -1122,9 +1122,9 @@ def main():
     p.add_argument("--video", action=argparse.BooleanOptionalAction, default=False,
                    help=f"F9 停止采集后立即生成 video.mp4（默认不生成；事后用 "
                         f"{_self_cmd()} video --game-dir DIR 批量补齐）")
-    p.add_argument("--capture-duration", type=float, default=30.0, metavar="SECONDS",
+    p.add_argument("--capture-duration", type=float, default=60.0, metavar="SECONDS",
                    help="单次 capture 时长（秒）；到时自动停当前会话 + 直接开下一段（新目录），"
-                        "F9 才终止整轮。0 = 不限时（仅 F9 停）。默认 30")
+                        "F9 才终止整轮。0 = 不限时（仅 F9 停）。默认 60")
     p.add_argument("--mask-ui", action="store_true",
                    help="同时生成 video_masked.mp4：depth==0|>=0.999 像素置黑（reverse-Z UI/sky mask）")
     p.add_argument("--pack", action="store_true",

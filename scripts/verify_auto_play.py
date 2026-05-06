@@ -40,6 +40,42 @@ FAIL = "[FAIL]"
 results: list[tuple[str, str, str]] = []
 
 
+def _neutralize_os_inputs() -> None:
+    """Stub out OS-level input so the verifier doesn't leak keystrokes,
+    mouse moves, or virtual-gamepad registrations into the user's session.
+
+    InputBackend uses Win32 SendInput for keys/mice and ViGEmBus
+    (vgamepad.VX360Gamepad) for virtual gamepads. Without this neutralizer
+    `cap_input_backend` (8 threads × 50 Q-down events = 400 SendInputs to
+    whatever window has focus) and `e2e_4_vigem_fallback` (5 keep-alive
+    ticks of W/A/S/D + mouse turns) actually reach the OS — interrupting
+    your IDE / browser / chat client mid-typing.
+
+    What stays real:
+      - InputBackend lock + threading semantics (M3 still validates 400
+        serialized injects across 8 threads)
+      - Reserved-key validation (M4 still raises on F8)
+      - last_inject_at_mono updates (heartbeat thread tests still see
+        timely timestamp changes)
+      - VK name resolution / payload validation
+    What gets neutered:
+      - `_user32.SendInput` → no-op (returns the input count it was given)
+      - `vgamepad` module reference → None (so InputBackend takes the
+        "ViGEm not installed" branch and never opens a virtual handle)
+    """
+    import tools.auto_play.input_backend as _ib_mod
+
+    # SendInput: pretend it succeeded (return = count of inputs sent).
+    _ib_mod._user32.SendInput = lambda n, p, sz: n
+
+    # Disable ViGEm — InputBackend's prefer_pad branch will warn once and
+    # fall back to keyboard/mouse, which is now neutered too.
+    _ib_mod.vgamepad = None
+    _ib_mod._VG_IMPORT_ERROR = "stubbed by verify_auto_play.py"
+
+    print("[VERIFY] OS input neutralized — your active window is safe to use")
+
+
 def check(label: str, cond: bool, detail: str = "") -> None:
     tag = PASS if cond else FAIL
     results.append((tag, label, detail))
@@ -271,9 +307,11 @@ def cap_watchdog() -> None:
     check("watchdog.M1 静帧自动触发 recovery",
           auto_triggered, f"trigger_count={wd.trigger_count}")
 
-    # Manual call also increments (defensive)
+    # Manual call also increments (defensive). Stop the daemon first to
+    # avoid racing with auto-triggers fired during the assertion window.
+    wd.stop(timeout_s=1.0)
     before = wd.trigger_count
-    wd._trigger_recovery(diff=0.001)
+    wd._trigger_recovery(mean_diff=0.001, moved_ratio=0.0)
     check("watchdog._trigger_recovery 计数 +1",
           wd.trigger_count == before + 1,
           f"before={before} after={wd.trigger_count}")
@@ -438,7 +476,7 @@ def e2e_5_watchdog_trigger_logging() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="unicap_e2e_wd_"))
     ib = InputBackend(profile)
     wd = StaticFrameWatchdog(tmp, profile, ib)
-    wd._trigger_recovery(diff=0.005)
+    wd._trigger_recovery(mean_diff=0.005, moved_ratio=0.0)
     matched = [m for m in log_capture if "[WATCHDOG]" in m and "static-frame" in m]
     check("E2E-5 watchdog 日志写 [WATCHDOG] static-frame", bool(matched),
           str(log_capture[-3:]))
@@ -452,6 +490,7 @@ def e2e_5_watchdog_trigger_logging() -> None:
 
 def main() -> int:
     print(f"=== auto-play 验证 — {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
+    _neutralize_os_inputs()
     run("Capability: profile",      cap_profile)
     run("Capability: input_backend", cap_input_backend)
     run("Capability: keep_alive",   cap_keep_alive)

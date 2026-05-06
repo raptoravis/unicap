@@ -25,47 +25,91 @@ input:
 
 keep_alive:
   period_s: 1.0
+  # 节奏设计原则（撞墙是 keep_alive 最大的死循环源）：
+  # - forward 占比 ≤ 35%（旧版 52% 经常连冲 2-3 段把 Cloud 钉墙上）
+  # - 每个移动段后强制接一次 turn，避免连续同向 W 冲进死胡同
+  # - 大幅 turn (magnitude 2.0-2.5 → 单次 mouse pulse 480-600px ≈ 65-80°
+  #   视角，mouse_sensitivity=0.8) 让撞墙后一次就能扭开正前障碍物
+  # - strafe (left/right) 拉到 1.0s — 配合 turn 后的 forward 形成弧线探索
+  # - move_back × 2 段：撞墙时多一条退路，对称分布在周期前后
+  # NOTE: 之前版本曾插入 "M heartbeat" 让盲 bot 主动 dismiss tutorial popup —
+  # 已移除。M 在 FF7R 不是 idempotent：在 gameplay 里按 M 会打开 map screen，
+  # 然后下一次 M 不一定可靠回到 gameplay（有时落到子 tab）。dismiss_ui 只
+  # 留在 `recovery`（watchdog 确认 UI lockup 后才触发），不在主循环里。
   sequence:
-    - {action: move_forward, duration_ms: 2500}
-    - {action: turn,         duration_ms: 500, payload: {direction: random, magnitude: 1.2}}
-    - {action: move_forward, duration_ms: 1800}
+    # 第一波：短前进 → 大幅转向 → 侧移 → 转向 → 再短前进 → 攻击
+    - {action: move_forward, duration_ms: 1200}
+    - {action: turn,         duration_ms: 400, payload: {direction: random, magnitude: 2.0}}
+    - {action: move_left,    duration_ms: 1000}
+    - {action: turn,         duration_ms: 400, payload: {direction: random, magnitude: 1.5}}
+    - {action: move_forward, duration_ms: 1000}
     - {action: attack,       duration_ms: 250}
-    - {action: turn,         duration_ms: 600, payload: {direction: random, magnitude: 1.5}}
-    - {action: move_left,    duration_ms: 800}
-    # NOTE: an earlier version inserted a periodic "M heartbeat" here so the
-    # blind bot would proactively dismiss tutorial popups. Removed: M is NOT
-    # idempotent in FF7R — pressing it during normal gameplay opens the map
-    # screen and the closing tap doesn't always reliably return to gameplay
-    # (sometimes lands on a sub-tab). Net effect was forcing the bot into
-    # menus 7s out of every 14s. dismiss_ui belongs in `recovery` (only
-    # triggered after watchdog confirms a UI lockup), not in the main loop.
-    - {action: move_forward, duration_ms: 1500}
+    # 第二波：超大转向 + 后退脱潜在卡位 + 反向探索
+    - {action: turn,         duration_ms: 500, payload: {direction: random, magnitude: 2.5}}
+    - {action: move_back,    duration_ms: 1200}
+    - {action: turn,         duration_ms: 400, payload: {direction: random, magnitude: 2.0}}
+    - {action: move_right,   duration_ms: 1000}
+    - {action: move_forward, duration_ms: 1000}
     - {action: interact,     duration_ms: 200}
-    - {action: turn,         duration_ms: 700, payload: {direction: random, magnitude: 1.2}}
-    - {action: move_right,   duration_ms: 800}
-    - {action: move_back,    duration_ms: 1200}      # 防止一直撞墙
-    - {action: turn,         duration_ms: 800, payload: {direction: random, magnitude: 1.8}}
-    - {action: move_forward, duration_ms: 1500}
+    # 第三波：再来一次转向 + 短侧移 + 短前进 + 短后退收尾
+    - {action: turn,         duration_ms: 400, payload: {direction: random, magnitude: 1.8}}
+    - {action: move_left,    duration_ms: 800}
+    - {action: turn,         duration_ms: 400, payload: {direction: random, magnitude: 1.8}}
+    - {action: move_forward, duration_ms: 800}
     - {action: attack,       duration_ms: 250}
-    - {action: wait,         duration_ms: 600}
+    - {action: move_back,    duration_ms: 800}
+    - {action: wait,         duration_ms: 400}
   recovery:
-    # 卡住时常见原因：1) 误进了菜单/UI — 用 dismiss_ui (FF7R=M) 退 2) cutscene
-    # 卡 — ENTER 跳过 3) 撞墙 — 调头 + 后退脱困
-    # 注意：FF7R 里 ESC 是 *打开* 系统菜单的键，所以 dismiss_ui=M（在 controls
-    # 里声明）。recovery 里不要塞 ESC，否则游戏正常时会把角色推进菜单。
-    - {action: dismiss_ui, duration_ms: 100}                        # 退 UI → 3D 场景
-    - {action: wait,       duration_ms: 250}
-    - {action: press_key,  payload: {vk: ENTER}, duration_ms: 100}  # 跳过对话/cutscene
-    - {action: wait,       duration_ms: 200}
-    # 连续 4 次同向大转向 ≈ 180° 调头（mouse_sensitivity=0.8 → 每次 ~480px dx）
-    - {action: turn, duration_ms: 100, payload: {direction: left, magnitude: 2.0}}
-    - {action: turn, duration_ms: 100, payload: {direction: left, magnitude: 2.0}}
-    - {action: turn, duration_ms: 100, payload: {direction: left, magnitude: 2.0}}
-    - {action: turn, duration_ms: 100, payload: {direction: left, magnitude: 2.0}}
-    # 调头后后退脱离障碍物
-    - {action: move_back,    duration_ms: 1500}
-    - {action: turn,         duration_ms: 600, payload: {direction: random, magnitude: 1.5}}
-    - {action: move_forward, duration_ms: 2000}
+    # 关键认识：watchdog 触发时 bot 大概率还在 *gameplay 中卡墙/卡角*（最常见场景），
+    # 不是进了菜单。OCR 臂已独立处理菜单/popup（explicit dismiss-prompt + generic
+    # menu phrase → 直接注入对应 key），所以 recovery 专攻 gameplay-stuck，不需要
+    # 先 ESC 退菜单。
+    #
+    # 旧版踩过两个坑（已修）：
+    # 1. 头部 ESC × 3：FF7R gameplay 里 ESC 是 *打开* main menu，连按 3 次 = 开/关
+    #    /开三次菜单，后续所有 movement 全被菜单吞掉根本到不了角色身上 → 看起来
+    #    "watchdog 触发了但 bot 仍卡墙"。彻底移除。
+    # 2. 4 连 turn 之间没 wait：keep_alive.py mouse turn 是 duration_ms=0 的瞬时
+    #    SendInput pulse，4 次在 < 1ms 内全发完，游戏一帧合并 mouse delta → 实际
+    #    只转 1 次 (~60°)。修法：每次 turn 后插 80ms wait 让游戏每帧 sample 一次
+    #    delta，4 次累积 ≈ 200°+ 真调头。
+
+    # 1) 立刻拉开贴墙距离
+    - {action: move_back, duration_ms: 2000}
+
+    # 2) 4 连 turn 大幅调头（每次之间插 wait 让游戏 sample mouse delta；
+    #    每次 magnitude 2.5 = dx 600px @ sens 0.8，4 次累积约 200°+）
+    - {action: turn, payload: {direction: left, magnitude: 2.5}}
+    - {action: wait, duration_ms: 80}
+    - {action: turn, payload: {direction: left, magnitude: 2.5}}
+    - {action: wait, duration_ms: 80}
+    - {action: turn, payload: {direction: left, magnitude: 2.5}}
+    - {action: wait, duration_ms: 80}
+    - {action: turn, payload: {direction: left, magnitude: 2.5}}
+    - {action: wait, duration_ms: 200}
+
+    # 3) 调头后试探前进 1.5s
+    - {action: move_forward, duration_ms: 1500}
+
+    # 4) 还卡 → 反向 + 横移找绕路（下一轮 watchdog 还会再触发整个 recovery）
+    - {action: turn, payload: {direction: right, magnitude: 2.5}}
+    - {action: wait, duration_ms: 80}
+    - {action: turn, payload: {direction: right, magnitude: 2.5}}
+    - {action: wait, duration_ms: 80}
+    - {action: move_left,    duration_ms: 1200}
+    - {action: move_forward, duration_ms: 1500}
+
+    # 5) 末端兜底：仅按 M（dismiss_ui），不按 ESC。
+    #
+    # 历史教训：曾经在末尾加 `press_key: ESCAPE` 作"万一 OCR 漏检 menu"的兜底，
+    # 但实际 watchdog 经常在纯 gameplay 里误触发（local-only 静帧 / UI-mask 等
+    # 假阳性），ESC 在 gameplay 中是 *打开* Main Menu 的键 —— 末尾这个 ESC
+    # 反而把 bot 从 gameplay 推进了菜单，VLM 看到菜单后陷入"按 M / ENTER 但
+    # 画面没退"的死循环（VLM 单帧看不到自己上次按键效果）。
+    # M 在 gameplay 中按下打开 map 副屏然后再按 M 退出，副作用相对小；
+    # ESC 完全删除。如果真的进了菜单，由 main loop 的 VLM 看图决策处理。
+    - {action: dismiss_ui, duration_ms: 100}
+    - {action: wait,       duration_ms: 300}
 
 watchdog:
   sample_period_s: 2.0           # 30s capture session 里多留响应窗口；
@@ -97,6 +141,30 @@ vlm:
       response: walk forward + occasional turn + occasional left-click. NEVER
       press ESC in this state — it would *open* the system menu.
 
+      ⚠️ **NEAR-WALL OVERRIDE** (very common bot failure mode in FF7R's tight
+      Sector 7 / Sector 5 alleys). When >50% of the camera frame is dominated
+      by a single wall texture (brick, concrete, metal panel) at close range
+      AND there is no clear corridor or doorway visible, do NOT walk forward
+      — pressing W against a wall keeps the bot pinned and the dataset stops
+      growing. Instead output: a large mouse turn (|dx| 600-800) + a long S
+      (move_back) for 1500ms, then a short W 1000ms to test the new heading.
+      This rule overrides the default "walk forward + occasional turn"
+      Gameplay recipe whenever the wall-fill cue is present.
+
+      ⚠️⚠️ **TURN DIRECTION RULE — must alternate, never repeat**. FF7R walls
+      meet at 90° corners. If you keep turning the SAME direction (always
+      `dx: +700` right, or always `dx: -700` left), after 90° you face the
+      OTHER wall of the corner and stay near-wall — you've spun yourself
+      from one wall onto another. So:
+        - Pick the turn `dx` sign **randomly each tick** when applying the
+          near-wall override (50% probability `+`, 50% `-`).
+        - Even better: alternate. If your previous response would have
+          been right (+), this one MUST be left (-), and vice versa.
+        - Use a LARGER `|dx|` (700-900) than usual. A small turn (300)
+          isn't enough to clear a 90° corner; you'll re-stick.
+      Combine with `S 1500ms` (long back-step) so the bot physically leaves
+      the corner before turning, not just rotates in place against the wall.
+
       Combat (HUD + battle UI). On top of normal gameplay HUD you will see a
       battle command list at lower-left ("攻击/魔法/物品" or "Attack/Magic/Item"),
       and ATB gauges. Enemy HP bar appears top-of-screen. Your response:
@@ -106,13 +174,24 @@ vlm:
       bottom of screen, no HUD, no minimap. Your response: a single Enter
       press to advance, or wait 500ms if still mid-camera-pan.
 
-      Fullscreen menu (ONLY this state warrants ESC). Dark/solid panel
-      covering >70% of the screen + visible list of options ("System / Items
-      / Materia / Save" or similar). The live game scene is hidden or
-      heavily darkened behind. Your response: ESC to close.
+      Fullscreen menu (Main Menu / Battle Settings / Save & Load / etc).
+      Dark/solid panel covering >70% of the screen + visible list of options
+      ("System / Items / Materia / Save" or similar) + live game scene is
+      hidden or heavily darkened behind. Your response: **press M to close
+      (NOT ESC)**.
 
-      Map / inventory screen. Similar to fullscreen menu but specifically
-      for FF7R press M to close (NOT ESC — ESC may go to a sub-menu).
+      Why M, not ESC: in FF7R, M reliably backs out one menu layer (Main
+      Menu → gameplay; sub-menu → Main Menu). ESC works only on the top-
+      level Main Menu — inside a sub-tab (Battle Settings → character
+      picker, Save & Load → file picker, etc.) ESC may do nothing or open
+      a confirmation dialog. If you misidentify a sub-menu as Main Menu and
+      press ESC repeatedly you get stuck. M is safe across all menu layers.
+
+      ESC fallback: only after pressing M three times across three
+      consecutive ticks the menu is still on screen, you may try a single
+      ESC. Do NOT lead with ESC.
+
+      Map / inventory screen. Same as fullscreen menu — press M to close.
 
       Tutorial popup (extremely common in Chapter 1 — DO NOT MISTAKE FOR
       GAMEPLAY). FF7R drops half-screen blue tutorial panels constantly:

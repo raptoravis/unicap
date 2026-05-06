@@ -29,31 +29,62 @@ _init_error: str | None = None
 
 # Dismiss-prompt patterns. Group 1 captures the key. Most→least specific
 # ordering so generic patterns don't shadow bracketed/prefixed forms.
+#
+# Verb list rationale: FF7R / UE4 tutorial popups commonly use "Enter Confirm"
+# / "Enter Proceed" rather than "Enter Continue" — without these the OCR arm
+# misses tutorial popups entirely, leaving the bot perma-stuck (popup is modal
+# so ESC × 3 in profile.recovery can't punch through it). Confirm/OK/Accept/
+# Proceed/Advance/Yes are all safe to map to "press the key" — they appear on
+# popups designed to be dismissed; the small risk (accidentally accepting a
+# save dialog or story choice) is far smaller than the cost of perma-stuck.
 _DISMISS_PATTERNS = [
     # "Press M to dismiss" / "Press ESC to continue"
     re.compile(
         r"\bPress\s+([A-Z]|ESC|TAB|SPACE|ENTER|F\d{1,2})\s+to\s+"
-        r"(?:Back|Close|Cancel|Skip|Exit|Continue|Dismiss|Return)\b",
+        r"(?:Back|Close|Cancel|Skip|Exit|Continue|Dismiss|Return"
+        r"|Confirm|OK|Accept|Proceed|Advance|Yes)\b",
         re.IGNORECASE,
     ),
     # "[M] Back" / "(ESC) Close" — bracketed key
     re.compile(
         r"[\[(]\s*([A-Z]+|F\d{1,2})\s*[\])]\s*"
-        r"(?:Back|Close|Cancel|Skip|Exit|Continue|Dismiss|Return)\b",
+        r"(?:Back|Close|Cancel|Skip|Exit|Continue|Dismiss|Return"
+        r"|Confirm|OK|Accept|Proceed|Advance|Yes)\b",
         re.IGNORECASE,
     ),
-    # "M Back" / "ESC Close" / "B Cancel" — bare key + verb
+    # "M Back" / "ESC Close" / "Enter Confirm" — bare key + verb
     re.compile(
         r"\b([A-Z]|ESC|TAB|SPACE|ENTER|F\d{1,2})\s+"
-        r"(?:Back|Close|Cancel|Skip|Exit|Continue|Dismiss|Return)\b",
+        r"(?:Back|Close|Cancel|Skip|Exit|Continue|Dismiss|Return"
+        r"|Confirm|OK|Accept|Proceed|Advance|Yes)\b",
         re.IGNORECASE,
     ),
-    # Chinese: "按 M 返回" / "按ESC关闭"
+    # Chinese: "按 M 返回" / "按ESC关闭" / "按 Enter 确认"
     re.compile(
         r"按\s*([A-Z]+|F\d{1,2})\s*"
-        r"(?:返回|关闭|取消|跳过|退出|继续|完成|确定)",
+        r"(?:返回|关闭|取消|跳过|退出|继续|完成|确定|确认|是)",
     ),
 ]
+
+# Generic menu-only descriptive phrases — no explicit key on screen, but
+# the phrase itself is unambiguously a fullscreen-menu instruction (would
+# never appear during normal 3D gameplay). Match → default key = "ESCAPE"
+# (most fullscreen menus across UE4/Unity titles back out via ESC).
+# Matched ONLY after _DISMISS_PATTERNS misses, so an explicit key hint
+# (e.g. "M Back" in a tutorial popup) still wins.
+_GENERIC_DISMISS_PATTERNS = [
+    # FF7R Battle Settings character picker, save/load file selectors, etc.
+    re.compile(
+        r"\bSelect\s+a\s+"
+        r"(?:character|file|save\s+slot|setting|menu|target|option|partner)\b",
+        re.IGNORECASE,
+    ),
+    # FF7R Battle Settings sub-screen prompt
+    re.compile(r"whose\s+settings\s+you\s+wish\s+to", re.IGNORECASE),
+    # Generic Chinese menu instructions
+    re.compile(r"请\s*选择\s*(?:角色|存档|文件|目标|选项|设置)"),
+]
+_GENERIC_DEFAULT_KEY = "ESCAPE"
 
 
 def _init_engine() -> bool:
@@ -106,6 +137,7 @@ def detect_dismiss_prompt(bgr: np.ndarray) -> str | None:
         return None
     if not text:
         return None
+    # Phase 1 — explicit-key patterns win (e.g. "M Back" tutorial popup).
     for pat in _DISMISS_PATTERNS:
         m = pat.search(text)
         if m:
@@ -114,6 +146,15 @@ def detect_dismiss_prompt(bgr: np.ndarray) -> str | None:
                 "[OCR] dismiss-prompt match: key=%s text=%r", key, text[:120],
             )
             return key
+    # Phase 2 — generic descriptive-only menu prompts → default ESCAPE.
+    for pat in _GENERIC_DISMISS_PATTERNS:
+        m = pat.search(text)
+        if m:
+            log.info(
+                "[OCR] generic-menu match → key=%s text=%r",
+                _GENERIC_DEFAULT_KEY, text[:120],
+            )
+            return _GENERIC_DEFAULT_KEY
     return None
 
 
