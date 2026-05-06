@@ -269,4 +269,18 @@ When debugging capture issues, default to reading `unicap.log1` first.
 | `scripts/build.ps1`                                 | Build entry point                                       |
 | `shaders/DepthToAddon.fx`                           | Depth/normal buffer export shader (runtime canonical)   |
 
+## Agent skills
+
+### Issue tracker
+
+Issues live as markdown files under `.scratch/<feature>/` in this repo (local-markdown mode). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical triage roles, each mapped to its default string (`needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout — one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
 ## 任何输出要么使用英文，要么使用中文，优先使用中文，不要使用其他语言
