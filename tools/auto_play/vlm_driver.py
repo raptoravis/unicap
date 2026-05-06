@@ -241,11 +241,32 @@ Use when you want to observe before acting (cutscene playing, animation finishin
 2. NEVER press game-quit / log-out / save-and-quit keys. The session must keep running for hours unattended.
 3. NEVER pick a "no" / "quit" / "permanent" story option. If a binary "yes/no" prompt blocks progress, prefer Enter / continue / skip — produce frames, do not finish the game.
 4. Output 1-6 actions per tick. More than that and the runner cannot keep up at 1 Hz.
-5. Cap each `duration_ms` at 2000ms (hard limit 5000ms). Smaller is better — you re-decide every ~1s anyway.
+5. Cap each `duration_ms` at 3000ms (hard limit 5000ms). Real VLM tick rate is gated by API latency (3-4s round-trip), NOT 1 Hz — durations under 1s leave the bot idle until the next tick lands.
 6. ESC is dangerous — only press it when you are CERTAIN the screen is a fullscreen menu. The bar for "fullscreen menu" is high: a dark/solid panel covers most of the screen AND there is a list of selectable text options (Settings / Inventory / Save / Quit / etc) AND no live game scene is visible behind it. HUD elements (health bar, minimap, skill icons, dialog box, command list, interact prompt) DO NOT count as a menu — they are part of normal gameplay. Default action when uncertain: walk forward, NOT ESC.
 7. ESC anti-loop: if your *previous* tick output ESC and the current screen is still not a clearly fullscreen menu, your next response MUST NOT contain ESC. Pressing ESC twice on a non-menu screen typically *opens* the menu — you would create the very problem you tried to fix. Walk forward instead and re-evaluate next tick.
+
+7b. ⚠️⚠️ **MENU-KEY GATE — applies to ALL keys that toggle UI: M, ESC, ENTER (at non-dialog screens), TAB, BACKSPACE, F1, F2**. These keys cause more bot lockups than any other category because pressing them in gameplay *opens* a menu / map / photo-mode / save dialog, after which the bot rarely escapes (each subsequent press in the wrong sub-screen opens *another* layer instead of closing). **Hard rule**:
+
+    Before outputting ANY of {M, ESC, ENTER, TAB, BACKSPACE, F1, F2}, you must verify ALL THREE conditions:
+      a) A dark/solid panel covers ≥60% of the screen, OR a colored half-screen popup with a title and key-hint.
+      b) NO HUD elements (health bar, minimap, command list at bottom-left, interact prompts like "E to interact") visible.
+      c) An explicit on-screen key hint matches the key you're about to press (e.g. "M Back", "Enter Confirm", "ESC Close").
+
+    If even ONE condition is not met, do NOT output a menu key. Walk forward (W) instead. The cost of "missing one menu by accident" (next tick re-evaluates) is far smaller than "opening a menu by accident" (5+ ticks of trying to escape, often unsuccessfully).
+
+    Specifically for FF7R: F1 = Save dialog, F2 = Photo Mode (both visible as bottom-right hints in normal gameplay — DO NOT press them), M = Map (toggle; press when you mean to OPEN map, not close gameplay UI), TAB = unused but reserved.
+
+7c. ⚠️ **DISMISS-KEY ESCALATION — when stuck in a menu, cycle keys instead of repeating**. If you've already tried one dismiss key (M/ENTER/ESC/TAB) and the screen is STILL showing the same menu on the next tick, the key clearly didn't work — repeating it is wasted bandwidth. Cycle through this order on successive ticks until one works:
+      tick N:   M           (FF7R Main Menu standard close)
+      tick N+1: TAB         (FF7R Map / sub-tab close)
+      tick N+2: BACKSPACE   (sub-menu back-out in some FF7R screens)
+      tick N+3: ESC         (last resort — toggles main menu)
+      tick N+4: ENTER       (acknowledges any dialog blocking dismiss)
+    After all 5 fail, output W 2500ms — the bot may not actually be in a menu and your visual classification is wrong.
 8. If the screen is a cutscene (no HUD, cinematic letterbox bars), output `wait` for ~500ms — let the camera resolve before acting. After 2-3 waits, hit Enter to skip if still cinematic.
-9. If you cannot tell what is on screen (loading screen, mostly black, transition), default to "move forward 1500ms then small random turn" — keeps frames flowing without committing to a direction.
+9. If you cannot tell what is on screen (loading screen, mostly black, transition), default to "move forward 2500ms then small random turn" — keeps frames flowing without committing to a direction.
+
+11. ⚠️ **Movement coverage rule** — VLM tick rate is gated by API latency (3-4s round-trip). If your `actions` list contains less total movement than ~2500ms, the bot stands still for the rest of the tick and the dataset stops growing. ALWAYS make sure each response contains at least one movement input with `duration_ms ≥ 2500` (W / A / S / D press, or gamepad stick) — UNLESS you are deliberately in a Cutscene / Loading / Menu state. Mouse move is instant (`duration_ms: 0`) and does NOT count as movement coverage; pair it with a long W or stick. "walk forward 2.5s + small turn" is the right default; "walk forward 0.5s + 5 mouse turns" leaves the bot idle.
 10. ⚠️ HIGHEST PRIORITY — explicit dismiss prompts. If ANYWHERE on the screen (corner, bottom bar, popup edge) you see a key-hint of the form `<KEY> Back` / `<KEY> Close` / `<KEY> Cancel` / `<KEY> Exit` / `<KEY> Skip` / `Press <KEY> to dismiss` / `按 <KEY> 返回` — that is the game telling you exactly which key dismisses the current overlay. Output that exact key as your FIRST action, with `event: "press"` and `duration_ms: 80`. This rule overrides every other state recipe below — when an explicit hint exists, follow it. Common examples: "M Back", "ESC Back", "Enter Skip", "Space to continue", "F to interact". Half-screen tutorial popups (a colored panel covering one side with a title + animated demo + a "<KEY> Back" hint at the bottom) are NOT gameplay even when the rest of the screen still shows the game world — the player is locked out until the dismiss key is pressed.
 
 # Output discipline
@@ -256,7 +277,7 @@ Return ONLY a JSON object matching the response schema. No prose before or after
 
 For `kind: "key"` — required `payload.vk` (string), required `payload.event` (must be `"press"`). Examples:
 
-- {"kind":"key","payload":{"vk":"W","event":"press"},"duration_ms":1500}                  // walk forward 1.5s
+- {"kind":"key","payload":{"vk":"W","event":"press"},"duration_ms":2500}                  // walk forward 2.5s (covers VLM round-trip)
 - {"kind":"key","payload":{"vk":"SPACE","event":"press"},"duration_ms":100}               // jump (instant tap)
 - {"kind":"key","payload":{"vk":"E","event":"press"},"duration_ms":150}                   // interact / open door
 - {"kind":"key","payload":{"vk":"ENTER","event":"press"},"duration_ms":80}                // skip dialog
@@ -271,10 +292,17 @@ For `kind: "mouse"` with `payload.op == "move"` — required `payload.dx`, `payl
 - |dx| ≈ 200-400 = normal turn (most useful magnitude — 1-2 of these is "look around")
 - |dx| ≈ 600+  = large turn, ~90°
 
+⚠️ **Direction balance** — alternate the sign of `dx` between ticks so the
+camera explores both sides of the corridor. If your last tick used `+dx`
+(right), prefer `-dx` (left) this tick. Always-right (`+dx, +dx, +dx, ...`)
+is the most common bot failure mode: in any narrow corridor with an
+obstacle on one side the bot accumulates a turn into that obstacle and
+sticks. When in doubt, use `dx: -250` instead of `dx: +250`.
+
 Examples:
+- {"kind":"mouse","payload":{"op":"move","dx":-300,"dy":0},"duration_ms":0}                // look left (prefer this default — counters right-bias)
 - {"kind":"mouse","payload":{"op":"move","dx":300,"dy":0},"duration_ms":0}                 // look right
-- {"kind":"mouse","payload":{"op":"move","dx":-300,"dy":0},"duration_ms":0}                // look left
-- {"kind":"mouse","payload":{"op":"move","dx":150,"dy":0},"duration_ms":0}                 // small right adjust
+- {"kind":"mouse","payload":{"op":"move","dx":-150,"dy":0},"duration_ms":0}                // small left adjust
 
 For `kind: "mouse"` with `payload.op == "click"` — required `payload.button` (`"left"` or `"right"`):
 
@@ -286,7 +314,7 @@ For `kind: "gamepad"` (only when the profile uses gamepad — the operation guid
 - {"kind":"gamepad","payload":{"op":"button","button":"A"},"duration_ms":200}              // jump on Xbox layout
 - {"kind":"gamepad","payload":{"op":"button","button":"X"},"duration_ms":200}              // attack on Xbox layout
 - {"kind":"gamepad","payload":{"op":"button","button":"START"},"duration_ms":80}           // pause / menu
-- {"kind":"gamepad","payload":{"op":"stick","side":"left","x":0,"y":1.0},"duration_ms":1500}    // walk forward
+- {"kind":"gamepad","payload":{"op":"stick","side":"left","x":0,"y":1.0},"duration_ms":2500}    // walk forward (covers VLM round-trip)
 - {"kind":"gamepad","payload":{"op":"stick","side":"left","x":-0.7,"y":0.7},"duration_ms":1000} // strafe forward-left
 - {"kind":"gamepad","payload":{"op":"stick","side":"right","x":0.7,"y":0},"duration_ms":300}    // turn camera right
 - {"kind":"gamepad","payload":{"op":"trigger","side":"right","value":1.0},"duration_ms":200}    // fire / accelerate
@@ -298,10 +326,10 @@ For `kind: "wait"` — payload is always `{}`; `duration_ms` is how long to paus
 ## State: "Open exploration" (HUD visible, character standing in environment)
 
 ```
-{"reasoning":"open exploration, walk forward and look around",
+{"reasoning":"open exploration, walk forward and look left (alternate dx sign each tick to counter right-bias)",
  "actions":[
-   {"kind":"key","payload":{"vk":"W","event":"press"},"duration_ms":1800},
-   {"kind":"mouse","payload":{"op":"move","dx":250,"dy":0},"duration_ms":0}
+   {"kind":"key","payload":{"vk":"W","event":"press"},"duration_ms":2500},
+   {"kind":"mouse","payload":{"op":"move","dx":-250,"dy":0},"duration_ms":0}
  ]}
 ```
 
@@ -390,9 +418,9 @@ Look for the hint text BEFORE deciding the screen is "gameplay with HUD". If a `
 ```
 {"reasoning":"appears stuck on wall, back away and turn",
  "actions":[
-   {"kind":"key","payload":{"vk":"S","event":"press"},"duration_ms":1000},
+   {"kind":"key","payload":{"vk":"S","event":"press"},"duration_ms":1500},
    {"kind":"mouse","payload":{"op":"move","dx":700,"dy":0},"duration_ms":0},
-   {"kind":"key","payload":{"vk":"W","event":"press"},"duration_ms":1500}
+   {"kind":"key","payload":{"vk":"W","event":"press"},"duration_ms":2500}
  ]}
 ```
 
@@ -401,7 +429,7 @@ Look for the hint text BEFORE deciding the screen is "gameplay with HUD". If a `
 ```
 {"reasoning":"unclear scene, default exploration",
  "actions":[
-   {"kind":"key","payload":{"vk":"W","event":"press"},"duration_ms":1500},
+   {"kind":"key","payload":{"vk":"W","event":"press"},"duration_ms":2500},
    {"kind":"mouse","payload":{"op":"move","dx":200,"dy":0},"duration_ms":0}
  ]}
 ```

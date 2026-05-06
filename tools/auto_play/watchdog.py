@@ -69,8 +69,19 @@ class StaticFrameWatchdog:
     # ratio of UI pixels is unambiguous (popup covers ~30-50% of screen,
     # normal HUD covers ~5-10%, fullscreen menu 70%+). Trigger when overlay
     # is large enough to plausibly block gameplay AND persists across samples.
-    _UI_MASK_PIXEL_THRESHOLD = 30          # per-channel max diff to count as UI
-    _UI_MASK_RATIO_TRIGGER = 0.20          # ≥20% UI pixels = popup-sized
+    #
+    # ⚠️ Threshold tuning history: original 30/0.20 was too loose for FF7R —
+    # BackBuffer (pre-UI scene RT decoded HDR float→sRGB via Reinhard) and
+    # BackBufferUI (post-UI BackBuffer with the game's own tone-mapping) have
+    # different tone curves, so even a frame with no UI overlay shows ~50%+
+    # of pixels with per-channel diff > 30. Real-world log: 11 of 17 watchdog
+    # triggers in a 30-min session were UI-mask false positives during normal
+    # gameplay (VLM concurrently confirmed "gameplay state with HUD visible").
+    # Each false positive cascaded into menu-loop death spirals via the old
+    # ESC × 3 recovery head. Bumped to 80 / 0.70 — only fires on clear
+    # fullscreen-menu-grade overlays (dark panel covering most of the screen).
+    _UI_MASK_PIXEL_THRESHOLD = 80          # per-channel max diff to count as UI
+    _UI_MASK_RATIO_TRIGGER = 0.70          # ≥70% UI pixels = clear fullscreen menu
     _UI_MASK_CONSECUTIVE = 2               # × sample_period_s = persist time
 
     # OCR arm: every N samples, run Windows.Media.Ocr on the latest frame and
@@ -87,6 +98,7 @@ class StaticFrameWatchdog:
         input_backend: "InputBackend",
         log_path: Path | None = None,
         vlm_driver: "VLMDriver | None" = None,
+        recovery_active_evt: "threading.Event | None" = None,
     ) -> None:
         self._frames_dir = frames_dir
         self._profile = profile
@@ -100,6 +112,13 @@ class StaticFrameWatchdog:
         # profile.recovery for the rest of the session.
         self._vlm_driver = vlm_driver
         self._vlm_disabled = False
+        # Cross-thread "recovery in progress" flag. While set, the main driver
+        # loop and heartbeat thread skip their own inject calls so they don't
+        # collide with the recovery sequence (e.g. watchdog wants S 1500ms
+        # back-step, main loop simultaneously injects W 2500ms — they cancel).
+        # The runner constructs the Event and passes it to both watchdog and
+        # the loops; watchdog sets/clears around _trigger_recovery.
+        self._recovery_active_evt = recovery_active_evt or threading.Event()
 
         wd_cfg = profile.watchdog
         self._sample_period_s = float(wd_cfg.get("sample_period_s", 5.0))
@@ -389,42 +408,50 @@ class StaticFrameWatchdog:
     def _trigger_recovery(self, mean_diff: float, moved_ratio: float) -> None:
         self._trigger_count += 1
         diag = f"mean={mean_diff:.4f} moved={moved_ratio*100:.1f}%"
-        # Hybrid path: ask VLM what to do; on success inject its actions and
-        # return without running profile.recovery. On any failure fall through.
-        if self._vlm_driver is not None and not self._vlm_disabled:
-            actions = self._consult_vlm()
-            if actions:
-                log.info(
-                    "[WATCHDOG] static-frame 触发 #%d %s → VLM 决策 (%d actions)",
-                    self._trigger_count, diag, len(actions),
-                )
-                for action in actions:
+        # Set the recovery flag so the main driver loop and heartbeat thread
+        # pause their own inject calls — without this, watchdog's S+turn
+        # back-step gets cancelled mid-flight by main loop's W+turn from a
+        # concurrent VLM tick. Always cleared in finally.
+        self._recovery_active_evt.set()
+        try:
+            # Hybrid path: ask VLM what to do; on success inject its actions and
+            # return without running profile.recovery. On any failure fall through.
+            if self._vlm_driver is not None and not self._vlm_disabled:
+                actions = self._consult_vlm()
+                if actions:
+                    log.info(
+                        "[WATCHDOG] static-frame 触发 #%d %s → VLM 决策 (%d actions)",
+                        self._trigger_count, diag, len(actions),
+                    )
+                    for action in actions:
+                        try:
+                            self._backend.inject(action)
+                        except Exception as e:
+                            log.warning("[WATCHDOG] VLM action inject 异常: %s", e)
+                        if self._stop_evt.is_set():
+                            return
+                    return
+                # else: VLM returned no actions or threw — fall through to profile.recovery
+
+            log.info(
+                "[WATCHDOG] static-frame 触发 #%d %s → 注入 recovery (%d 步)",
+                self._trigger_count, diag, len(self._recovery_steps),
+            )
+            for step in self._recovery_steps:
+                try:
+                    action_list = step_to_actions(self._profile, step, self._rng)
+                except Exception as e:
+                    log.warning("[WATCHDOG] recovery step %s 解析失败: %s", step, e)
+                    continue
+                for action in action_list:
                     try:
                         self._backend.inject(action)
                     except Exception as e:
-                        log.warning("[WATCHDOG] VLM action inject 异常: %s", e)
+                        log.warning("[WATCHDOG] recovery inject 异常: %s", e)
                     if self._stop_evt.is_set():
                         return
-                return
-            # else: VLM returned no actions or threw — fall through to profile.recovery
-
-        log.info(
-            "[WATCHDOG] static-frame 触发 #%d %s → 注入 recovery (%d 步)",
-            self._trigger_count, diag, len(self._recovery_steps),
-        )
-        for step in self._recovery_steps:
-            try:
-                action_list = step_to_actions(self._profile, step, self._rng)
-            except Exception as e:
-                log.warning("[WATCHDOG] recovery step %s 解析失败: %s", step, e)
-                continue
-            for action in action_list:
-                try:
-                    self._backend.inject(action)
-                except Exception as e:
-                    log.warning("[WATCHDOG] recovery inject 异常: %s", e)
-                if self._stop_evt.is_set():
-                    return
+        finally:
+            self._recovery_active_evt.clear()
 
     def _consult_vlm(self) -> list[Any]:
         """Ask the VLM driver for actions. Returns [] on any failure (caller
