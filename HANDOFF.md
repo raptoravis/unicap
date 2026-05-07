@@ -1,290 +1,374 @@
-# Handoff: PySide6 GUI + auto-play VLM 砍除
+# Handoff: auto-play 接管检测 + GUI 启停体验改进
 
-**Generated**: 2026-05-07 16:13 +0800
+**Generated**: 2026-05-07 17:51 +0800
 **Branch**: master（与 origin/master 同步，clean）
-**Status**: Ready for Review —— 全部代码 commit + push；GUI 启动可用，端到端 capture 没在本 session 实跑过
+**Status**: Ready for Review —— 全部代码 commit + push（`74cf102`），headless sanity 全过；端到端实跑用户已验证 FF7R 游戏退出 + GUI toggle 路径"完美"，takeover detector 在真采集流程里的行为还需下一轮实测。
 
 ## Goal
 
-为 unicap 加一个 PySide6 GUI（`unicap_gui/` 包，pip extra `gui`，入口 `unicap-gui`），代替原来 PowerShell + 控制台手敲 `uv run main.py launch ...` 的工作流。同时根据用户决定，把 auto-play 的 VLM / hybrid driver 整套砍掉，只保留 keep-alive 模式。
+为 unicap auto-play / GUI 这一轮做四件事：
+1. 加"人类接管检测"——auto-play 模式下 3s 内有主动按键就暂停所有 inject（让人能随时接管）
+2. 修 GUI Start 按钮在 main.py 跑着时无出口的问题（Start ↔ Stop toggle）
+3. 修一系列 UX 小问题（video/pack 默认 game-dir、fps `0.00` 显示、Extra args 误导 placeholder）
+4. 修游戏退出后 main.py 不退导致 Start 卡灰的问题 + QThread 销毁警告
 
 ## Completed
 
-- [x] 新 `unicap_gui/` 包：app / tabs（launch、video、pack 三 tab）/ widgets / shared
-- [x] 三 tab 中文标签（采集 / 生成视频 / 打包）+ 16px 加大字号；缺省选中"采集"
-- [x] schema-driven `FlagForm`：`unicap_gui/shared/cli_schema.py` 把 main.py argparse 复刻成数据，FlagForm 渲染对应控件
-- [x] `--game-path` 行：可编辑 `QComboBox` + 历史下拉（每条独立编号 key 存 QSettings，绕开 IniFormat list 序列化对 `\\` 路径不友好的问题）；浏览选中即推历史
-- [x] `--profile` 行：可编辑 `QComboBox`，扫 `profiles/*.yaml` 列出 + 一个空项（留空让 main.py 按 exe 名 fuzzy match）
-- [x] `--dataset-root` 默认值改成 `D:\unicap_output`，与 `tools/capture/config.py:DATASET_ROOT` 同步显示
-- [x] 等价 CLI preview 实时刷新 + 一键复制；Extra args 透传段可写额外 flag
-- [x] launch tab 顶部 dashboard：状态条 / session link / frames 计数 / elapsed / capture-duration 进度条 / WATCHDOG 计数 / ATK 心跳灯
-- [x] dashboard 文字色用 `palette(text)`（浅色主题下不再灰白看不清）+ 加粗 +1pt
-- [x] F8 / F9 镜像按钮（`SendInput`）+ 重做 survey 按钮
-- [x] Start 按钮放大着色（绿色，44px 高度）
-- [x] **Stop 按钮删掉**：launch tab 用 F9 终止 capture 会话；要彻底退 main.py 关 GUI 窗口（`MainWindow.closeEvent` 会向所有 running runner 发 `CTRL_BREAK_EVENT`）
-- [x] auto_play 首次运行 default=True（INI 没保存过 `auto_play` key 时）；已保存值由 BaseTab._restore_settings 还原
-- [x] `--game-name` flag 整体删除（CLI argparse + GUI schema + launch_tab 的 fallback 逻辑），`game_name` 内部 = `game_exe.stem`
-- [x] auto-play 砍掉 VLM / hybrid：删 `tools/auto_play/vlm_driver.py` 整文件；runner.py 砍 vlm/hybrid 分支、`_patrol_loop` / `_heartbeat_loop` / `_has_movement`；watchdog.py 砍 `_consult_vlm` / `vlm_driver` 参数；main.py 删 `--driver` / `--vlm-*` 5 个 flag
-- [x] auto-play 视觉判断改为只读 `BackBuffer.png`（no-ui 流）：`watchdog._read_latest_bmp` 全部 skip `BackBufferUI`；删 watchdog UI-mask arm（`_read_latest_pair` + `_UI_MASK_*` dead code）
-- [x] launch 默认 `--ui-mode no-ui`（之前 auto-play 时强制 both）
-- [x] profiles `_default` / `batman_ak` / `doom_eternal` / `ff7r` 剥掉末尾 `vlm:` block；profile.py YAML schema 不再要求 `vlm:`；`GameProfile` 数据类去 `vlm` 字段
-- [x] `pyproject.toml` 删 `auto-play-vlm` extra（openai + python-dotenv）
-- [x] `.env` / `.env.example` 从 git 删除 + `.gitignore` 加 `.env`（之前是注释状态）
-- [x] dashboard / log_tailer 同步去掉 VLM 计数 + HEARTBEAT 心跳灯，留 WATCHDOG + ATK
-- [x] CLAUDE.md auto-play 章节重写，去 `--driver` / VLM 配置 / `.env` 整段
-- [x] **Auto-Play 辅助面板** 整体删除（用户决定不要这个旁挂面板，profile 选择直接通过 form 行的 combo）；`unicap_gui/widgets/auto_play_panel.py` 文件已删
+- [x] **新文件 `tools/auto_play/takeover.py:TakeoverDetector`**：后台 80ms 轮询 `GetAsyncKeyState`(profile.controls 键 + 鼠标 L/R/Middle，鼠标移动不算，gamepad 跳过，reserved_keys 排除)。bot 自身 inject 用 `backend._lock.acquire(blocking=False)` + `now - last_inject_at_mono < 150ms` grace 双重排除。3s 窗口。
+- [x] **runner.py 接入 detector**：构造 + start/stop 跟 lifecycle；`_driver_loop` tick 入口 + `_attack_heartbeat_loop` inject 前都 `is_taken_over()` skip；stop log 加 `takeover=N` 计数
+- [x] **watchdog.py 接入 detector**：新 `_taken_over_skip(source)` helper；short-window / long-window recovery + OCR dismiss-prompt inject 前都 gate；runner 把 detector 通过 `takeover_detector` 参数传给 watchdog 构造
+- [x] **GUI: Start 按钮 toggle**（`unicap_gui/tabs/base_tab.py`）：`_apply_start_button_style(running)` 切换；不跑 = solid 绿 `▶ Start`；跑 = outline 红 `■ 停止`（透明背景 + 红边 + 红字 + hover 浅红）。点 stop 弹模态二次确认 → `CTRL_BREAK` + 5s 兜底 taskkill
+- [x] **GUI: form 字段 running 时锁**：`_on_subprocess_started` → `self._form.setEnabled(False)`；`_on_subprocess_stopped` 恢复。dashboard / F8/F9 镜像按钮 / log / Stop 按钮**不在 form 内**，仍可操作
+- [x] **GUI: `set_start_enabled` 与外部锁兼容**：running 时强制 enabled（stop 路径不该被 G-011 锁屏蔽）；idle 时让外部锁生效
+- [x] **GUI: video/pack 自动默认 game-dir**：`unicap_gui/shared/settings.py` 加 `derive_game_dir_from_launch()`；`BaseTab._restore_settings` 末尾调新 hook `_apply_smart_defaults()`；VideoTab/PackTab 实现：`game_dir` 为空时从 launch 已保存 settings 派生 `<dataset_root>/<exe stem>`
+- [x] **GUI: fps SpinBox 显示 "auto"**：`FlagSpec` 加 `special_value_text: str` 字段；`FlagForm` float editor 检测到时 `setMinimum(default)` + `setSpecialValueText`；video schema 的 `--fps` 设 `special_value_text="auto"`。CLI argv 行为不变（0 = default 不 emit）
+- [x] **GUI: Extra args placeholder generic 化**：`cli_preview.py` 从 `--auto-play-debug`（仅 launch 认）改为 `（可选；空格分隔的额外 flag）`
+- [x] **main.py: 游戏退出后自动停 main.py**：`cmd_launch` spawn 游戏后启 daemon thread `_watch_game_exit`；改用 exe-name polling（每 5s）+ **30s 启动 grace** 让 launcher → game PID handoff 完成；游戏不在 → `_thread.interrupt_main()` → `KeyboardInterrupt` → cmd_launch finally 清 Vulkan 后退出
+- [x] **`tools/window_manager.py:is_process_alive_by_name`**：`tasklist /FI "IMAGENAME eq xxx.exe" /NH` 实现；检查失败保守返回 `True` 避免误杀
+- [x] **fix: QThread 销毁警告**（`unicap_gui/shared/process.py`）：`_on_finished` 不再把 `_reader`/`_thread` 提前置 None；改 `reader.finished.connect(reader.deleteLater)` + `thread.finished.connect(thread.deleteLater)` 让 Qt event loop 在 thread 真退出后销毁；加 `thread.setObjectName("unicap-stdout-<subcommand>")`
 
 ## Not Yet Done
 
-- [ ] **没在本 session 跑过端到端 capture**：commit `d826061` 之前的 auto-play 代码改动量大（runner.py 重排 / watchdog.py 简化），需要实机 F8/F9 走一轮验证 keep-alive driver + watchdog recovery 序列还能跑通
-- [ ] launch tab 的 `_btn_redo_survey` 在 `_on_run_started` 时 disabled，但若子进程异常崩溃没走 stopped 路径，按钮会卡 disabled —— 不影响功能，下个 session 可改成关联 `is_running` 而非 lifecycle 信号
-- [ ] dashboard 的 `_attack_led.set_steady("#ef6c00")` 在 recovery 进入时设橙色，但 `_on_recovery_active(False)` 没主动 reset，靠 attack pulse 自然覆盖（注释里写明了）—— 视觉上 OK，但若 recovery 后长期无 attack 注入会卡橙；要修就在 `_on_recovery_active(False)` 里 `set_steady("#444")`
-- [ ] PR 前需要更新 README（如果有的话）说明 GUI 入口
+- [ ] **实跑端到端验证 takeover detector 在采集流程里**：本机 + GUI 跑 30 分钟 FF7R + auto-play，验证：
+  - 不接管时正常注入（attack heartbeat / keep-alive tick / watchdog recovery 都跑）
+  - 人手按 W 时 `[TAKEOVER]` log 出现 + 3s 内 `[AUTO-PLAY] tick:` 不出现 + 3s 后恢复
+  - 鼠标挥动**不**触发 takeover（验证 mouse 移动不算）
+  - watchdog static-frame 触发但人在玩时 `[WATCHDOG] short-window 触发但人在接管 — 跳过`
+- [ ] **launch tab `_btn_redo_survey` 异常崩溃路径仍卡 disabled**（旧 handoff 遗留）：若子进程异常崩溃没走 stopped 信号，按钮卡 disabled。改成关联 `is_running` 而非 lifecycle 信号即可
+- [ ] **dashboard `_attack_led` recovery 后卡橙**（旧 handoff 遗留）：`_on_recovery_active(False)` 不主动 reset，靠 attack pulse 自然覆盖；recovery 后长期无 attack 注入会卡橙
+- [ ] **`scripts/verify_auto_play.py` 已坏**：还在 `from tools.auto_play import VLMDriver`（上一个 session 砍了 VLMDriver）。要修就把 VLMDriver import + 相关 case 删掉
 
 ## Failed Approaches (Don't Repeat These)
 
-- **`auto_play` flag QSettings 持久化坑**：早先尝试每次 GUI 启动都 force-set `auto_play=True` + `color=no-ui`（写死在 LaunchTab.__init__）。用户反对："auto_play,color等参数需要从保存的历史中恢复，而不是总是缺省值"。改回：只在 INI 没 saved key 时才 default True，已保存值优先。
-- **game-path 历史用 JSON string 存 QSettings**：第一版用 `json.dumps(hist)` 存单 key，但 IniFormat 对单 string 内含 `,` 或 `[` 等 JSON 元字符会抽风（特别是含 `\` 的 Windows 路径），导致多条历史合并成单串。**改用 `save_string_list`：每条独立编号 key**（`flags/launch/__game_path_history__/0`, `/1`, ...），完全绕开 list 序列化坑。`unicap_gui/shared/settings.py:save_string_list` / `load_string_list`。
-- **Auto-Play 辅助面板早期还显示 .env masked 值 + 改 .env / 重读 .env 按钮**：随 VLM driver 砍除一并删了，因为 `.env` 不再被任何代码读取。**不要重新加回这种 panel**——profile 选择已通过 form 里 `--profile` 行的 combo 解决。
-- **`--auto-play` 自动设 `--ui-mode=both`**：早先 main.py:cmd_launch 当 `auto_play=True` 时把 ui-mode 默认成 `both`（让 watchdog 看 post-UI BMP）。用户决定不再依赖 post-UI 流，所有视觉判断只用 `BackBuffer.png`（no-ui 流）。**watchdog 的读图路径已改为 skip `BackBufferUI`**，不要恢复 both 默认。
-- **dashboard 文字色 `#eaeaea`**：在浅色 Qt 主题下浅灰文字 + 浅色背景几乎看不见。**用 `palette(text)`** 跟随系统主题。
-- **QGroupBox checkable + setMaximumHeight 折叠**：原 AutoPlayPanel 用这个手法做折叠。Panel 已删，但模式留作参考——若将来要加 collapsible groupbox，注意 `setChecked(True)` 触发 `toggled` 信号但默认不会自动 hide children，要手动 `_on_toggle` 把 children setVisible + 调整 setMaximumHeight。
+### 1. 直接 `proc.wait()` 监控游戏退出（已回退）
+
+**尝试**：`_watch_game_exit` 第一版 `rc = proc.wait(); _thread.interrupt_main()`，proc 是 `subprocess.Popen([game_exe])` 返回的对象。
+
+**失败**：FF7R / Steam 等用 launcher → game PID handoff（CLAUDE.md 早就记过 force_borderless_async 也踩过这个坑）：Popen 拿到的是 launcher 的 pid，launcher 启动真 game 后立刻退出 → `proc.wait()` 立刻返回 rc=0 → main.py 误以为游戏退了 → 自杀 → GUI Start 回绿。用户截图显示游戏还在跑 Start 已经回绿。
+
+**修法**：改成按 exe basename `tasklist` polling 每 5s 一次 + **30s 启动 grace**。Grace 内即便 alive=False 也不退出（让 launcher 退场 + game 起来这段空窗）。
+
+### 2. Stop 按钮 solid red 块 + 文字 `⏹ 停止 main.py`（已克制化）
+
+**尝试**：第一版 toggle 用 `background: #c62828` solid + `⏹ 停止 main.py`。
+
+**失败**：用户反馈"不合适"——大块红色太抢视觉焦点，跟左上 Tab / 表单争夺注意力。
+
+**修法**：改 outline 风格（透明背景 + 红边 `2px solid #c62828` + 红字 + hover 浅红 `#fbe9e7`）+ 文字缩短到 `■ 停止`。视觉重量与绿色 Start 对等，仍明示警示。
+
+### 3. SubprocessRunner `_on_finished` 直接把 Python ref None（已修）
+
+**尝试**：reader.finished 触发后立刻 `self._reader = None; self._thread = None`，依赖 `thread.finished.connect(thread.deleteLater)` 自然清。
+
+**失败**：用户启动后 console 报 `QThread: Destroyed while thread '' is still running`。Root cause：`_on_finished` 在 main thread queued event 里跑，但此时 worker thread 的 `quit()` slot **也是 queued 在 main thread**，还没执行；Python 提前 ref None → sip GC Python wrapper → C++ thread object 销毁但 thread 还在跑 event loop。
+
+**修法**：不在 `_on_finished` 清 Python ref；改让 reader/thread 都 `connect(deleteLater)`，由 Qt event loop 在 thread 真退出后销毁底层 C++ 对象。下次 `start()` 用新 `QThread()` 覆盖旧 ref，旧 wrapper 那时已 safe。
+
+### 4. Takeover 用"鼠标移动"作为接管信号（被用户否决）
+
+**尝试**：方案讨论时倾向把 GetCursorPos diff 也算接管信号（玩家挥鼠标看视角）。
+
+**失败**：用户明确否决——bot 自己的 mouse turn 也会引起 GetCursorPos diff，即便用 backend lock 排除也有 race；判定标准要严：只看键 + 鼠标按键。
+
+**修法**：sample 集合限定为 `profile.controls.values()` 中的键 + 鼠标 L/R/Middle 按键；`mouse`（turn_axis）跳过；`gamepad_*` 跳过（GetAsyncKeyState 读不到手柄）。
 
 ## Key Decisions
 
 | Decision | Rationale |
 |----------|-----------|
-| 砍 VLM / hybrid driver | 用户明确：不再用 VLM 模式；keep-alive 足够长跑无人值守采集，无 API 费用 |
-| auto-play 视觉判断只看 no-ui 流 | post-UI BackBufferUI 与 pre-UI BackBuffer tone curve 不同，UI-mask arm 假阳性高（11/17 触发是 false positive 的真实 log）；no-ui 流 + OCR + 帧差已够 |
-| `--auto-play` 首次默认 True | 用户决定 GUI 缺省进 auto-play 状态（无人值守是主用例）；后续保存值优先 |
-| `--game-name` 删除 | 一直从 `game_exe.stem` 派生，flag 是历史遗留，无人显式用 |
-| Stop 按钮删除 | 停止子进程的两条路径（F9 + 关 GUI 窗口）已够用，big red Stop 是冗余 + 误触风险 |
-| game-path / profile 都用可编辑 QComboBox | 既允许用户从已知列表选，也允许手填新值（特别是 game-path，新游戏第一次接入需要手输路径） |
-| QSettings IniFormat 而非注册表 | 文件型存储好审计、好删（删 `unicap-gui.ini` 一键重置 GUI 状态） |
+| Takeover sample VK 从 `profile.controls` 派生 | 不同游戏键位差很多（ff7r 用 M dismiss_ui，doom 用 SHIFT 跑步等）；硬编码 W/A/S/D 不通用 |
+| Takeover bot-self 排除用 `lock.acquire(blocking=False)` + grace | lock 处理 inject 期间，grace 处理 inject 完成后 OS 残留 KeyUp。两者结合避免 race |
+| Watchdog 也尊重接管 | 人在玩 = 没卡 = 不需要 recovery；OCR dismiss-prompt 也别替人按 |
+| Start ↔ Stop 用同一按钮 toggle | 比独立 Stop 按钮更省 UI 空间；颜色 + 文字明示模式；同位置避免误触（HANDOFF 此前删 big red Stop 的初衷） |
+| Stop 弹模态二次确认 | `CTRL_BREAK` 是不可逆动作；防止用户误点把跑了一段的采集 session 中断 |
+| 游戏退出检测改 polling（不用 proc.wait） | FF7R launcher → game PID handoff 让 Popen pid 失效；exe basename 是稳定标识 |
+| 30s grace 写死 | 经验值（force_borderless_async 也用 30s）。grace 内即便 tasklist 看不到 exe 也不退出，让 launcher 退场 + game 启动这段空窗 |
+| `_thread.interrupt_main()` 注入 KeyboardInterrupt | 让 cmd_launch 的 `except KeyboardInterrupt + finally` 走原本的 Vulkan 注册表清理路径，不绕过 cleanup |
+| FlagSpec 加 `special_value_text` 字段 | 可复用：将来 `--capture-duration` 也想 0=`unlimited` 也能直接用 |
 
 ## Current State
 
 **Working**:
-- GUI 启动通过 `uv run --with PySide6 python -m unicap_gui` 可起来；三 tab 能切换；表单值持久化到 `%APPDATA%\unicap-gui\unicap-gui.ini`
-- main.py CLI 仍可独立用：`uv run main.py launch [--auto-play] [--profile NAME]` 等不依赖 GUI
-- `import` sanity 全 pass（Qt 模块 + auto_play 包 + main.py）
-- 4 个 profile YAML schema 校验通过；`load_profile('ff7r')` OK
-- `auto-play` keep-alive driver + watchdog static-frame recovery + OCR arm + attack heartbeat —— 代码路径都在但本 session 没跑实机
+- `git log` HEAD = `74cf102 feat: auto-play 接管检测 + GUI 启停体验改进`
+- 工作树 clean（push 完 + 本 handoff 写完后才有这一个 modified）
+- TakeoverDetector：sample VK 提取实测对（ff7r 9 个含 W/A/S/D/E/M/SPACE/mouse_L/R；doom_eternal 多 SHIFT；_default/batman_ak 含 ESC）；空跑 0.5s 不误报
+- GUI 全 headless 验证：Start toggle 文字/样式切换 OK；form 跑时锁 / 停时解锁 OK；smart default `game_dir` 自动填 `D:\unicap_output\ff7remake_` OK；fps `setSpecialValueText("auto")` 显示 "auto"，setValue(30) 显示 "30.00"
+- 用户实跑反馈："验证过完美"——FF7R 启动 launcher→game handoff 期间不假阳性，关游戏后 main.py 自动退、GUI Start 自动回 ▶
 
-**Broken**: 无已知 broken。但见下方 "Edge Cases" 关于 attack_led recovery 状态。
+**Broken**: 无已知 broken。
 
-**Uncommitted Changes**: 无（git clean，已 push）。最近 commit：`1bd49ad update`（Stop 删 + dataset-root default）→ `52e023c update`（Auto-Play 面板删 + profile combo）→ `d826061 feat(gui+auto-play): ...`（主要工作的合并 commit）。
+**Uncommitted Changes**: 仅本 `HANDOFF.md`（即将由 `commit` skill 处理）。
 
 ## Files to Know
 
 | File | Why It Matters |
 |------|----------------|
-| `unicap_gui/app.py` | MainWindow + 三 tab 容器；tab 标签 / 字号 stylesheet 在这；`closeEvent` 处理 running subprocess 的 graceful stop |
-| `unicap_gui/tabs/base_tab.py` | 所有 tab 的公共骨架：FlagForm + CLIPreview + Start 按钮 + LogPane + splitter；子类用 `_wire_extra` 钩 dashboard |
-| `unicap_gui/tabs/launch_tab.py` | launch 子命令 tab：dashboard / F8/F9/重做 survey 按钮 / 启动前预检 / first-run auto_play=True |
-| `unicap_gui/tabs/video_tab.py` / `pack_tab.py` | 简单：用 BaseTab 默认布局即可 |
-| `unicap_gui/widgets/flag_form.py` | schema → 控件树；**game_path / profile 两个特判**（line ~131 / ~149）；`push_game_path_history` 公开 API |
-| `unicap_gui/widgets/cli_preview.py` | 等价 CLI 文本框 + 复制按钮 + Extra args |
-| `unicap_gui/widgets/dashboard.py` | launch tab 顶部状态条；palette-aware 文字色；ATK led 双语义（attack pulse + recovery 常亮橙） |
-| `unicap_gui/widgets/log_pane.py` | 子进程 stdout 实时 tail |
-| `unicap_gui/shared/cli_schema.py` | 所有 flag 数据驱动定义；改 main.py argparse 时**这里也要改** |
-| `unicap_gui/shared/settings.py` | QSettings IniFormat wrapper；含 `save_string_list` / `load_string_list`（path history 用） |
-| `unicap_gui/shared/process.py` | `SubprocessRunner`：起 main.py + 解析 stdout 抽 session_dir + CTRL_BREAK_EVENT 优雅停 |
-| `unicap_gui/shared/log_tailer.py` | 0.5s tail `auto_play.log` 抽 watchdog 触发 + ATK 信号 |
-| `tools/auto_play/runner.py` | `AutoPlayRunner`：keep-alive driver + watchdog + attack heartbeat 编排 |
-| `tools/auto_play/watchdog.py` | static-frame 检测：global / local / long-window 三 arm + OCR arm；`_trigger_recovery` 走 profile.recovery |
-| `tools/auto_play/profile.py` | YAML schema 校验；`GameProfile` 数据类（已去 vlm 字段） |
-| `main.py` | CLI 入口；`cmd_launch` 是核心 flow；`--auto-play` flag + 简化的 `_start_auto_play` |
-| `CLAUDE.md` | 项目级指导文档；auto-play 章节已重写 |
+| `tools/auto_play/takeover.py` | 全新 detector 模块；后台线程 + 排除 bot 自身 inject 的两道闸门 |
+| `tools/auto_play/runner.py` | AutoPlayRunner 构造 detector + lifecycle；`_driver_loop` / `_attack_heartbeat_loop` 入口 gate |
+| `tools/auto_play/watchdog.py` | `_taken_over_skip(source)` helper；short/long-window recovery + OCR inject 都 gate |
+| `tools/auto_play/input_backend.py` | `last_inject_at_mono` 是 detector 的 grace 判据；`_lock` 是 try-acquire 排除 bot 自身的依据 |
+| `tools/window_manager.py` | 新暴露 `is_process_alive_by_name`；main.py `_watch_game_exit` 依赖它 |
+| `main.py` | `cmd_launch` 中 `_watch_game_exit` daemon thread + 30s grace polling；`_thread.interrupt_main` 触发 KeyboardInterrupt 走 finally 清 Vulkan |
+| `unicap_gui/tabs/base_tab.py` | `_apply_start_button_style(running)` toggle；form `setEnabled` lock；`_apply_smart_defaults()` hook；`_on_start_button_clicked` dispatcher（弹模态 + stop） |
+| `unicap_gui/shared/settings.py` | `derive_game_dir_from_launch()` —— video/pack tab 智能默认源头 |
+| `unicap_gui/shared/cli_schema.py` | `FlagSpec.special_value_text` 字段；改 main.py argparse 时仍要这边同步 |
+| `unicap_gui/widgets/flag_form.py` | float editor 处理 `special_value_text`：`setMinimum(default)` + `setSpecialValueText` |
+| `unicap_gui/shared/process.py` | SubprocessRunner deleteLater 模式；`thread.setObjectName` 让 debug 输出可读 |
+| `profiles/*.yaml` | 影响 takeover sample VK；改 controls 时 detector 自动跟随 |
 
 ## Code Context
 
-### FlagForm 的 game_path / profile 两个特判（`unicap_gui/widgets/flag_form.py`）
+### TakeoverDetector 主循环（`tools/auto_play/takeover.py`）
 
 ```python
-# game_path 用可编辑 combo + 历史下拉
-if spec.cli_key() == "game_path":
-    cb = QComboBox()
-    cb.setEditable(True)
-    cb.setInsertPolicy(QComboBox.NoInsert)
-    history = _load_path_history()
-    default_path = str(spec.default or "")
-    if default_path and default_path not in history:
-        history.append(default_path)
-        _save_path_history(history)
-    for p in history:
-        if p:
-            cb.addItem(p)
-    cb.setCurrentText(default_path)
-    cb.editTextChanged.connect(self._emit_changed)
-    return cb
+def _loop(self) -> None:
+    while not self._stop_evt.is_set():
+        self._stop_evt.wait(self._sample_period_s)
+        if self._stop_evt.is_set():
+            break
 
-# profile 用可编辑 combo —— 扫 profiles/*.yaml 列出可选项 + 空项
-if spec.cli_key() == "profile":
-    cb = QComboBox()
-    cb.setEditable(True)
-    cb.setInsertPolicy(QComboBox.NoInsert)
-    cb.addItem("")  # 空 = 不传 --profile，按 exe 名 fuzzy match
-    try:
-        from unicap_gui.shared.paths import profiles_dir
-        names = sorted(p.stem for p in profiles_dir().glob("*.yaml"))
-    except OSError:
-        names = []
-    for n in names:
-        cb.addItem(n)
-    cb.setCurrentText(str(spec.default or ""))
-    cb.editTextChanged.connect(self._emit_changed)
-    return cb
-```
-
-### values_to_argv 的 path 类型特判（`unicap_gui/shared/cli_schema.py`）
-
-```python
-def values_to_argv(schema: SubcommandSchema, values: dict[str, Any]) -> list[str]:
-    """path 类型始终 emit（即便等于 spec.default —— 让预览自包含），其它仅含偏离默认值。"""
-    argv = []
-    for spec in schema.flags:
-        v = values.get(spec.cli_key(), spec.default)
-        if spec.kind == "path":
-            if v:
-                argv.extend([spec.name, str(v)])
+        # 1) bot inject 中？lock 拿不到说明正在 inject。
+        got = self._backend._lock.acquire(blocking=False)
+        if not got:
             continue
-        if is_default(spec, v):
+        self._backend._lock.release()
+
+        # 2) bot 刚 inject 完？OS 还在 propagate KeyUp，跳过。
+        if (time.monotonic() - self._backend.last_inject_at_mono
+                < self._bot_inject_grace_s):
             continue
-        # ... store_true / bool_optional / choice / str / int / float ...
+
+        # 3) sample 关键键 — 任何高电平 → 标记接管
+        for vk in self._sample_vks:
+            if _user32.GetAsyncKeyState(vk) & 0x8000:
+                self._last_human_at = time.monotonic()
+                # ... log（限频）
+                break
+
+def is_taken_over(self) -> bool:
+    return (time.monotonic() - self._last_human_at) < self._grace_s
 ```
 
-### LaunchTab 的 first-run auto_play 默认（`unicap_gui/tabs/launch_tab.py`）
+### Sample VK 提取规则（不同 profile 不同，自适应）
 
 ```python
-def __init__(self, parent: QWidget | None = None) -> None:
-    super().__init__(LAUNCH, parent)
-    # auto_play 首次运行 default=True（INI 没保存过 auto_play key 的场景）。
-    # 已保存的值由 BaseTab._restore_settings 还原，这里不覆盖。
-    saved = gui_settings.load_flag_values("launch")
-    if "auto_play" not in saved:
-        self._form.set_values({"auto_play": True})
-        self._refresh_preview()
+# tools/auto_play/takeover.py:_build_sample_vks
+for ctrl_value in profile.controls.values():
+    ctrl_lower = ctrl_value.lower()
+    if ctrl_lower in _MOUSE_BTN_VKS:        # mouse_left/right/middle
+        vks.add(_MOUSE_BTN_VKS[ctrl_lower])
+    elif ctrl_lower == "mouse":             # turn_axis: mouse — 鼠标移动不算
+        continue
+    elif ctrl_lower.startswith("gamepad_"): # GetAsyncKeyState 读不到手柄
+        continue
+    else:
+        vks.add(_resolve_vk(ctrl_value))    # W/SPACE/M/...
+
+# baseline 兜底（profile 万一没列）
+vks.add(VK_LBUTTON); vks.add(VK_RBUTTON)
+vks -= reserved_vks                          # F8/F9 永远不算
 ```
 
-### AutoPlayRunner 简化后的构造器（`tools/auto_play/runner.py`）
+### Runner gate（`tools/auto_play/runner.py`）
 
 ```python
-class AutoPlayRunner:
-    def __init__(
-        self,
-        profile: GameProfile,
-        frames_dir: Path,
-        debug: bool = False,
-        log_path: Path | None = None,
-    ) -> None:
-        # ... 4 个 driver-/vlm-相关参数都已去掉
-        self._driver: BotDriver = create_driver(profile)  # 永远 KeepAliveDriver
-        self._watchdog = StaticFrameWatchdog(
-            frames_dir=frames_dir, profile=profile, input_backend=self._backend,
-            log_path=log_path,
-            recovery_active_evt=self._recovery_active_evt,
-        )  # vlm_driver 参数删了
+# _driver_loop tick 入口
+if self._recovery_active_evt.is_set():
+    self._stop_evt.wait(0.1); continue
+if self._takeover.is_taken_over():
+    self._stop_evt.wait(0.2); continue          # ← 加的
+
+# _attack_heartbeat_loop inject 前
+if self._recovery_active_evt.is_set(): ...
+if self._takeover.is_taken_over():
+    self._stop_evt.wait(0.5); continue          # ← 加的
+self._backend.inject(self._attack_action)
 ```
 
-### QSettings 落盘位置（`%APPDATA%\unicap-gui\unicap-gui.ini`）
+### Watchdog gate（`tools/auto_play/watchdog.py`）
 
-```ini
-[window]
-size=@Size(1100 800)
+```python
+def _taken_over_skip(self, source: str) -> bool:
+    if self._takeover is None or not self._takeover.is_taken_over():
+        return False
+    log.info("[WATCHDOG] %s 触发但人在接管 — 跳过", source)
+    return True
 
-[flags/launch]
-game_path=E:/games/ff7remake/End/Binaries/Win64/ff7remake_.exe
-ui_mode=no-ui
-auto_play=true
-color=no-ui
-__extra_args__=--auto-play-debug
-...
+# 三处调用：
+# - short-window static recovery 前: _taken_over_skip("short-window")
+# - long-window static recovery 前:  _taken_over_skip("long-window")
+# - OCR dismiss-prompt inject 前:    _taken_over_skip(f"OCR/{key}")
+```
 
-[flags/launch/__game_path_history__]
-0=E:/games/ff7remake/.../ff7remake_.exe
-1=E:/games/Doom/...
+### 游戏退出 watcher（`main.py:cmd_launch`）
+
+```python
+proc = subprocess.Popen([str(game_exe)], cwd=str(game_dir), env=env)
+
+def _watch_game_exit(exe_basename: str) -> None:
+    from tools.window_manager import is_process_alive_by_name
+    grace_until = time.monotonic() + 30.0
+    while True:
+        time.sleep(5.0)
+        if is_process_alive_by_name(exe_basename):
+            continue
+        if time.monotonic() < grace_until:
+            continue                         # ← 关键：grace 内不退
+        print(f"\n[GAME-EXIT] 找不到 {exe_basename} ...", flush=True)
+        _thread.interrupt_main()
+        return
+threading.Thread(target=_watch_game_exit, args=(game_exe.name,),
+                 daemon=True, name="game-exit-watcher").start()
+```
+
+### Start 按钮 toggle dispatcher（`unicap_gui/tabs/base_tab.py`）
+
+```python
+def _on_start_button_clicked(self) -> None:
+    if self._runner.is_running():
+        ret = QMessageBox.question(
+            self, "停止 main.py",
+            f"将向 {self._schema.name} 子进程发 CTRL_BREAK ...",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if ret != QMessageBox.Yes: return
+        self._runner.stop(timeout_s=5.0)
+        return
+    self._on_start_clicked()  # 原启动流程
+
+def _on_subprocess_started(self, cmd):
+    self._apply_start_button_style(running=True)
+    self._btn_start.setEnabled(True)            # stop 路径永远可点
+    self._form.setEnabled(False)                # ← lock form
+    ...
+
+def _on_subprocess_stopped(self, rc):
+    self._apply_start_button_style(running=False)
+    self._btn_start.setEnabled(True)
+    self._form.setEnabled(True)                 # ← unlock form
+    ...
+```
+
+### QThread cleanup pattern（`unicap_gui/shared/process.py`）
+
+```python
+self._thread = QThread()
+self._thread.setObjectName(f"unicap-stdout-{subcommand}")
+self._reader = _StdoutReader(self._proc)
+self._reader.moveToThread(self._thread)
+self._thread.started.connect(self._reader.run)
+self._reader.line.connect(self._on_line)
+self._reader.finished.connect(self._on_finished)
+self._reader.finished.connect(self._thread.quit)
+# ↓ 关键：不在 _on_finished 提前 ref None；让 Qt event loop 真 thread 退出后销毁
+self._reader.finished.connect(self._reader.deleteLater)
+self._thread.finished.connect(self._thread.deleteLater)
+self._thread.start()
+
+def _on_finished(self, rc):
+    self._proc = None
+    # 不动 _reader / _thread 的 Python ref
+    self.stopped.emit(rc)
 ```
 
 ## Resume Instructions
 
-### 启动 GUI 验证基础功能
-
-1. `uv sync --extra gui` 装 PySide6 依赖（首次）
-2. `uv run --with PySide6 python -m unicap_gui` 起来
-   - Expected: 1100×800 窗口，三 tab `采集 / 生成视频 / 打包`，缺省选中"采集"
-   - Expected: 采集 tab 顶部 "未连接" 灰色状态条，session/frames/elapsed 标签可见
-   - Expected: 表单 `--auto-play` checkbox 默认勾上（首次跑）；CLI preview 显示 `uv run main.py launch --game-path E:\... --dataset-root D:\unicap_output --auto-play`
-3. 点 game-path 下拉：应该看到 default `E:\games\ff7remake\...` 一项；点 浏览 选别的 exe → 推入历史 → 下拉变两项
-4. 点 profile 下拉：应该有 `""` / `_default` / `batman_ak` / `doom_eternal` / `ff7r` 五项
-5. 关窗 → 重启 → 表单值应该恢复（除 first-run 后 auto_play 由 saved 决定）
-
-### 验证端到端 capture（重要 —— 本 session 没做）
-
-1. 启 GUI；填 `--game-path` 指向有效游戏 exe
-2. 点 Start → 子进程 main.py 应该起来 → 状态变绿"运行中（pid=N）"
-3. 在游戏内按 F8 → 状态条变绿 CAPTURING；frames 计数应该开始涨
-4. 等 60s（`--capture-duration` 默认）→ 应该自动 roll 到新 session；session link 切到新时间戳
-5. 按 F9 → 应该停止当前 capture 但 main.py 进程留着；状态回 IDLE
-6. 关 GUI 窗口 → MainWindow.closeEvent 弹模态确认 → Yes → main.py 收 CTRL_BREAK_EVENT 退出
-   - Expected: log pane 显示 `[unicap-gui] cmd: ...` + capture 进度行 + watchdog 触发计数（如有）
-   - If 子进程不退: 检查 SubprocessRunner.stop() 的 timeout（默认 5s）；可能游戏还卡着没释放 stdin
-
-### 验证 keep-alive driver + watchdog（无人值守 30 分钟测）
+### 实跑端到端验证 takeover（重点 —— 本 session 没在真采集流程里跑过）
 
 ```powershell
-uv run main.py launch --auto-play --profile ff7r --capture-duration 60
-# 在游戏中按 F8，观察 console:
-#   [AUTO-PLAY] driver=keep-alive profile=ff7r gamepad=...
-#   [CAPTURE] 开始采集 → ...
-#   [AUTO-PLAY] tick: keep-alive → N action(s) [...]
-# 至少 30 分钟无干预，应该看到:
-#   [WATCHDOG] static-frame 触发 #N ... → 注入 recovery (5 步)  （若卡住）
-#   [ATTACK-HB] 注入 attack#N (period=12.0s)                  （每 12s 一次）
-# 不应该看到任何 [VLM-COST] / [PATROL] / [HEARTBEAT] 行（这些都已删）
+uv sync --extra gui
+uv run --with PySide6 python -m unicap_gui
+
+# 1) 在 GUI 选 ff7r profile + game-path 指向 FF7R exe，--auto-play 勾选，点 Start
+# 2) 进游戏，按 F8 开始采集
+# 3) 观察 console 5 分钟：应当看到
+#    [AUTO-PLAY] tick: keep-alive → ...   每 1s
+#    [ATTACK-HB] 注入 attack#N            每 12s
+#    （不接管时） 不应有 [TAKEOVER] log
+# 4) 中途人手按 W 走两步：应当看到
+#    [TAKEOVER] 检测到主动按键 vk=0x57 #1 — 暂停 auto-play 3.0s
+#    紧接 3 秒内 NO [AUTO-PLAY] tick / [ATTACK-HB]
+#    3 秒后恢复 [AUTO-PLAY] tick
+# 5) 中途挥鼠标看视角（不点鼠标按键）：不应触发 takeover（鼠标移动不算）
+# 6) 让 watchdog 触发（卡墙 10 秒）但同时人手按 S：应当看到
+#    [WATCHDOG] short-window 触发但人在接管 — 跳过
+# 7) 关游戏：5s 内 console 应有
+#    [GAME-EXIT] 找不到 ff7remake_.exe 进程 — main.py 自动停止
+#    [VULKAN] HKCU 注册表已清理      （Vulkan 路径才有）
+#    GUI Start 按钮自动回到 ▶ Start，form 解锁
 ```
 
-### 单测 / 静态检查
+### 改 game-path 跑新游戏的完整流程
+
+```
+1. 现状：Start 灰 / 红「■ 停止」、form 锁着
+2. 点「■ 停止」→ 弹确认 → Yes → main.py CTRL_BREAK 退出 → GUI 看到 stopped
+3. Start 自动回绿 ▶ + form 解锁
+4. 改 --game-path 选新 exe → CLI preview 实时刷新
+5. 点 ▶ Start → 新一轮 main.py
+```
+
+### Headless smoke（CI / 远程开发用，无需 X server）
 
 ```powershell
-# 1. 语法 & import
-uv run --with PySide6 python -c "import main; from tools.auto_play.runner import *; from unicap_gui.app import MainWindow"
+PYTHONIOENCODING=utf-8 uv run python -c "
+import os; os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+from PySide6.QtWidgets import QApplication
+app = QApplication.instance() or QApplication([])
+from unicap_gui.app import MainWindow
+mw = MainWindow()
+launch = mw._launch
+launch._on_subprocess_started(['fake'])
+assert launch._btn_start.text() == '■ 停止'
+assert launch._form.isEnabled() is False
+launch._on_subprocess_stopped(0)
+assert launch._btn_start.text() == '▶ Start'
+assert launch._form.isEnabled() is True
+print('toggle + form-lock OK')
 
-# 2. profile YAML schema
-uv run python -c "from tools.auto_play.profile import load_profile; [load_profile(n, fallback=False) for n in ['_default', 'batman_ak', 'doom_eternal', 'ff7r']]"
+# fps SpinBox specialValueText
+video = [mw._tabs.widget(i) for i in range(mw._tabs.count())
+         if mw._tabs.tabText(i) == '生成视频'][0]
+fps_ed = video._form._editors['fps']
+assert fps_ed.text() == 'auto', fps_ed.text()
+print('fps auto display OK')
 
-# 3. cli_schema flag 数量（删 game-name + 5 个 vlm-* 后应该是 16）
-uv run python -c "from unicap_gui.shared.cli_schema import LAUNCH; print(len(LAUNCH.flags))"
-# Expected: 16
+# takeover sample VK
+from tools.auto_play.takeover import _build_sample_vks
+from tools.auto_play.profile import load_profile
+ff7r = load_profile('ff7r', fallback=False)
+vks = _build_sample_vks(ff7r)
+assert 0x57 in vks and 0x01 in vks      # W + LBUTTON
+assert 0x77 not in vks and 0x78 not in vks  # F8/F9 排除
+print('takeover sample VK OK')
+"
 ```
 
 ## Setup Required
 
-- Windows 11（GUI 用 SendInput 发 F8/F9，仅 Windows 实现）
-- Python 3.13+ (`uv` 管依赖)
+- Windows 11（GUI 用 SendInput；GetAsyncKeyState 也仅 Windows）
+- Python 3.13+ (`uv`)
 - PySide6 ≥ 6.6（`uv sync --extra gui`）
-- ViGEm Bus 内核驱动（`auto-play` extra 用，不装会 fallback 键鼠）
-- 环境变量：无（`.env` / `VLM_*` 全删了）
+- ViGEm Bus 内核驱动（`auto-play` extra；不装会 fallback 键鼠）
+- 可选：Windows.Media.Ocr（`pip install "unicap[auto-play-ocr]"` 让 watchdog OCR arm 工作）
+- 环境变量：无（`.env` 已在前 session 删除）
 
 ## Edge Cases & Error Handling
 
-- **subprocess 启动失败**：`SubprocessRunner.start` 抛异常 → BaseTab 不会更新状态条，Start 按钮卡 disabled
-  - 当前行为：log pane 应显示 error；用户需重启 GUI 或手动 `runner._on_subprocess_stopped(rc=-1)`
-  - 改进点：catch + 立即 emit stopped(rc=-1)
-- **auto-play 子进程崩**：runner.stop 通过 `_on_run_stopped` 回 detach dashboard；btn_redo_survey 重新 enabled
-  - If 没收到 stopped 信号（如 Python OOM kill），按钮卡 disabled —— 见 Not Yet Done
-- **profile 文件不存在**：FlagForm 行可手填任意 profile 名 → `_precheck_before_start` 弹模态拦截
-- **dataset-root 父目录不存在**：precheck 拦截
-- **game-path 文件不存在**：precheck 拦截
-- **关 GUI 时有 running 子进程**：MainWindow.closeEvent 弹模态确认 → Yes 走 `runner.stop(timeout=5s)` → 5s 内不退就遗留孤儿进程（main.py 自己的 ctrl_break handler 应该 catch；游戏进程不归 main.py 管）
-- **recovery 后 attack_led 卡橙**：`_on_recovery_active(False)` 没主动 reset led，靠下一次 attack pulse 自然覆盖；30 分钟无 attack 时视觉上有点怪 —— 见 Not Yet Done
+- **Takeover 在 bot inject hold 期间检测到键？** bot inject `_inject_key` press 模式持有 lock 的整个 `down → sleep(duration_ms) → up` 时长；detector `_lock.acquire(blocking=False)` 拿不到 → skip 本轮。+ inject 完成后 150ms grace 再过滤 OS 残留 KeyUp。两道闸门覆盖。
+- **Profile 没有任何键（只 gamepad_*）？** `_build_sample_vks` 仍兜底加 `VK_LBUTTON / VK_RBUTTON`，detector 不会无条件返回 False。
+- **launcher → game 实际超过 30s 才接管显示？** `_watch_game_exit` 30s grace 后第 31s polling 看不到 exe 就退。极端慢 launcher（DRM 联网验证）需要把 grace 调大；当前写死 `grace_until = monotonic() + 30.0`，要改在 main.py 加 CLI flag 暴露。
+- **用户在 main.py 跑期间关 GUI 窗口？** MainWindow.closeEvent 弹模态确认 → Yes → `runner.stop(timeout_s=5.0)` → 5s 优雅 / 兜底 taskkill。Stop 按钮路径与关窗路径都走同一个 stop()。
+- **Start 时弹模态 stop 期间用户多点几下？** Stop 按钮在 stop() 期间会被同步阻塞 5s（GUI 主线程 wait），用户多点会进 event queue 但因为按钮已经 setEnabled 在 stop 完成前不变，多次点击 → 多次 stop → 第二次 stop 调用看到 is_running=False → no-op return。
+- **launcher pid 退出但 game 还没起，用户点 GUI Stop？** Stop 走 GUI 路径独立于 game watcher：`runner.stop` 直接对 main.py 子进程 send CTRL_BREAK，不依赖 game 状态。OK。
+- **`tasklist` 命令找不到（中文 Windows 偶见）？** `is_process_alive_by_name` catch `subprocess.SubprocessError` / `OSError` → 返回 True 保守不退出。
 
 ## Warnings
 
-- **`unicap_gui/shared/cli_schema.py` 必须与 main.py argparse 同步**：加新 flag 时两边都要改，否则 GUI 不会显示 / 不会传到 CLI。建议改 main.py 时立刻 grep 一下 `cli_schema.py`。
-- **`.env` 已 git rm + .gitignore**：但 git 历史里仍有真实 API key（`sk-a629...` in commit `fb59f3c "update"`）。如果 repo 要公开，需要 `git filter-repo` 或 `bfg` 重写历史。当前是私 repo 暂未处理。
-- **`docs/designs/impact_20260507_pyqt-ui.md` / `testplan_20260507_pyqt-ui.md`** 是本 session 的设计 / 测试计划文档，已 commit。如果计划被推翻（如本 session 中 Auto-Play 辅助面板被删），这两文档可能与代码不完全一致 —— 文档作为快照，不是 spec。
-- **`.scratch/ui/` 含 smoke test 脚本 + requirements.md**：本 session 的开发草稿，已 commit 进来。下个 session 不需要修改这些；要做新功能开新目录 `.scratch/<feature>/`。
-- **`auto-play` 的 keep-alive 注入 vs 人类输入无差别**：`capture_all._thread_input` 用 `GetAsyncKeyState` / XInput 采集时无法区分；这是设计意图（数据集训练用）。不要试图 "过滤掉 bot 输入"。
-- **CLI preview 的 `--game-path` 总是显示**：这是 `values_to_argv` 对 `path` 类型的特判（始终 emit）。若想改成"等于 default 时省略"，要改 `cli_schema.py:values_to_argv` 但会让用户不知道实际跑哪个游戏的 exe。
-- **`Ctrl+C in console`** 退 main.py 时游戏进程不动 —— 这是 main.py 设计行为；GUI 关窗也是同样语义（CTRL_BREAK 让 main.py 优雅退）。
+- **改 main.py argparse 时**：必须同步改 `unicap_gui/shared/cli_schema.py`，否则新 flag 不会显示在 GUI / 不会传给 CLI。
+- **TakeoverDetector 触动 `backend._lock` 是私有属性访问**：当前 backend 没暴露 `try_lock()` 公开 API，detector 直接 `_lock.acquire(blocking=False)`。如果将来 InputBackend 重构 lock 实现，detector 也要跟改。
+- **`_thread.interrupt_main()` 在 `time.sleep` 中触发 KeyboardInterrupt 是 OS 行为依赖**：Windows console subprocess 上验证可靠；如将来跑非 console（pythonw / GUI 启不带 console），interrupt_main 仍会工作但没法看到 print。
+- **30s game launch grace 是经验值**：FF7R / Steam / DOOM Eternal 实测够用；其它 launcher（Epic / GOG） 没全测；如真踩到再调成 CLI flag。
+- **Stop 按钮 outline 风格在 dark theme 下文字 `#c62828` 红色对深灰背景仍清晰**；如果将来加暗色主题切换，注意 stylesheet 用 palette() 而不是写死颜色。
+- **`scripts/verify_auto_play.py` 已坏但本 session 没修**：`from tools.auto_play import VLMDriver` 上一个 session 砍 VLM 时遗留，HANDOFF 之前没记。下次想跑 verify 之前先修这个 import。
+- **HANDOFF.md 已被 `ebc232d` commit 过一次（这是上一个 session 的内容），现在要再被这次 handoff 覆盖**：git history 里能拿回旧 handoff 的全文。
