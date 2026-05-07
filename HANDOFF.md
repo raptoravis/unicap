@@ -1,374 +1,268 @@
-# Handoff: auto-play 接管检测 + GUI 启停体验改进
+# Handoff: 打包 unicap CLI + GUI 双 standalone exe
 
-**Generated**: 2026-05-07 17:51 +0800
-**Branch**: master（与 origin/master 同步，clean）
-**Status**: Ready for Review —— 全部代码 commit + push（`74cf102`），headless sanity 全过；端到端实跑用户已验证 FF7R 游戏退出 + GUI toggle 路径"完美"，takeover detector 在真采集流程里的行为还需下一轮实测。
+**Generated**: 2026-05-07 18:45 +0800
+**Branch**: master（与 origin/master 同步，clean —— 已 commit `2b62905`，未 push）
+**Status**: Ready for Review —— 双产物 build 成功；GUI multidist dispatch 验证通过；GUI exe 内部 spawn CLI 子进程的端到端链路未实跑（需带显示器）
 
 ## Goal
 
-为 unicap auto-play / GUI 这一轮做四件事：
-1. 加"人类接管检测"——auto-play 模式下 3s 内有主动按键就暂停所有 inject（让人能随时接管）
-2. 修 GUI Start 按钮在 main.py 跑着时无出口的问题（Start ↔ Stop toggle）
-3. 修一系列 UX 小问题（video/pack 默认 game-dir、fps `0.00` 显示、Extra args 误导 placeholder）
-4. 修游戏退出后 main.py 不退导致 Start 卡灰的问题 + QThread 销毁警告
+把 unicap 打成两个独立 standalone exe 包：
+1. **CLI 包**（`dist-exe/`）—— 仅 `unicap.exe`，不含 PySide6，体积小
+2. **GUI 包**（`dist-exe-gui/`）—— `unicap-gui.exe` + 包内自带 `unicap.exe`，含 PySide6，self-contained
+
+让用户按需选择下载，CLI 用户不用背 PySide6 体积。
 
 ## Completed
 
-- [x] **新文件 `tools/auto_play/takeover.py:TakeoverDetector`**：后台 80ms 轮询 `GetAsyncKeyState`(profile.controls 键 + 鼠标 L/R/Middle，鼠标移动不算，gamepad 跳过，reserved_keys 排除)。bot 自身 inject 用 `backend._lock.acquire(blocking=False)` + `now - last_inject_at_mono < 150ms` grace 双重排除。3s 窗口。
-- [x] **runner.py 接入 detector**：构造 + start/stop 跟 lifecycle；`_driver_loop` tick 入口 + `_attack_heartbeat_loop` inject 前都 `is_taken_over()` skip；stop log 加 `takeover=N` 计数
-- [x] **watchdog.py 接入 detector**：新 `_taken_over_skip(source)` helper；short-window / long-window recovery + OCR dismiss-prompt inject 前都 gate；runner 把 detector 通过 `takeover_detector` 参数传给 watchdog 构造
-- [x] **GUI: Start 按钮 toggle**（`unicap_gui/tabs/base_tab.py`）：`_apply_start_button_style(running)` 切换；不跑 = solid 绿 `▶ Start`；跑 = outline 红 `■ 停止`（透明背景 + 红边 + 红字 + hover 浅红）。点 stop 弹模态二次确认 → `CTRL_BREAK` + 5s 兜底 taskkill
-- [x] **GUI: form 字段 running 时锁**：`_on_subprocess_started` → `self._form.setEnabled(False)`；`_on_subprocess_stopped` 恢复。dashboard / F8/F9 镜像按钮 / log / Stop 按钮**不在 form 内**，仍可操作
-- [x] **GUI: `set_start_enabled` 与外部锁兼容**：running 时强制 enabled（stop 路径不该被 G-011 锁屏蔽）；idle 时让外部锁生效
-- [x] **GUI: video/pack 自动默认 game-dir**：`unicap_gui/shared/settings.py` 加 `derive_game_dir_from_launch()`；`BaseTab._restore_settings` 末尾调新 hook `_apply_smart_defaults()`；VideoTab/PackTab 实现：`game_dir` 为空时从 launch 已保存 settings 派生 `<dataset_root>/<exe stem>`
-- [x] **GUI: fps SpinBox 显示 "auto"**：`FlagSpec` 加 `special_value_text: str` 字段；`FlagForm` float editor 检测到时 `setMinimum(default)` + `setSpecialValueText`；video schema 的 `--fps` 设 `special_value_text="auto"`。CLI argv 行为不变（0 = default 不 emit）
-- [x] **GUI: Extra args placeholder generic 化**：`cli_preview.py` 从 `--auto-play-debug`（仅 launch 认）改为 `（可选；空格分隔的额外 flag）`
-- [x] **main.py: 游戏退出后自动停 main.py**：`cmd_launch` spawn 游戏后启 daemon thread `_watch_game_exit`；改用 exe-name polling（每 5s）+ **30s 启动 grace** 让 launcher → game PID handoff 完成；游戏不在 → `_thread.interrupt_main()` → `KeyboardInterrupt` → cmd_launch finally 清 Vulkan 后退出
-- [x] **`tools/window_manager.py:is_process_alive_by_name`**：`tasklist /FI "IMAGENAME eq xxx.exe" /NH` 实现；检查失败保守返回 `True` 避免误杀
-- [x] **fix: QThread 销毁警告**（`unicap_gui/shared/process.py`）：`_on_finished` 不再把 `_reader`/`_thread` 提前置 None；改 `reader.finished.connect(reader.deleteLater)` + `thread.finished.connect(thread.deleteLater)` 让 Qt event loop 在 thread 真退出后销毁；加 `thread.setObjectName("unicap-stdout-<subcommand>")`
+- [x] **`unicap_gui/shared/paths.py`** — 新增 `is_frozen()` / `cli_executable()` / `cli_argv_prefix()`；`repo_root()` 在 frozen 模式下返回 `Path(sys.executable).parent`（exe 同目录），dev 模式仍是 `parents[2]`
+- [x] **`unicap_gui/shared/process.py`** — `start()` 改用 `cli_argv_prefix()` 替代手拼 `[python, -X utf8, -u, main.py]`；`cwd` 改用 `repo_root()`。frozen 时 cmd = `[unicap.exe, subcommand, *argv_tail]`，dev 时仍走 `[python, -X utf8, -u, main.py, subcommand, ...]`
+- [x] **`unicap_gui/widgets/cli_preview.py`** — frozen 时 preview 显示 `unicap.exe ...` 替代 `uv run main.py ...`，让用户复制出来能直接跑
+- [x] **`scripts/build-exe.ps1` 重写** — 加 `-Target {cli|gui|all}` 参数；CLI 单 main 走原 standalone 流程；GUI 走 multidist；timestamp 后缀 fallback 应对锁住的旧 buildDir
+- [x] **CLI build 验证**：`dist-exe/unicap.exe` 60.3 MB / 总 222.4 MB / zip `unicap-cli-1.0.7.zip` 82.6 MB；`unicap.exe --help` 正确输出 launch/video/pack 子命令
+- [x] **GUI build 验证**：`dist-exe-gui/{unicap.exe, unicap-gui.exe}` 各 62.4 MB / 总 773.1 MB / zip `unicap-gui-1.0.7.zip` 293.6 MB
+- [x] **multidist dispatch 验证**：`unicap.exe --help` 走 CLI entry；`QT_QPA_PLATFORM=offscreen unicap-gui.exe` 跑满 6s 阻塞在 `app.exec()` 才被 timeout 杀（说明走了 GUI entry）
+- [x] **`.gitignore`** 加 `dist-exe-gui/`、`dist-exe-{,gui-}build*/` glob、`/unicap.py` + `/unicap-gui.py`（multidist build-time 临时入口）
 
 ## Not Yet Done
 
-- [ ] **实跑端到端验证 takeover detector 在采集流程里**：本机 + GUI 跑 30 分钟 FF7R + auto-play，验证：
-  - 不接管时正常注入（attack heartbeat / keep-alive tick / watchdog recovery 都跑）
-  - 人手按 W 时 `[TAKEOVER]` log 出现 + 3s 内 `[AUTO-PLAY] tick:` 不出现 + 3s 后恢复
-  - 鼠标挥动**不**触发 takeover（验证 mouse 移动不算）
-  - watchdog static-frame 触发但人在玩时 `[WATCHDOG] short-window 触发但人在接管 — 跳过`
-- [ ] **launch tab `_btn_redo_survey` 异常崩溃路径仍卡 disabled**（旧 handoff 遗留）：若子进程异常崩溃没走 stopped 信号，按钮卡 disabled。改成关联 `is_running` 而非 lifecycle 信号即可
-- [ ] **dashboard `_attack_led` recovery 后卡橙**（旧 handoff 遗留）：`_on_recovery_active(False)` 不主动 reset，靠 attack pulse 自然覆盖；recovery 后长期无 attack 注入会卡橙
-- [ ] **`scripts/verify_auto_play.py` 已坏**：还在 `from tools.auto_play import VLMDriver`（上一个 session 砍了 VLMDriver）。要修就把 VLMDriver import + 相关 case 删掉
+- [ ] **GUI exe 内部 spawn CLI 子进程的端到端实跑**（需带显示器）：用户在本机跑 `dist-exe-gui\unicap-gui.exe`，点 Start → SubprocessRunner 应当 spawn `dist-exe-gui\unicap.exe launch ...`，不是 python。验证步骤见 Resume Instructions
+- [ ] **可选 push**：`2b62905` 已 commit 但还没 push（用户授权 commit 但未授权 push）
+- [ ] **首次启动可能被 Windows Defender 标 SmartScreen**：standalone exe 没签名，初次跑会弹 "Windows protected your PC"。Nuitka 产物比 PyInstaller onefile AV 容忍度好，但仍未签名。如果分发给外部用户需要做 code signing（Authenticode 证书 ~年 200 USD）
 
 ## Failed Approaches (Don't Repeat These)
 
-### 1. 直接 `proc.wait()` 监控游戏退出（已回退）
+### 1. Nuitka multidist 期望自动产出多个 exe（与文档不符）
 
-**尝试**：`_watch_game_exit` 第一版 `rc = proc.wait(); _thread.interrupt_main()`，proc 是 `subprocess.Popen([game_exe])` 返回的对象。
+**尝试**：基于 Nuitka 文档 "should automatically create extra files for each one of them" 的描述，期望 `--main=unicap.py --main=unicap-gui.py` 在 dist 目录里产出 `unicap.exe` + `unicap-gui.exe` 两个文件，build 完直接校验两个 exe 都存在。
 
-**失败**：FF7R / Steam 等用 launcher → game PID handoff（CLAUDE.md 早就记过 force_borderless_async 也踩过这个坑）：Popen 拿到的是 launcher 的 pid，launcher 启动真 game 后立刻退出 → `proc.wait()` 立刻返回 rc=0 → main.py 误以为游戏退了 → 自杀 → GUI Start 回绿。用户截图显示游戏还在跑 Start 已经回绿。
+**失败**：Nuitka 4.0.8 实际只产出**单个** binary（dist 里只有 `unicap.exe`，没有 `unicap-gui.exe`）。multidist 模式是单 binary 内嵌多入口，运行时按 `argv[0]` basename 分发。校验脚本里写 `Test-Path unicap-gui.exe` 直接 fail 退出。
 
-**修法**：改成按 exe basename `tasklist` polling 每 5s 一次 + **30s 启动 grace**。Grace 内即便 alive=False 也不退出（让 launcher 退场 + game 起来这段空窗）。
+**修法**：build 后手工 `Copy-Item unicap.exe unicap-gui.exe`。两个 exe 字节完全相同（62.4 MB 各一份）；Windows 启动时按文件名 dispatch。验证用 `QT_QPA_PLATFORM=offscreen ./unicap-gui.exe` 跑 6s 阻塞确认 dispatch 到 GUI entry。
 
-### 2. Stop 按钮 solid red 块 + 文字 `⏹ 停止 main.py`（已克制化）
+### 2. GUI build buildDir 删除被 antivirus / explorer 锁住
 
-**尝试**：第一版 toggle 用 `background: #c62828` solid + `⏹ 停止 main.py`。
+**尝试**：第一次 GUI build 完产物在 `dist-exe-gui-build/unicap.dist/`，我手工 `cp unicap.exe unicap-gui.exe` 测了 dispatch；之后再跑 `build-exe.ps1 -Target gui`，脚本走到 `Remove-Item -Recurse -Force $guiBuildDir` 失败：`Cannot remove ... because it is in use`。
 
-**失败**：用户反馈"不合适"——大块红色太抢视觉焦点，跟左上 Tab / 表单争夺注意力。
+**失败原因**：刚跑过的 unicap-gui.exe 进程虽然已退出（tasklist 看不到），但目录的 file handle 还被某个后台进程持有（推测 Windows Defender 异步扫描或 explorer 索引），sleep 30s + cmd `rmdir /s /q` + `Rename-Item` 全部失败。
 
-**修法**：改 outline 风格（透明背景 + 红边 `2px solid #c62828` + 红字 + hover 浅红 `#fbe9e7`）+ 文字缩短到 `■ 停止`。视觉重量与绿色 Start 对等，仍明示警示。
+**修法**：build-exe.ps1 GUI build 路径改用 `$localBuildDir`：尝试删旧 `$guiBuildDir`，删失败就用 timestamp 后缀的新路径（`dist-exe-gui-build-yyyyMMddHHmmss`）。旧目录留磁盘上下次 `-Clean` 一并清。`$guiOutDir` 同样加 fallback。
 
-### 3. SubprocessRunner `_on_finished` 直接把 Python ref None（已修）
+### 3. 单一 standalone 包同时包 CLI + GUI（被用户否决）
 
-**尝试**：reader.finished 触发后立刻 `self._reader = None; self._thread = None`，依赖 `thread.finished.connect(thread.deleteLater)` 自然清。
+**尝试**：方案讨论时倾向 multidist 一次构建产 `unicap.exe + unicap-gui.exe` 共享一个 dist 目录，用户下载一个包。
 
-**失败**：用户启动后 console 报 `QThread: Destroyed while thread '' is still running`。Root cause：`_on_finished` 在 main thread queued event 里跑，但此时 worker thread 的 `quit()` slot **也是 queued 在 main thread**，还没执行；Python 提前 ref None → sip GC Python wrapper → C++ thread object 销毁但 thread 还在跑 event loop。
+**失败**：用户明确选择"分两个独立 standalone 目录（CLI 不带 PySide6）"——CLI 包不应背 PySide6 / QtWebEngine 体积，纯命令行用户拿小包。
 
-**修法**：不在 `_on_finished` 清 Python ref；改让 reader/thread 都 `connect(deleteLater)`，由 Qt event loop 在 thread 真退出后销毁底层 C++ 对象。下次 `start()` 用新 `QThread()` 覆盖旧 ref，旧 wrapper 那时已 safe。
-
-### 4. Takeover 用"鼠标移动"作为接管信号（被用户否决）
-
-**尝试**：方案讨论时倾向把 GetCursorPos diff 也算接管信号（玩家挥鼠标看视角）。
-
-**失败**：用户明确否决——bot 自己的 mouse turn 也会引起 GetCursorPos diff，即便用 backend lock 排除也有 race；判定标准要严：只看键 + 鼠标按键。
-
-**修法**：sample 集合限定为 `profile.controls.values()` 中的键 + 鼠标 L/R/Middle 按键；`mouse`（turn_axis）跳过；`gamepad_*` 跳过（GetAsyncKeyState 读不到手柄）。
+**修法**：拆 CLI 和 GUI 两次 build：
+- CLI 单 main → `dist-exe/`（无 PySide6，82.6 MB zip）
+- GUI multidist → `dist-exe-gui/`（含 PySide6 + 内嵌 CLI，293.6 MB zip）
 
 ## Key Decisions
 
 | Decision | Rationale |
 |----------|-----------|
-| Takeover sample VK 从 `profile.controls` 派生 | 不同游戏键位差很多（ff7r 用 M dismiss_ui，doom 用 SHIFT 跑步等）；硬编码 W/A/S/D 不通用 |
-| Takeover bot-self 排除用 `lock.acquire(blocking=False)` + grace | lock 处理 inject 期间，grace 处理 inject 完成后 OS 残留 KeyUp。两者结合避免 race |
-| Watchdog 也尊重接管 | 人在玩 = 没卡 = 不需要 recovery；OCR dismiss-prompt 也别替人按 |
-| Start ↔ Stop 用同一按钮 toggle | 比独立 Stop 按钮更省 UI 空间；颜色 + 文字明示模式；同位置避免误触（HANDOFF 此前删 big red Stop 的初衷） |
-| Stop 弹模态二次确认 | `CTRL_BREAK` 是不可逆动作；防止用户误点把跑了一段的采集 session 中断 |
-| 游戏退出检测改 polling（不用 proc.wait） | FF7R launcher → game PID handoff 让 Popen pid 失效；exe basename 是稳定标识 |
-| 30s grace 写死 | 经验值（force_borderless_async 也用 30s）。grace 内即便 tasklist 看不到 exe 也不退出，让 launcher 退场 + game 启动这段空窗 |
-| `_thread.interrupt_main()` 注入 KeyboardInterrupt | 让 cmd_launch 的 `except KeyboardInterrupt + finally` 走原本的 Vulkan 注册表清理路径，不绕过 cleanup |
-| FlagSpec 加 `special_value_text` 字段 | 可复用：将来 `--capture-duration` 也想 0=`unlimited` 也能直接用 |
+| 双独立 standalone 目录（不共享 runtime） | 用户明确：CLI 包要小、不带 GUI 依赖；GUI 包 self-contained 不要求用户先装 CLI 包 |
+| GUI 包内用 multidist 自带 CLI（不让 GUI 在 PATH 找） | self-contained：用户解压 GUI zip 就能用，不依赖外部 CLI 安装 |
+| `is_frozen()` 用 `sys.executable` 文件名启发判断（不依赖 Nuitka 私有标记） | `__compiled__` 是 Nuitka 注入的全局，但只在编译产物的"主模块"里有，子模块未必访问得到；判断 `sys.executable` 不含 `python` 更稳，覆盖 PyInstaller (`sys.frozen`) 也兜底 |
+| build-time 临时复制 `main.py → unicap.py` + 写 `unicap-gui.py` wrapper | Nuitka multidist 的 exe 文件名 = main 文件 basename。要让 exe 叫 `unicap.exe` / `unicap-gui.exe`，源文件就得叫这俩名；不重命名 `main.py`（会破坏现有 import + CLAUDE.md 描述）→ build 时临时复制，finally 删 |
+| buildDir timestamp 后缀 fallback | Windows 文件锁不可预测（AV / explorer / 索引），不能依赖 `Remove-Item` 一定成功；用唯一目录名绕过比 retry-with-sleep 鲁棒 |
+| 手工 `Copy-Item unicap.exe → unicap-gui.exe` 替代依赖 Nuitka 自动多 exe | Nuitka 4.0.8 multidist 实际行为是单 binary + argv[0] dispatch，不是文档描述的"自动多 exe"；脚本注释里写明这点避免下次踩坑 |
+| frozen 模式下 cwd 改 `repo_root()` 而不是 `main_py().parent` | frozen 时没有 `main.py` 文件；`repo_root()` 在 frozen 下返回 exe 目录，dev 下返回 repo 根，对 CLI subprocess 来说都是正确的工作目录 |
 
 ## Current State
 
 **Working**:
-- `git log` HEAD = `74cf102 feat: auto-play 接管检测 + GUI 启停体验改进`
-- 工作树 clean（push 完 + 本 handoff 写完后才有这一个 modified）
-- TakeoverDetector：sample VK 提取实测对（ff7r 9 个含 W/A/S/D/E/M/SPACE/mouse_L/R；doom_eternal 多 SHIFT；_default/batman_ak 含 ESC）；空跑 0.5s 不误报
-- GUI 全 headless 验证：Start toggle 文字/样式切换 OK；form 跑时锁 / 停时解锁 OK；smart default `game_dir` 自动填 `D:\unicap_output\ff7remake_` OK；fps `setSpecialValueText("auto")` 显示 "auto"，setValue(30) 显示 "30.00"
-- 用户实跑反馈："验证过完美"——FF7R 启动 launcher→game handoff 期间不假阳性，关游戏后 main.py 自动退、GUI Start 自动回 ▶
+- `git log` HEAD = `2b62905 update build exe gui`，工作树 clean
+- `dist-exe/unicap.exe` + `dist-exe-gui/{unicap.exe, unicap-gui.exe}` 落盘
+- `unicap-cli-1.0.7.zip`（82.6 MB）+ `unicap-gui-1.0.7.zip`（293.6 MB）落盘
+- CLI dispatch 验证：`./dist-exe/unicap.exe --help` 输出 argparse 帮助 + launch/video/pack
+- GUI multidist dispatch 验证：`./dist-exe-gui/unicap.exe --help` 同上；`QT_QPA_PLATFORM=offscreen ./dist-exe-gui/unicap-gui.exe` 跑 6s 阻塞在 app.exec()
+- dev 模式 GUI 仍工作（headless smoke：toggle、form lock、fps auto display 都过）
 
 **Broken**: 无已知 broken。
 
-**Uncommitted Changes**: 仅本 `HANDOFF.md`（即将由 `commit` skill 处理）。
+**Uncommitted Changes**: 无（commit `2b62905` 已包全部改动，未 push）。
 
 ## Files to Know
 
 | File | Why It Matters |
 |------|----------------|
-| `tools/auto_play/takeover.py` | 全新 detector 模块；后台线程 + 排除 bot 自身 inject 的两道闸门 |
-| `tools/auto_play/runner.py` | AutoPlayRunner 构造 detector + lifecycle；`_driver_loop` / `_attack_heartbeat_loop` 入口 gate |
-| `tools/auto_play/watchdog.py` | `_taken_over_skip(source)` helper；short/long-window recovery + OCR inject 都 gate |
-| `tools/auto_play/input_backend.py` | `last_inject_at_mono` 是 detector 的 grace 判据；`_lock` 是 try-acquire 排除 bot 自身的依据 |
-| `tools/window_manager.py` | 新暴露 `is_process_alive_by_name`；main.py `_watch_game_exit` 依赖它 |
-| `main.py` | `cmd_launch` 中 `_watch_game_exit` daemon thread + 30s grace polling；`_thread.interrupt_main` 触发 KeyboardInterrupt 走 finally 清 Vulkan |
-| `unicap_gui/tabs/base_tab.py` | `_apply_start_button_style(running)` toggle；form `setEnabled` lock；`_apply_smart_defaults()` hook；`_on_start_button_clicked` dispatcher（弹模态 + stop） |
-| `unicap_gui/shared/settings.py` | `derive_game_dir_from_launch()` —— video/pack tab 智能默认源头 |
-| `unicap_gui/shared/cli_schema.py` | `FlagSpec.special_value_text` 字段；改 main.py argparse 时仍要这边同步 |
-| `unicap_gui/widgets/flag_form.py` | float editor 处理 `special_value_text`：`setMinimum(default)` + `setSpecialValueText` |
-| `unicap_gui/shared/process.py` | SubprocessRunner deleteLater 模式；`thread.setObjectName` 让 debug 输出可读 |
-| `profiles/*.yaml` | 影响 takeover sample VK；改 controls 时 detector 自动跟随 |
+| `scripts/build-exe.ps1` | build 入口；`-Target {cli|gui|all}` + `-Clean`；GUI build 函数处理 multidist + buildDir timestamp fallback + 手工复制 unicap-gui.exe |
+| `unicap_gui/shared/paths.py` | `is_frozen()` 启发判断；`cli_argv_prefix()` 是 frozen-aware spawn 入口；改 paths 时同步 dev/frozen 两条路径 |
+| `unicap_gui/shared/process.py` | `SubprocessRunner.start()` 用 `cli_argv_prefix()` —— frozen 下 spawn 同目录 `unicap.exe`，dev 下走 python+main.py |
+| `unicap_gui/widgets/cli_preview.py` | preview 显示也根据 frozen 切换前缀（用户体验细节） |
+| `dist-exe/` | CLI standalone 产物目录（gitignored） |
+| `dist-exe-gui/` | GUI standalone 产物目录（gitignored），含 `unicap.exe` + `unicap-gui.exe` 双 entry |
+| `unicap-cli-1.0.7.zip` / `unicap-gui-1.0.7.zip` | 分发包（gitignored） |
+| `.gitignore` | 加了 `dist-exe-gui/`、build dir timestamp glob、临时入口文件 |
 
 ## Code Context
 
-### TakeoverDetector 主循环（`tools/auto_play/takeover.py`）
+### frozen 检测启发（`unicap_gui/shared/paths.py`）
 
 ```python
-def _loop(self) -> None:
-    while not self._stop_evt.is_set():
-        self._stop_evt.wait(self._sample_period_s)
-        if self._stop_evt.is_set():
-            break
+def is_frozen() -> bool:
+    """是否运行在 Nuitka standalone 产物里（vs 源码 dev 运行）。
 
-        # 1) bot inject 中？lock 拿不到说明正在 inject。
-        got = self._backend._lock.acquire(blocking=False)
-        if not got:
-            continue
-        self._backend._lock.release()
+    判据：sys.executable 不是 python.exe / pythonw.exe / py.exe。
+    Nuitka standalone 把 sys.executable 设为产物 exe（如 unicap-gui.exe）。
+    """
+    if getattr(sys, "frozen", False):  # PyInstaller marker (兜底)
+        return True
+    name = Path(sys.executable).name.lower()
+    return "python" not in name and name not in ("py.exe", "py")
 
-        # 2) bot 刚 inject 完？OS 还在 propagate KeyUp，跳过。
-        if (time.monotonic() - self._backend.last_inject_at_mono
-                < self._bot_inject_grace_s):
-            continue
 
-        # 3) sample 关键键 — 任何高电平 → 标记接管
-        for vk in self._sample_vks:
-            if _user32.GetAsyncKeyState(vk) & 0x8000:
-                self._last_human_at = time.monotonic()
-                # ... log（限频）
-                break
+def cli_argv_prefix() -> list[str]:
+    """spawn CLI 子进程的 argv 前缀（不含 subcommand 本体）。
 
-def is_taken_over(self) -> bool:
-    return (time.monotonic() - self._last_human_at) < self._grace_s
+    frozen: [unicap.exe]                    —— 直接调同目录的 multidist 产物
+    dev:    [python, -X utf8, -u, main.py]  —— 走 venv python
+    """
+    if is_frozen():
+        return [str(cli_executable())]
+    return [sys.executable, "-X", "utf8", "-u", str(main_py())]
 ```
 
-### Sample VK 提取规则（不同 profile 不同，自适应）
+### GUI build 关键步骤（`scripts/build-exe.ps1` Build-Gui）
 
-```python
-# tools/auto_play/takeover.py:_build_sample_vks
-for ctrl_value in profile.controls.values():
-    ctrl_lower = ctrl_value.lower()
-    if ctrl_lower in _MOUSE_BTN_VKS:        # mouse_left/right/middle
-        vks.add(_MOUSE_BTN_VKS[ctrl_lower])
-    elif ctrl_lower == "mouse":             # turn_axis: mouse — 鼠标移动不算
-        continue
-    elif ctrl_lower.startswith("gamepad_"): # GetAsyncKeyState 读不到手柄
-        continue
-    else:
-        vks.add(_resolve_vk(ctrl_value))    # W/SPACE/M/...
+```powershell
+# 1) buildDir 锁定 fallback
+$localBuildDir = $guiBuildDir
+if (Test-Path $localBuildDir) {
+    try { Remove-Item -Recurse -Force $localBuildDir -ErrorAction Stop }
+    catch {
+        $stamp = Get-Date -Format 'yyyyMMddHHmmss'
+        $localBuildDir = "$guiBuildDir-$stamp"
+    }
+}
 
-# baseline 兜底（profile 万一没列）
-vks.add(VK_LBUTTON); vks.add(VK_RBUTTON)
-vks -= reserved_vks                          # F8/F9 永远不算
+# 2) build-time 临时入口（Nuitka multidist 按文件 basename 命名 exe）
+Copy-Item -Path $mainPy -Destination "$root\unicap.py" -Force
+Set-Content -Path "$root\unicap-gui.py" -Encoding utf8 -Value @"
+from unicap_gui.__main__ import main
+import sys
+sys.exit(main())
+"@
+
+# 3) Nuitka multidist
+& uv run python -m nuitka `
+    --standalone --enable-plugin=pyside6 `
+    --include-package=tools --include-package=unicap_gui --include-package=PySide6 ... `
+    --main=$cliEntry --main=$guiEntry
+
+# 4) 手工复制（Nuitka 4.0.8 实际只产单 binary）
+Copy-Item -Path "$nuitkaDist\unicap.exe" -Destination "$nuitkaDist\unicap-gui.exe" -Force
 ```
 
-### Runner gate（`tools/auto_play/runner.py`）
+### multidist dispatch 行为
 
-```python
-# _driver_loop tick 入口
-if self._recovery_active_evt.is_set():
-    self._stop_evt.wait(0.1); continue
-if self._takeover.is_taken_over():
-    self._stop_evt.wait(0.2); continue          # ← 加的
+- Nuitka 编译 `--main=unicap.py --main=unicap-gui.py` → 单 binary `unicap.exe` 内嵌两个 main 的所有代码
+- 启动时读 `argv[0]` basename：
+  - `unicap` → 跑 `unicap.py`（= main.py 副本，CLI argparse）
+  - `unicap-gui` → 跑 `unicap-gui.py`（= GUI wrapper，启 QApplication）
+- 把 `unicap.exe` 复制为 `unicap-gui.exe` 后 dispatch 自动切换；两文件字节完全相同
 
-# _attack_heartbeat_loop inject 前
-if self._recovery_active_evt.is_set(): ...
-if self._takeover.is_taken_over():
-    self._stop_evt.wait(0.5); continue          # ← 加的
-self._backend.inject(self._attack_action)
+### 产物 layout
+
 ```
+dist-exe/                       # CLI 包（无 PySide6）
+  unicap.exe                    60.3 MB
+  python313.dll, numpy.libs/, cv2/, h5py/, hdf5.dll, ...
+  dist/{dxgi.dll,UniCap64.dll,UniCap64.json,frame_capture.addon}
+  shaders/, profiles/, config/
 
-### Watchdog gate（`tools/auto_play/watchdog.py`）
-
-```python
-def _taken_over_skip(self, source: str) -> bool:
-    if self._takeover is None or not self._takeover.is_taken_over():
-        return False
-    log.info("[WATCHDOG] %s 触发但人在接管 — 跳过", source)
-    return True
-
-# 三处调用：
-# - short-window static recovery 前: _taken_over_skip("short-window")
-# - long-window static recovery 前:  _taken_over_skip("long-window")
-# - OCR dismiss-prompt inject 前:    _taken_over_skip(f"OCR/{key}")
-```
-
-### 游戏退出 watcher（`main.py:cmd_launch`）
-
-```python
-proc = subprocess.Popen([str(game_exe)], cwd=str(game_dir), env=env)
-
-def _watch_game_exit(exe_basename: str) -> None:
-    from tools.window_manager import is_process_alive_by_name
-    grace_until = time.monotonic() + 30.0
-    while True:
-        time.sleep(5.0)
-        if is_process_alive_by_name(exe_basename):
-            continue
-        if time.monotonic() < grace_until:
-            continue                         # ← 关键：grace 内不退
-        print(f"\n[GAME-EXIT] 找不到 {exe_basename} ...", flush=True)
-        _thread.interrupt_main()
-        return
-threading.Thread(target=_watch_game_exit, args=(game_exe.name,),
-                 daemon=True, name="game-exit-watcher").start()
-```
-
-### Start 按钮 toggle dispatcher（`unicap_gui/tabs/base_tab.py`）
-
-```python
-def _on_start_button_clicked(self) -> None:
-    if self._runner.is_running():
-        ret = QMessageBox.question(
-            self, "停止 main.py",
-            f"将向 {self._schema.name} 子进程发 CTRL_BREAK ...",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-        )
-        if ret != QMessageBox.Yes: return
-        self._runner.stop(timeout_s=5.0)
-        return
-    self._on_start_clicked()  # 原启动流程
-
-def _on_subprocess_started(self, cmd):
-    self._apply_start_button_style(running=True)
-    self._btn_start.setEnabled(True)            # stop 路径永远可点
-    self._form.setEnabled(False)                # ← lock form
-    ...
-
-def _on_subprocess_stopped(self, rc):
-    self._apply_start_button_style(running=False)
-    self._btn_start.setEnabled(True)
-    self._form.setEnabled(True)                 # ← unlock form
-    ...
-```
-
-### QThread cleanup pattern（`unicap_gui/shared/process.py`）
-
-```python
-self._thread = QThread()
-self._thread.setObjectName(f"unicap-stdout-{subcommand}")
-self._reader = _StdoutReader(self._proc)
-self._reader.moveToThread(self._thread)
-self._thread.started.connect(self._reader.run)
-self._reader.line.connect(self._on_line)
-self._reader.finished.connect(self._on_finished)
-self._reader.finished.connect(self._thread.quit)
-# ↓ 关键：不在 _on_finished 提前 ref None；让 Qt event loop 真 thread 退出后销毁
-self._reader.finished.connect(self._reader.deleteLater)
-self._thread.finished.connect(self._thread.deleteLater)
-self._thread.start()
-
-def _on_finished(self, rc):
-    self._proc = None
-    # 不动 _reader / _thread 的 Python ref
-    self.stopped.emit(rc)
+dist-exe-gui/                   # GUI 包（multidist + PySide6）
+  unicap.exe                    62.4 MB（multidist 第一入口 = CLI）
+  unicap-gui.exe                62.4 MB（multidist 第二入口 = GUI；与 unicap.exe 字节相同）
+  PySide6/, QtWebEngineProcess.exe, qt6.conf, icudtl.dat, qtwebengine_resources*.pak, ...
+  python313.dll, numpy.libs/, cv2/, h5py/, hdf5.dll, ...
+  dist/{dxgi.dll,UniCap64.dll,UniCap64.json,frame_capture.addon}
+  shaders/, profiles/, config/
 ```
 
 ## Resume Instructions
 
-### 实跑端到端验证 takeover（重点 —— 本 session 没在真采集流程里跑过）
+### 1) GUI exe 端到端实跑验证（最重要 —— 本 session 没真跑）
 
 ```powershell
-uv sync --extra gui
-uv run --with PySide6 python -m unicap_gui
-
-# 1) 在 GUI 选 ff7r profile + game-path 指向 FF7R exe，--auto-play 勾选，点 Start
-# 2) 进游戏，按 F8 开始采集
-# 3) 观察 console 5 分钟：应当看到
-#    [AUTO-PLAY] tick: keep-alive → ...   每 1s
-#    [ATTACK-HB] 注入 attack#N            每 12s
-#    （不接管时） 不应有 [TAKEOVER] log
-# 4) 中途人手按 W 走两步：应当看到
-#    [TAKEOVER] 检测到主动按键 vk=0x57 #1 — 暂停 auto-play 3.0s
-#    紧接 3 秒内 NO [AUTO-PLAY] tick / [ATTACK-HB]
-#    3 秒后恢复 [AUTO-PLAY] tick
-# 5) 中途挥鼠标看视角（不点鼠标按键）：不应触发 takeover（鼠标移动不算）
-# 6) 让 watchdog 触发（卡墙 10 秒）但同时人手按 S：应当看到
-#    [WATCHDOG] short-window 触发但人在接管 — 跳过
-# 7) 关游戏：5s 内 console 应有
-#    [GAME-EXIT] 找不到 ff7remake_.exe 进程 — main.py 自动停止
-#    [VULKAN] HKCU 注册表已清理      （Vulkan 路径才有）
-#    GUI Start 按钮自动回到 ▶ Start，form 解锁
+# 在 Windows GUI 桌面环境
+cd D:\dev\unicap.git\dist-exe-gui
+.\unicap-gui.exe
 ```
 
-### 改 game-path 跑新游戏的完整流程
+**预期**：
+- GUI 窗口起来（unicap GUI 三 tab：采集/生成视频/打包）
+- 选 game-path 指向 FF7R exe → 点 Start
+- 子进程 cmd 应当是 `<dist-exe-gui>\unicap.exe launch --game-path ... --auto-play ...`（**不是** python）
+- console log 看到 `[CAPTURE]` `[AUTO-PLAY]` 等输出（与源码运行一样）
+- 按 F8/F9 / 关游戏 / Stop 按钮路径全部应当工作（与 dev 路径行为一致）
 
-```
-1. 现状：Start 灰 / 红「■ 停止」、form 锁着
-2. 点「■ 停止」→ 弹确认 → Yes → main.py CTRL_BREAK 退出 → GUI 看到 stopped
-3. Start 自动回绿 ▶ + form 解锁
-4. 改 --game-path 选新 exe → CLI preview 实时刷新
-5. 点 ▶ Start → 新一轮 main.py
-```
+**如果失败**：
+- GUI 起不来 → 看 `%APPDATA%\unicap-gui\unicap-gui.log` 找 PySide6 import 错（缺 dll？）
+- spawn 失败 `找不到可执行文件` → `is_frozen()` 没命中或 `cli_executable()` 路径不对；检查 `Path(sys.executable).parent / "unicap.exe"` 在 multidist 下是否存在
+- spawn 起来但游戏不响应 → CLI subprocess 的 cwd / env 可能不对（已改成 `repo_root() = exe 同目录`，应该 OK）
 
-### Headless smoke（CI / 远程开发用，无需 X server）
+### 2) Push commit（如果用户决定推）
 
 ```powershell
-PYTHONIOENCODING=utf-8 uv run python -c "
-import os; os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-from PySide6.QtWidgets import QApplication
-app = QApplication.instance() or QApplication([])
-from unicap_gui.app import MainWindow
-mw = MainWindow()
-launch = mw._launch
-launch._on_subprocess_started(['fake'])
-assert launch._btn_start.text() == '■ 停止'
-assert launch._form.isEnabled() is False
-launch._on_subprocess_stopped(0)
-assert launch._btn_start.text() == '▶ Start'
-assert launch._form.isEnabled() is True
-print('toggle + form-lock OK')
+git push origin master
+```
 
-# fps SpinBox specialValueText
-video = [mw._tabs.widget(i) for i in range(mw._tabs.count())
-         if mw._tabs.tabText(i) == '生成视频'][0]
-fps_ed = video._form._editors['fps']
-assert fps_ed.text() == 'auto', fps_ed.text()
-print('fps auto display OK')
+`2b62905 update build exe gui` 已 commit，等用户授权 push。
 
-# takeover sample VK
-from tools.auto_play.takeover import _build_sample_vks
-from tools.auto_play.profile import load_profile
-ff7r = load_profile('ff7r', fallback=False)
-vks = _build_sample_vks(ff7r)
-assert 0x57 in vks and 0x01 in vks      # W + LBUTTON
-assert 0x77 not in vks and 0x78 not in vks  # F8/F9 排除
-print('takeover sample VK OK')
+### 3) 如果要重 build
+
+```powershell
+# 全量重建（清 Nuitka cache + 旧 dist-exe* 目录）
+scripts\build-exe.ps1 -Clean -Target all
+
+# 单独重 CLI（增量，~2 分钟）
+scripts\build-exe.ps1 -Target cli
+
+# 单独重 GUI（增量，~3-5 分钟；首次 ~10-15 分钟）
+scripts\build-exe.ps1 -Target gui
+```
+
+### 4) 修代码后的 sanity check（不重 build）
+
+```powershell
+# headless dev-mode smoke（验证 frozen-aware 改动没破 dev 路径）
+$env:QT_QPA_PLATFORM = 'offscreen'
+$env:PYTHONIOENCODING = 'utf-8'
+uv run --with PySide6 python -c "
+from unicap_gui.shared.paths import is_frozen, cli_argv_prefix
+assert is_frozen() is False                    # dev 模式
+prefix = cli_argv_prefix()
+assert 'main.py' in prefix[-1]                 # dev: 末尾是 main.py 路径
+assert '-X' in prefix and '-u' in prefix       # dev: 带 -X utf8 -u
+print('dev-mode argv prefix OK:', prefix)
 "
 ```
 
 ## Setup Required
 
-- Windows 11（GUI 用 SendInput；GetAsyncKeyState 也仅 Windows）
-- Python 3.13+ (`uv`)
-- PySide6 ≥ 6.6（`uv sync --extra gui`）
-- ViGEm Bus 内核驱动（`auto-play` extra；不装会 fallback 键鼠）
-- 可选：Windows.Media.Ocr（`pip install "unicap[auto-play-ocr]"` 让 watchdog OCR arm 工作）
-- 环境变量：无（`.env` 已在前 session 删除）
+- Windows 11 + Visual Studio 2022（Nuitka 调 `cl.exe` 编译 C 后端）
+- `uv` 管理 Python 3.13 venv
+- `uv sync --extra gui` 装 PySide6（GUI build 必需）
+- `dist/` 已有 ReShade DLL：`dxgi.dll` / `UniCap64.dll` / `UniCap64.json` / `frame_capture.addon`（preflight 会校验，缺失提示跑 `scripts\build.ps1`）
+- 首次 build 可能需要 Nuitka 自动下载 `depends.exe`（已加 `--assume-yes-for-downloads`）
 
 ## Edge Cases & Error Handling
 
-- **Takeover 在 bot inject hold 期间检测到键？** bot inject `_inject_key` press 模式持有 lock 的整个 `down → sleep(duration_ms) → up` 时长；detector `_lock.acquire(blocking=False)` 拿不到 → skip 本轮。+ inject 完成后 150ms grace 再过滤 OS 残留 KeyUp。两道闸门覆盖。
-- **Profile 没有任何键（只 gamepad_*）？** `_build_sample_vks` 仍兜底加 `VK_LBUTTON / VK_RBUTTON`，detector 不会无条件返回 False。
-- **launcher → game 实际超过 30s 才接管显示？** `_watch_game_exit` 30s grace 后第 31s polling 看不到 exe 就退。极端慢 launcher（DRM 联网验证）需要把 grace 调大；当前写死 `grace_until = monotonic() + 30.0`，要改在 main.py 加 CLI flag 暴露。
-- **用户在 main.py 跑期间关 GUI 窗口？** MainWindow.closeEvent 弹模态确认 → Yes → `runner.stop(timeout_s=5.0)` → 5s 优雅 / 兜底 taskkill。Stop 按钮路径与关窗路径都走同一个 stop()。
-- **Start 时弹模态 stop 期间用户多点几下？** Stop 按钮在 stop() 期间会被同步阻塞 5s（GUI 主线程 wait），用户多点会进 event queue 但因为按钮已经 setEnabled 在 stop 完成前不变，多次点击 → 多次 stop → 第二次 stop 调用看到 is_running=False → no-op return。
-- **launcher pid 退出但 game 还没起，用户点 GUI Stop？** Stop 走 GUI 路径独立于 game watcher：`runner.stop` 直接对 main.py 子进程 send CTRL_BREAK，不依赖 game 状态。OK。
-- **`tasklist` 命令找不到（中文 Windows 偶见）？** `is_process_alive_by_name` catch `subprocess.SubprocessError` / `OSError` → 返回 True 保守不退出。
+- **build 时 buildDir 被锁**：脚本 `Remove-Item` 失败 → 自动 fallback 到 timestamp 后缀的新目录。旧目录留磁盘，下次 `-Clean` 一并清。如果连续多次 build 留多个 timestamp 目录，磁盘会涨。
+- **build 时 dist-exe-gui 也被锁（旧 GUI 进程没退）**：脚本尝试 Rename 也失败 → 直接报错让用户手工关 explorer 后重试（无法 graceful 处理 OS 级文件锁）。
+- **frozen 检测误判（未来某天 Nuitka 改用 `sys.executable=python.exe`）**：`is_frozen()` 会返回 False；GUI 试图 spawn `python -X utf8 -u main.py`，但 frozen 包内没 `main.py` → spawn FileNotFoundError。届时改 `is_frozen()` 用 `__compiled__` 检测或显式 env var marker。
+- **multidist binary argv[0] 被改写**（极端：用户 rename 为别的名字）：dispatch 会找不到匹配 main，Nuitka 行为未知（可能 fallback 到第一个 main）。文档约束：用户不要 rename `unicap.exe` / `unicap-gui.exe`。
+- **`unicap_gui/__main__.py` 的 PySide6 import 失败 fallback**：源码里有 try/except 提示 `uv sync --extra gui`，但在 frozen 包里 PySide6 必然在；提示文字仍会显示但实际不会触发。
+- **跨包共享 frame_capture.addon / dxgi.dll**：CLI 包和 GUI 包各带一份，互不干扰。同机两个包都解压时 `dist/dxgi.dll` 不会冲突（各自的 `<bundle>/dist/`）。
 
 ## Warnings
 
-- **改 main.py argparse 时**：必须同步改 `unicap_gui/shared/cli_schema.py`，否则新 flag 不会显示在 GUI / 不会传给 CLI。
-- **TakeoverDetector 触动 `backend._lock` 是私有属性访问**：当前 backend 没暴露 `try_lock()` 公开 API，detector 直接 `_lock.acquire(blocking=False)`。如果将来 InputBackend 重构 lock 实现，detector 也要跟改。
-- **`_thread.interrupt_main()` 在 `time.sleep` 中触发 KeyboardInterrupt 是 OS 行为依赖**：Windows console subprocess 上验证可靠；如将来跑非 console（pythonw / GUI 启不带 console），interrupt_main 仍会工作但没法看到 print。
-- **30s game launch grace 是经验值**：FF7R / Steam / DOOM Eternal 实测够用；其它 launcher（Epic / GOG） 没全测；如真踩到再调成 CLI flag。
-- **Stop 按钮 outline 风格在 dark theme 下文字 `#c62828` 红色对深灰背景仍清晰**；如果将来加暗色主题切换，注意 stylesheet 用 palette() 而不是写死颜色。
-- **`scripts/verify_auto_play.py` 已坏但本 session 没修**：`from tools.auto_play import VLMDriver` 上一个 session 砍 VLM 时遗留，HANDOFF 之前没记。下次想跑 verify 之前先修这个 import。
-- **HANDOFF.md 已被 `ebc232d` commit 过一次（这是上一个 session 的内容），现在要再被这次 handoff 覆盖**：git history 里能拿回旧 handoff 的全文。
+- **`unicap.exe` 和 `unicap-gui.exe` 在 GUI 包里字节完全相同**（62.4 MB × 2 = 124.8 MB 占用）。这是 Nuitka multidist 的实现细节，不是 bug；删一个 dispatch 就坏。
+- **未签名 exe 首次跑会被 SmartScreen 拦**：分发给外部用户前最好做 Authenticode 签名，否则用户要点"仍要运行"才行。
+- **changes 已 commit 未 push**：`2b62905 update build exe gui` 在本地 master，等用户授权 push。
+- **Nuitka 4.0.8 multidist 与文档描述不符**：文档说自动产多 exe，实际单 binary + argv[0] dispatch。脚本里手工复制处理；下次升级 Nuitka 主版本前先小测一次产物布局是否变化。
+- **build-time 临时文件 `unicap.py` / `unicap-gui.py` 在 repo 根**：`.gitignore` 已 cover；`finally` 块里 `Remove-Item -ErrorAction SilentlyContinue` 兜底删除，但如果 PowerShell 进程在 finally 前被 hard kill 会残留 → 手工删即可。
+- **GUI exe 启动慢**（首次 ~3-5s）：Nuitka standalone 冷启动 + PySide6 + 多 dll 加载，正常现象，非 hang。
+- **未实测 GUI exe 实际拉起 CLI**：`is_frozen()` 在 GUI exe 里命中后 spawn `unicap.exe`，但本 session 没验证整链路。GUI exe 起来后第一件事就该测点 Start 看 spawn cmd 是否正确。
