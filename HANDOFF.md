@@ -1,306 +1,290 @@
-# Handoff: auto-play 卡墙 / 傻站 / 卡菜单 / 缺挥刀 系列修复
+# Handoff: PySide6 GUI + auto-play VLM 砍除
 
-**Generated**: 2026-05-07
-**Branch**: `master` (HEAD = `c458ff0`, in sync with `origin/master`)
-**Status**: ✅ 三组修复已 ship 到 master，等下一轮 FF7R 实跑反馈
+**Generated**: 2026-05-07 16:13 +0800
+**Branch**: master（与 origin/master 同步，clean）
+**Status**: Ready for Review —— 全部代码 commit + push；GUI 启动可用，端到端 capture 没在本 session 实跑过
 
 ## Goal
 
-一整轮基于 sponsor 实跑 FF7R 截屏 + `auto_play.log` 诊断的连续修复：
-让 vlm 驱动下的 bot **不再卡墙、不再傻站、不会被自己推进菜单、并产生攻击动作样本**。
+为 unicap 加一个 PySide6 GUI（`unicap_gui/` 包，pip extra `gui`，入口 `unicap-gui`），代替原来 PowerShell + 控制台手敲 `uv run main.py launch ...` 的工作流。同时根据用户决定，把 auto-play 的 VLM / hybrid driver 整套砍掉，只保留 keep-alive 模式。
 
-## Completed（已 ship 到 master，3 个 commit）
+## Completed
 
-`c458ff0 feat(auto-play): 加 attack-diversity heartbeat + VLM prompt 探索时挥刀规则`
-- [x] VLM prompt "Open exploration" 拆 recipe 1 (70% 纯走) + recipe 2 (30% 走+左键) + Attack-diversity rule
-- [x] runner 加 background **attack heartbeat thread** 每 12s 注入 `profile.controls.attack`（FF7R = mouse_left），不依赖 VLM 输出
-- [x] `_build_attack_action()` 跨游戏 portable（mouse_*/gamepad_*/任意 vk → 对应 Action）
-
-`a3fffca fix(auto-play): 杜绝 recovery 自开菜单 + VLM menu-key 硬规则 + escalation`
-- [x] `profiles/ff7r.yaml` recovery 100% 纯 movement —— 末尾 `dismiss_ui (M)` 整段删除（M 在 gameplay 中=打开 Map 副屏 → VLM 误识别为 Main Menu → 死循环按 M 4 分钟）
-- [x] system prompt **rule 7b MENU-KEY GATE**：`{M, ESC, ENTER, TAB, BACKSPACE, F1, F2}` 必须满足 dark-panel ≥60% + 无 HUD + 显式 on-screen 提示三条件，否则改 W
-- [x] system prompt **rule 7c DISMISS-KEY ESCALATION**：进菜单连续按同一键不退就 cycle `M → TAB → BACKSPACE → ESC → ENTER → fallback W`
-- [x] watchdog `consecutive_static_required: 4 → 5`（8s → 10s 触发，减少 normal gameplay 误触发率）
-
-`f962bc3 fix(auto-play): 解决 bot 卡墙/傻站/卡菜单的链式根因 + capture 默认 60s`
-- [x] watchdog UI-mask 阈值 `30/0.20 → 80/0.70`（FF7R pre-UI/post-UI tone-mapping 差异在 normal gameplay 制造 50%+ 整图色差，老阈值 11/17 次假阳性）
-- [x] `runner` + `watchdog` 加 `_recovery_active_evt` threading.Event：watchdog 跑 recovery 时 main driver loop + heartbeat 暂停 inject（避免并发 W+S 互抵把 recovery 物理脱困序列冲掉）
-- [x] **Background heartbeat thread**（`runner._heartbeat_loop`）：1.5s 没 inject 自动补 W —— 解决 VLM API 3-5s round-trip 期间 main thread 阻塞导致 bot 傻站 50% 时间
-- [x] `InputBackend.last_inject_at_mono` 字段（每次 inject 后更新，heartbeat 凭它判断）
-- [x] tick-level INFO log `[AUTO-PLAY] tick: vlm → N action(s) [...]` —— 不开 `--auto-play-debug` 也能 grep 看到 bot 实际收到的 actions
-- [x] tick-level fallback：VLM 输出无 movement key 时强制追加 W 1500ms
-- [x] VLM mouse turn example 反 right-bias：default 改 `dx:-250 (look left)`，加 "Direction balance" 规则
-- [x] VLM rule 11 Movement coverage：每 tick 至少一个 movement input `duration_ms ≥ 2500`（覆盖 VLM round-trip）；rule 5 软 cap 提到 3000ms
-- [x] `profiles/ff7r.yaml` NEAR-WALL OVERRIDE（vending machine / 海报等遮挡）+ TURN DIRECTION ALTERNATION（90° 墙角同向 turn 累积只是从一面墙转到另一面墙）+ Fullscreen menu 默认 M 不 ESC
-- [x] `tools/auto_play/ocr_detector.py` `_DISMISS_PATTERNS` 动词表加 `Confirm|OK|Accept|Proceed|Advance|Yes`（中文加 `确认|是`）—— 修 FF7R 弹窗 "Enter Confirm" 不识别
-- [x] `--capture-duration` 默认 `30 → 60s`（main.py + CLAUDE.md）
-- [x] `verify_auto_play.py` `_neutralize_os_inputs()` monkey-patch `_user32.SendInput` + `vgamepad = None` —— 跑测试不再喷键鼠到 active window
-- [x] `verify_auto_play.py` 修 stale `_trigger_recovery(diff=)` keyword + 加 `wd.stop()` 消除 daemon-thread race
+- [x] 新 `unicap_gui/` 包：app / tabs（launch、video、pack 三 tab）/ widgets / shared
+- [x] 三 tab 中文标签（采集 / 生成视频 / 打包）+ 16px 加大字号；缺省选中"采集"
+- [x] schema-driven `FlagForm`：`unicap_gui/shared/cli_schema.py` 把 main.py argparse 复刻成数据，FlagForm 渲染对应控件
+- [x] `--game-path` 行：可编辑 `QComboBox` + 历史下拉（每条独立编号 key 存 QSettings，绕开 IniFormat list 序列化对 `\\` 路径不友好的问题）；浏览选中即推历史
+- [x] `--profile` 行：可编辑 `QComboBox`，扫 `profiles/*.yaml` 列出 + 一个空项（留空让 main.py 按 exe 名 fuzzy match）
+- [x] `--dataset-root` 默认值改成 `D:\unicap_output`，与 `tools/capture/config.py:DATASET_ROOT` 同步显示
+- [x] 等价 CLI preview 实时刷新 + 一键复制；Extra args 透传段可写额外 flag
+- [x] launch tab 顶部 dashboard：状态条 / session link / frames 计数 / elapsed / capture-duration 进度条 / WATCHDOG 计数 / ATK 心跳灯
+- [x] dashboard 文字色用 `palette(text)`（浅色主题下不再灰白看不清）+ 加粗 +1pt
+- [x] F8 / F9 镜像按钮（`SendInput`）+ 重做 survey 按钮
+- [x] Start 按钮放大着色（绿色，44px 高度）
+- [x] **Stop 按钮删掉**：launch tab 用 F9 终止 capture 会话；要彻底退 main.py 关 GUI 窗口（`MainWindow.closeEvent` 会向所有 running runner 发 `CTRL_BREAK_EVENT`）
+- [x] auto_play 首次运行 default=True（INI 没保存过 `auto_play` key 时）；已保存值由 BaseTab._restore_settings 还原
+- [x] `--game-name` flag 整体删除（CLI argparse + GUI schema + launch_tab 的 fallback 逻辑），`game_name` 内部 = `game_exe.stem`
+- [x] auto-play 砍掉 VLM / hybrid：删 `tools/auto_play/vlm_driver.py` 整文件；runner.py 砍 vlm/hybrid 分支、`_patrol_loop` / `_heartbeat_loop` / `_has_movement`；watchdog.py 砍 `_consult_vlm` / `vlm_driver` 参数；main.py 删 `--driver` / `--vlm-*` 5 个 flag
+- [x] auto-play 视觉判断改为只读 `BackBuffer.png`（no-ui 流）：`watchdog._read_latest_bmp` 全部 skip `BackBufferUI`；删 watchdog UI-mask arm（`_read_latest_pair` + `_UI_MASK_*` dead code）
+- [x] launch 默认 `--ui-mode no-ui`（之前 auto-play 时强制 both）
+- [x] profiles `_default` / `batman_ak` / `doom_eternal` / `ff7r` 剥掉末尾 `vlm:` block；profile.py YAML schema 不再要求 `vlm:`；`GameProfile` 数据类去 `vlm` 字段
+- [x] `pyproject.toml` 删 `auto-play-vlm` extra（openai + python-dotenv）
+- [x] `.env` / `.env.example` 从 git 删除 + `.gitignore` 加 `.env`（之前是注释状态）
+- [x] dashboard / log_tailer 同步去掉 VLM 计数 + HEARTBEAT 心跳灯，留 WATCHDOG + ATK
+- [x] CLAUDE.md auto-play 章节重写，去 `--driver` / VLM 配置 / `.env` 整段
+- [x] **Auto-Play 辅助面板** 整体删除（用户决定不要这个旁挂面板，profile 选择直接通过 form 行的 combo）；`unicap_gui/widgets/auto_play_panel.py` 文件已删
 
 ## Not Yet Done
 
-- [ ] **Action-feedback loop**（potential）：VLM 单帧无 history，看不到自己上次按的键是否生效。当前用 prompt rule 7c 软提示 escalation 依赖 VLM 自觉。如果实测 VLM 不严格遵守 cycle 顺序，可考虑 runner-level 强制 escalation —— 维护 `last_menu_key_attempts: deque[(key, time)]`，连续 2 个 tick 同 key 自动替换为下一个 escalation key（M→TAB→...）。
-- [ ] **Frame-hash 完全静帧检测**（potential）：watchdog 现在只看 frame diff 阈值，菜单内有动画（光标闪烁、tutorial GIF）让 frame diff 不全为 0，触发延迟。若实测 menu 卡死仍超 10s，可加 perfect-duplicate hash bucket 检测。
+- [ ] **没在本 session 跑过端到端 capture**：commit `d826061` 之前的 auto-play 代码改动量大（runner.py 重排 / watchdog.py 简化），需要实机 F8/F9 走一轮验证 keep-alive driver + watchdog recovery 序列还能跑通
+- [ ] launch tab 的 `_btn_redo_survey` 在 `_on_run_started` 时 disabled，但若子进程异常崩溃没走 stopped 路径，按钮会卡 disabled —— 不影响功能，下个 session 可改成关联 `is_running` 而非 lifecycle 信号
+- [ ] dashboard 的 `_attack_led.set_steady("#ef6c00")` 在 recovery 进入时设橙色，但 `_on_recovery_active(False)` 没主动 reset，靠 attack pulse 自然覆盖（注释里写明了）—— 视觉上 OK，但若 recovery 后长期无 attack 注入会卡橙；要修就在 `_on_recovery_active(False)` 里 `set_steady("#444")`
+- [ ] PR 前需要更新 README（如果有的话）说明 GUI 入口
 
 ## Failed Approaches (Don't Repeat These)
 
-按时间顺序记录这一轮里**试过又回退**的修法 —— 都是真踩坑后才学到的。
-
-### 1. vlm 模式下 watchdog 咨询 main VLM driver 拿 recovery actions（已回退）
-
-**尝试**：`runner.py` 在 vlm 模式下把 `self._driver` 喂给 watchdog 当 `vlm_for_watchdog`，watchdog 触发时调 `_consult_vlm()` 拿定制 recovery actions（D 修法）。
-
-**实测失败**：vending machine 卡死场景下 log 显示 watchdog 触发后调 VLM call#4，**返回的 reasoning 跟 main loop 一样是 "walk forward"**。VLM 视觉判断**无法察觉物理碰撞**（看到机柜旁有路 → reason 走前方 → 物理被卡）。所以 watchdog 触发 = 真物理卡死时，VLM 拿同样画面输出同样 walk-forward = 等于没触发。
-
-**当前方案**：vlm 模式 `vlm_for_watchdog = None`，watchdog 直接走 deterministic `profile.recovery`（move_back + 4 连 turn + W）—— 不依赖 VLM 视觉判断的物理脱困序列。hybrid 模式保留 VLM consultant（keep_alive 主跑时它仍然有意义）。
-
-### 2. recovery 末尾按 ESC 兜底（已删）
-
-**尝试 v1**：recovery 头部 `ESC × 3` 退菜单（旧版 ff7r.yaml）。
-**尝试 v2**：移到末尾"单次 ESC + M"兜底。
-**尝试 v3**：缩成末尾仅 ESC。
-
-**实测失败**：watchdog 误触发是常态（local-only 静帧、UI-mask 假阳性、long-window 阈值掠过 0.04 等）。**ESC 在 FF7R gameplay 中 = 打开 Main Menu**。recovery 跑完末尾的 ESC 把 bot 从 gameplay 推进了菜单 → VLM 看到菜单按 M/ENTER 试退又退不掉 → 死循环。这一连锁灾难直接吞掉用户 4 分钟一次 session。
-
-**当前方案**：recovery 完全无 ESC。如果真进了菜单，由 main loop 的 VLM 看图决策处理。
-
-### 3. recovery 末尾按 M (`dismiss_ui`) 兜底（已删）
-
-**尝试**：删掉 ESC 之后保留末尾 `dismiss_ui (M) + wait` 当"轻量"兜底（M 比 ESC 副作用小）。
-
-**实测失败**（log 19:09:27 → 19:11:52，4 分钟死循环）：
-- watchdog long-window static `mean=0.0324` 在 normal gameplay 误触发
-- recovery 末尾 M 按下 → **打开 FF7R Map 副屏**
-- VLM 看到 Map（dark panel + options 视觉跟 Main Menu 类似）误识别为 fullscreen menu → reasoning "close with M"
-- 但 **FF7R Map 关闭键是 Tab 不是 M** → bot 反复按 M 4 分钟
-
-**当前方案**：recovery 100% 纯 movement，**绝不按任何 menu/UI/photo 相关键**（无 ESC、M、ENTER、Tab、Backspace、F1、F2）。教训：watchdog 误触发是常态，recovery 必须假定 "bot 还在 gameplay 中" 跑。
-
-### 4. NEAR-WALL turn 永远固定 right (mouse_dx=+700)
-
-**尝试**：第一版 NEAR-WALL OVERRIDE prompt 推荐 `dx 600+ 大幅 turn`，没指定方向。
-
-**实测失败**：log 显示 VLM 永远输出正值 (`+600`/`+700`)。FF7R 90° 墙角，连续右转 90° 后正好对着另一面墙 → 又触发 near-wall → 又右转 → 死循环。
-
-**当前方案**：`profiles/ff7r.yaml` 加 `TURN DIRECTION ALTERNATION` 规则强调左右交替；`vlm_driver.py` 通用 mouse turn example 把 default 从 `dx:+250 (look right)` 改 `dx:-250 (look left)` + 加 "Direction balance" 规则。
-
-### 5. watchdog 4 连 turn 之间没 wait
-
-**尝试**：早期 recovery 用连续 4 个 turn `payload: {direction: left, magnitude: 2.0}` 期望累积 180° 调头。
-
-**实测失败**：`keep_alive.py` mouse turn 是 `duration_ms=0` 的瞬时 SendInput pulse，4 次 SendInput 在 < 1ms 内全发完，**游戏一帧合并 mouse delta → 实际只转 1 次 (~60°)**。墙角转 60° 还是面墙。
-
-**当前方案**：每个 turn 后插 `wait 80ms`，让游戏每帧 sample 一次 mouse delta，4 次累积约 200°+ 真调头。
-
-### 6. UI-mask 臂阈值 `pixel=30 / ratio=0.20`（已大幅放宽）
-
-**尝试**：原始阈值假定 BackBuffer.bmp ⊖ BackBufferUI.bmp 的差异主要来自 UI 元素 → 20% 像素 max-channel diff > 30 就触发。
-
-**实测失败**：FF7R BackBuffer (Reinhard HDR→sRGB) vs BackBufferUI (游戏自家 tone-mapping) 整图色差 50%+ 是 normal gameplay 常态。30 分钟 session 17 次 watchdog 触发，**11 次是 UI-mask 假阳性**，每次串到 recovery 末尾 ESC（当时还没删）→ 推 bot 进菜单。
-
-**当前方案**：阈值改 `pixel=80 / ratio=0.70` —— 只触发清晰可见的 fullscreen menu (>70% 像素显著色差)。
-
-### 7. 首次 keep_alive sequence forward 占比 52%（已重写）
-
-**尝试**：原版 sequence `move_forward × 4 = 7300ms` 占 14000ms 周期 52%。
-
-**实测失败**：bot 频繁连冲 W 撞墙，截屏一帧定格死直对窗户/砖墙。
-
-**当前方案**：sequence 重写，forward 拆短（每段 0.8-1.2s）+ 每个移动段后强制 turn + strafe 拉到 1s + back 拆 2 段。forward 占比 32%，非 forward 移动占比 19% → 38%。
+- **`auto_play` flag QSettings 持久化坑**：早先尝试每次 GUI 启动都 force-set `auto_play=True` + `color=no-ui`（写死在 LaunchTab.__init__）。用户反对："auto_play,color等参数需要从保存的历史中恢复，而不是总是缺省值"。改回：只在 INI 没 saved key 时才 default True，已保存值优先。
+- **game-path 历史用 JSON string 存 QSettings**：第一版用 `json.dumps(hist)` 存单 key，但 IniFormat 对单 string 内含 `,` 或 `[` 等 JSON 元字符会抽风（特别是含 `\` 的 Windows 路径），导致多条历史合并成单串。**改用 `save_string_list`：每条独立编号 key**（`flags/launch/__game_path_history__/0`, `/1`, ...），完全绕开 list 序列化坑。`unicap_gui/shared/settings.py:save_string_list` / `load_string_list`。
+- **Auto-Play 辅助面板早期还显示 .env masked 值 + 改 .env / 重读 .env 按钮**：随 VLM driver 砍除一并删了，因为 `.env` 不再被任何代码读取。**不要重新加回这种 panel**——profile 选择已通过 form 里 `--profile` 行的 combo 解决。
+- **`--auto-play` 自动设 `--ui-mode=both`**：早先 main.py:cmd_launch 当 `auto_play=True` 时把 ui-mode 默认成 `both`（让 watchdog 看 post-UI BMP）。用户决定不再依赖 post-UI 流，所有视觉判断只用 `BackBuffer.png`（no-ui 流）。**watchdog 的读图路径已改为 skip `BackBufferUI`**，不要恢复 both 默认。
+- **dashboard 文字色 `#eaeaea`**：在浅色 Qt 主题下浅灰文字 + 浅色背景几乎看不见。**用 `palette(text)`** 跟随系统主题。
+- **QGroupBox checkable + setMaximumHeight 折叠**：原 AutoPlayPanel 用这个手法做折叠。Panel 已删，但模式留作参考——若将来要加 collapsible groupbox，注意 `setChecked(True)` 触发 `toggled` 信号但默认不会自动 hide children，要手动 `_on_toggle` 把 children setVisible + 调整 setMaximumHeight。
 
 ## Key Decisions
 
-| 决策 | 理由 |
-|------|------|
-| watchdog 触发走 deterministic profile.recovery，不咨询 VLM | VLM 视觉判断不识别物理碰撞；watchdog 已是真卡死信号，要 deterministic 物理序列，不要再问会犹豫的 VLM |
-| recovery 100% 纯 movement，不按任何 menu 键 | watchdog 误触发是常态，按任何 menu 键都自挖坑（ESC 开 Main Menu / M 开 Map / F1 开 Save / F2 开 Photo Mode） |
-| Multi-thread 协调用 `threading.Event` (`_recovery_active_evt`) | watchdog inject 序列期间 main loop + heartbeat 必须暂停，避免并发 W+S 互抵 |
-| `InputBackend.last_inject_at_mono` 字段 + runner heartbeat thread 凭它判断 | 替代方案是 InputBackend 内部加 callback，太侵入；fields 接口最小 |
-| Prompt-level prevention（rule 7b GATE）+ reactive escalation（rule 7c CYCLE）双管齐下 | 单层 prompt 容易被 VLM 抽风击穿，两层互补 |
-| 加 attack heartbeat thread 不依赖 VLM | 实测 35 ticks 0 次 click，VLM 不主动产 attack；dataset 训练需要 attack 样本，必须保底 |
-| `--capture-duration` 默认 30→60s | 60s/段更便于 ML batch 化，长跑无人值守需求 |
-| `verify_auto_play` `_neutralize_os_inputs()` monkey-patch | 测试不污染用户 active window 输入，但保留 lock + reserved-key check 等业务逻辑生效 |
+| Decision | Rationale |
+|----------|-----------|
+| 砍 VLM / hybrid driver | 用户明确：不再用 VLM 模式；keep-alive 足够长跑无人值守采集，无 API 费用 |
+| auto-play 视觉判断只看 no-ui 流 | post-UI BackBufferUI 与 pre-UI BackBuffer tone curve 不同，UI-mask arm 假阳性高（11/17 触发是 false positive 的真实 log）；no-ui 流 + OCR + 帧差已够 |
+| `--auto-play` 首次默认 True | 用户决定 GUI 缺省进 auto-play 状态（无人值守是主用例）；后续保存值优先 |
+| `--game-name` 删除 | 一直从 `game_exe.stem` 派生，flag 是历史遗留，无人显式用 |
+| Stop 按钮删除 | 停止子进程的两条路径（F9 + 关 GUI 窗口）已够用，big red Stop 是冗余 + 误触风险 |
+| game-path / profile 都用可编辑 QComboBox | 既允许用户从已知列表选，也允许手填新值（特别是 game-path，新游戏第一次接入需要手输路径） |
+| QSettings IniFormat 而非注册表 | 文件型存储好审计、好删（删 `unicap-gui.ini` 一键重置 GUI 状态） |
 
 ## Current State
 
 **Working**:
-- vlm 模式 watchdog → deterministic recovery（log `→ 注入 recovery (16 步)`）
-- vlm 模式 main loop 期间 background W heartbeat（log `[HEARTBEAT] silent=1.5s → 注入 W 1500ms`）
-- recovery 跑完不再开任何 menu（无 ESC / M / ENTER 注入）
-- VLM 应用 NEAR-WALL OVERRIDE（log reasoning `near wall ... back away and turn`）
-- VLM 输出 left-turn (`dx:-250` / `-300`) 而非永远右转
-- tick INFO log 详细显示每 tick 注入了哪些 actions
-- attack heartbeat thread 每 12s 注入 mouse_left（dataset 有 attack 样本）
+- GUI 启动通过 `uv run --with PySide6 python -m unicap_gui` 可起来；三 tab 能切换；表单值持久化到 `%APPDATA%\unicap-gui\unicap-gui.ini`
+- main.py CLI 仍可独立用：`uv run main.py launch [--auto-play] [--profile NAME]` 等不依赖 GUI
+- `import` sanity 全 pass（Qt 模块 + auto_play 包 + main.py）
+- 4 个 profile YAML schema 校验通过；`load_profile('ff7r')` OK
+- `auto-play` keep-alive driver + watchdog static-frame recovery + OCR arm + attack heartbeat —— 代码路径都在但本 session 没跑实机
 
-**Broken / Not yet validated** (等下次实跑确认):
-- Rule 7c DISMISS-KEY ESCALATION 实战效果未知（VLM 是否真按 M→TAB→BACKSPACE→ESC→ENTER cycle）
-- watchdog `consecutive_static_required 5`（10s）是否仍偶发误触发
+**Broken**: 无已知 broken。但见下方 "Edge Cases" 关于 attack_led recovery 状态。
 
-**Uncommitted Changes**: 无。working tree clean。
+**Uncommitted Changes**: 无（git clean，已 push）。最近 commit：`1bd49ad update`（Stop 删 + dataset-root default）→ `52e023c update`（Auto-Play 面板删 + profile combo）→ `d826061 feat(gui+auto-play): ...`（主要工作的合并 commit）。
 
 ## Files to Know
 
-| 文件 | 角色 |
-|------|------|
-| `tools/auto_play/runner.py` | main driver loop + background heartbeat thread + attack heartbeat thread + `_recovery_active_evt` 协调；多 thread 启停同步 |
-| `tools/auto_play/watchdog.py` | StaticFrameWatchdog 5 臂检测（short-window / local-only / long-window / UI-mask / OCR）+ `_trigger_recovery` try/finally set/clear 共享 event |
-| `tools/auto_play/vlm_driver.py` | OpenAI-compatible VLM client；`_SYSTEM_PROMPT_TEMPLATE` 含 rules 1-11（含本轮新加 7b GATE / 7c ESCALATION / 11 movement coverage）；Open exploration recipe 拆 70/30 |
-| `tools/auto_play/input_backend.py` | OS-level SendInput + vgamepad；`last_inject_at_mono` 字段供 heartbeat 检测 |
-| `tools/auto_play/ocr_detector.py` | Windows.Media.Ocr 包装 + `_DISMISS_PATTERNS` 正则（含 Confirm/OK/Accept/Proceed/Advance/Yes 中英文动词） |
-| `profiles/ff7r.yaml` | FF7R-specific config：keep_alive sequence (forward 占比 32%) + recovery (100% 纯 movement) + watchdog (5×2s=10s 触发) + vlm.game_instructions (NEAR-WALL OVERRIDE / TURN ALTERNATION / Fullscreen menu 默认 M) |
-| `scripts/verify_auto_play.py` | 44 项 capability + integration + offline E2E checks；顶部 `_neutralize_os_inputs()` 跑测试不污染 OS 输入 |
+| File | Why It Matters |
+|------|----------------|
+| `unicap_gui/app.py` | MainWindow + 三 tab 容器；tab 标签 / 字号 stylesheet 在这；`closeEvent` 处理 running subprocess 的 graceful stop |
+| `unicap_gui/tabs/base_tab.py` | 所有 tab 的公共骨架：FlagForm + CLIPreview + Start 按钮 + LogPane + splitter；子类用 `_wire_extra` 钩 dashboard |
+| `unicap_gui/tabs/launch_tab.py` | launch 子命令 tab：dashboard / F8/F9/重做 survey 按钮 / 启动前预检 / first-run auto_play=True |
+| `unicap_gui/tabs/video_tab.py` / `pack_tab.py` | 简单：用 BaseTab 默认布局即可 |
+| `unicap_gui/widgets/flag_form.py` | schema → 控件树；**game_path / profile 两个特判**（line ~131 / ~149）；`push_game_path_history` 公开 API |
+| `unicap_gui/widgets/cli_preview.py` | 等价 CLI 文本框 + 复制按钮 + Extra args |
+| `unicap_gui/widgets/dashboard.py` | launch tab 顶部状态条；palette-aware 文字色；ATK led 双语义（attack pulse + recovery 常亮橙） |
+| `unicap_gui/widgets/log_pane.py` | 子进程 stdout 实时 tail |
+| `unicap_gui/shared/cli_schema.py` | 所有 flag 数据驱动定义；改 main.py argparse 时**这里也要改** |
+| `unicap_gui/shared/settings.py` | QSettings IniFormat wrapper；含 `save_string_list` / `load_string_list`（path history 用） |
+| `unicap_gui/shared/process.py` | `SubprocessRunner`：起 main.py + 解析 stdout 抽 session_dir + CTRL_BREAK_EVENT 优雅停 |
+| `unicap_gui/shared/log_tailer.py` | 0.5s tail `auto_play.log` 抽 watchdog 触发 + ATK 信号 |
+| `tools/auto_play/runner.py` | `AutoPlayRunner`：keep-alive driver + watchdog + attack heartbeat 编排 |
+| `tools/auto_play/watchdog.py` | static-frame 检测：global / local / long-window 三 arm + OCR arm；`_trigger_recovery` 走 profile.recovery |
+| `tools/auto_play/profile.py` | YAML schema 校验；`GameProfile` 数据类（已去 vlm 字段） |
+| `main.py` | CLI 入口；`cmd_launch` 是核心 flow；`--auto-play` flag + 简化的 `_start_auto_play` |
+| `CLAUDE.md` | 项目级指导文档；auto-play 章节已重写 |
 
 ## Code Context
 
-### `_recovery_active_evt` 协调（核心同步原语）
+### FlagForm 的 game_path / profile 两个特判（`unicap_gui/widgets/flag_form.py`）
 
-`tools/auto_play/runner.py:152-157`：
 ```python
-# Shared "recovery in progress" event — watchdog sets while running
-# profile.recovery; main driver loop + heartbeat thread skip their own
-# injects while set.
-self._recovery_active_evt = threading.Event()
-self._watchdog = StaticFrameWatchdog(
-    ..., recovery_active_evt=self._recovery_active_evt,
-)
-```
+# game_path 用可编辑 combo + 历史下拉
+if spec.cli_key() == "game_path":
+    cb = QComboBox()
+    cb.setEditable(True)
+    cb.setInsertPolicy(QComboBox.NoInsert)
+    history = _load_path_history()
+    default_path = str(spec.default or "")
+    if default_path and default_path not in history:
+        history.append(default_path)
+        _save_path_history(history)
+    for p in history:
+        if p:
+            cb.addItem(p)
+    cb.setCurrentText(default_path)
+    cb.editTextChanged.connect(self._emit_changed)
+    return cb
 
-`tools/auto_play/watchdog.py:_trigger_recovery`：
-```python
-def _trigger_recovery(self, mean_diff, moved_ratio):
-    self._trigger_count += 1
-    self._recovery_active_evt.set()
+# profile 用可编辑 combo —— 扫 profiles/*.yaml 列出可选项 + 空项
+if spec.cli_key() == "profile":
+    cb = QComboBox()
+    cb.setEditable(True)
+    cb.setInsertPolicy(QComboBox.NoInsert)
+    cb.addItem("")  # 空 = 不传 --profile，按 exe 名 fuzzy match
     try:
-        # ... inject 18 步 recovery sequence ...
-    finally:
-        self._recovery_active_evt.clear()
+        from unicap_gui.shared.paths import profiles_dir
+        names = sorted(p.stem for p in profiles_dir().glob("*.yaml"))
+    except OSError:
+        names = []
+    for n in names:
+        cb.addItem(n)
+    cb.setCurrentText(str(spec.default or ""))
+    cb.editTextChanged.connect(self._emit_changed)
+    return cb
 ```
 
-`tools/auto_play/runner.py:_driver_loop`：
+### values_to_argv 的 path 类型特判（`unicap_gui/shared/cli_schema.py`）
+
 ```python
-while not self._stop_evt.is_set():
-    if self._recovery_active_evt.is_set():
-        self._stop_evt.wait(0.1)
-        continue
-    # ... call VLM + inject actions ...
+def values_to_argv(schema: SubcommandSchema, values: dict[str, Any]) -> list[str]:
+    """path 类型始终 emit（即便等于 spec.default —— 让预览自包含），其它仅含偏离默认值。"""
+    argv = []
+    for spec in schema.flags:
+        v = values.get(spec.cli_key(), spec.default)
+        if spec.kind == "path":
+            if v:
+                argv.extend([spec.name, str(v)])
+            continue
+        if is_default(spec, v):
+            continue
+        # ... store_true / bool_optional / choice / str / int / float ...
 ```
 
-`tools/auto_play/runner.py:_heartbeat_loop`：
+### LaunchTab 的 first-run auto_play 默认（`unicap_gui/tabs/launch_tab.py`）
+
 ```python
-while not self._stop_evt.is_set():
-    self._stop_evt.wait(self._heartbeat_check_s)
-    if self._recovery_active_evt.is_set():
-        continue   # yield to watchdog
-    silent = time.monotonic() - self._backend.last_inject_at_mono
-    if silent < 1.5: continue
-    self._backend.inject(self._heartbeat_action)  # W 1500ms
+def __init__(self, parent: QWidget | None = None) -> None:
+    super().__init__(LAUNCH, parent)
+    # auto_play 首次运行 default=True（INI 没保存过 auto_play key 的场景）。
+    # 已保存的值由 BaseTab._restore_settings 还原，这里不覆盖。
+    saved = gui_settings.load_flag_values("launch")
+    if "auto_play" not in saved:
+        self._form.set_values({"auto_play": True})
+        self._refresh_preview()
 ```
 
-`tools/auto_play/runner.py:_attack_heartbeat_loop`：同样 check `_recovery_active_evt`，每 12s 注入 mouse_left。
+### AutoPlayRunner 简化后的构造器（`tools/auto_play/runner.py`）
 
-### `--driver` 模式行为差异
-
-| 模式 | main loop | watchdog 触发后 | patrol thread | heartbeat thread | attack heartbeat |
-|------|-----------|-----------------|---------------|------------------|------------------|
-| `keep-alive` | 跑 profile.keep_alive.sequence | profile.recovery | 不启动 | 不启动 | **启动** |
-| `vlm` | 持续调 VLM 决策 | profile.recovery（**不**咨询 VLM） | 不启动 | 启动 | **启动** |
-| `hybrid` | 跑 profile.keep_alive.sequence | 优先咨询 VLM 拿定制 actions，fallback profile.recovery | 启动（每 12s VLM dismiss-only patrol） | 启动 | **启动** |
-
-### VLM JSON action schema（VLM 必须输出）
-
-```json
-{
-  "reasoning": "<one sentence>",
-  "actions": [
-    {"kind": "key", "payload": {"vk": "W", "event": "press"}, "duration_ms": 2500},
-    {"kind": "mouse", "payload": {"op": "move", "dx": -250, "dy": 0}, "duration_ms": 0},
-    {"kind": "mouse", "payload": {"op": "click", "button": "left"}, "duration_ms": 150}
-  ]
-}
+```python
+class AutoPlayRunner:
+    def __init__(
+        self,
+        profile: GameProfile,
+        frames_dir: Path,
+        debug: bool = False,
+        log_path: Path | None = None,
+    ) -> None:
+        # ... 4 个 driver-/vlm-相关参数都已去掉
+        self._driver: BotDriver = create_driver(profile)  # 永远 KeepAliveDriver
+        self._watchdog = StaticFrameWatchdog(
+            frames_dir=frames_dir, profile=profile, input_backend=self._backend,
+            log_path=log_path,
+            recovery_active_evt=self._recovery_active_evt,
+        )  # vlm_driver 参数删了
 ```
 
-`vk` 列表见 `input_backend.py:VK_MAP`（W/A/S/D/SPACE/ENTER/ESC/M/Tab/F1-F12/Backspace 等）。`event` 始终是 `"press"`，runner 持续按 `duration_ms` 后释放。
+### QSettings 落盘位置（`%APPDATA%\unicap-gui\unicap-gui.ini`）
 
-### tick log 格式（grep 用）
+```ini
+[window]
+size=@Size(1100 800)
 
-```
-[AUTO-PLAY] tick: vlm → 3 action(s) [key/W/2500ms mouse/move/-250,0 mouse/click/left/150ms]
-[HEARTBEAT] silent=1.5s → 注入 W 1500ms (heartbeat#3)
-[ATTACK-HB] 注入 attack#1 (period=12.0s)
-[WATCHDOG] long-window static (4s): long_mean=0.0324 long_moved=6.8% — 当作卡死
-[WATCHDOG] static-frame 触发 #1 mean=0.0324 moved=6.8% → 注入 recovery (16 步)
+[flags/launch]
+game_path=E:/games/ff7remake/End/Binaries/Win64/ff7remake_.exe
+ui_mode=no-ui
+auto_play=true
+color=no-ui
+__extra_args__=--auto-play-debug
+...
+
+[flags/launch/__game_path_history__]
+0=E:/games/ff7remake/.../ff7remake_.exe
+1=E:/games/Doom/...
 ```
 
 ## Resume Instructions
 
-1. **Sponsor 实跑下一轮 FF7R 验证**：
-   ```powershell
-   uv run main.py launch --auto-play --profile ff7r
-   ```
-   按 F8 开始采集，跑 ≥ 10 分钟覆盖：
-   - normal exploration（街道走动）
-   - 撞墙场景（Sector 5/7 巷道、机柜旁、墙角凹处）
-   - 偶发进 menu / popup（教程、Save dialog 等）
+### 启动 GUI 验证基础功能
 
-2. **关键观察点**（log `%TEMP%/unicap/auto_play.log`）：
+1. `uv sync --extra gui` 装 PySide6 依赖（首次）
+2. `uv run --with PySide6 python -m unicap_gui` 起来
+   - Expected: 1100×800 窗口，三 tab `采集 / 生成视频 / 打包`，缺省选中"采集"
+   - Expected: 采集 tab 顶部 "未连接" 灰色状态条，session/frames/elapsed 标签可见
+   - Expected: 表单 `--auto-play` checkbox 默认勾上（首次跑）；CLI preview 显示 `uv run main.py launch --game-path E:\... --dataset-root D:\unicap_output --auto-play`
+3. 点 game-path 下拉：应该看到 default `E:\games\ff7remake\...` 一项；点 浏览 选别的 exe → 推入历史 → 下拉变两项
+4. 点 profile 下拉：应该有 `""` / `_default` / `batman_ak` / `doom_eternal` / `ff7r` 五项
+5. 关窗 → 重启 → 表单值应该恢复（除 first-run 后 auto_play 由 saved 决定）
 
-   **A) 进菜单频率应大幅下降**（核心目标）
-   - 期望：grep `reasoning.*fullscreen menu\|reasoning.*Map\|reasoning.*Settings` 出现次数 ≤ 1-2 次/10min（之前 5-10 次/10min 正常）
-   - 失败信号：仍频繁 reasoning 菜单 → 可能 rule 7b GATE 不够强，需要往 prompt 加更具体反例（如"看到 'F1 Save' 字样不要按 F1"）
+### 验证端到端 capture（重要 —— 本 session 没做）
 
-   **B) 进了菜单 cycle 退出快**
-   - 期望：rule 7c ESCAPATION 触发，连续 5 个 tick 内 reasoning 出现不同 dismiss key（M → TAB → BACKSPACE → ESC → ENTER）
-   - 失败信号：连续 ≥ 4 个 tick 都按同一键 → VLM 不遵守 cycle，需要 runner-level 强制 escalation
+1. 启 GUI；填 `--game-path` 指向有效游戏 exe
+2. 点 Start → 子进程 main.py 应该起来 → 状态变绿"运行中（pid=N）"
+3. 在游戏内按 F8 → 状态条变绿 CAPTURING；frames 计数应该开始涨
+4. 等 60s（`--capture-duration` 默认）→ 应该自动 roll 到新 session；session link 切到新时间戳
+5. 按 F9 → 应该停止当前 capture 但 main.py 进程留着；状态回 IDLE
+6. 关 GUI 窗口 → MainWindow.closeEvent 弹模态确认 → Yes → main.py 收 CTRL_BREAK_EVENT 退出
+   - Expected: log pane 显示 `[unicap-gui] cmd: ...` + capture 进度行 + watchdog 触发计数（如有）
+   - If 子进程不退: 检查 SubprocessRunner.stop() 的 timeout（默认 5s）；可能游戏还卡着没释放 stdin
 
-   **C) recovery 期间 main loop / heartbeat 真的暂停**
-   - 期望：watchdog 触发 `→ 注入 recovery (16 步)` 后 7-8s 内**没有** `[AUTO-PLAY] tick:` 或 `[HEARTBEAT] 注入 W` 日志
-   - 失败信号：recovery 期间仍有 main loop tick 输出 → `_recovery_active_evt.is_set()` check 没生效
+### 验证 keep-alive driver + watchdog（无人值守 30 分钟测）
 
-   **D) attack heartbeat 实际产生攻击样本**
-   - 期望：`[ATTACK-HB] 注入 attack#N` 每 12s 出现一次
-   - 期望：tick log 偶尔含 `mouse/click/left/150ms`（VLM 自觉 + heartbeat 兜底）
+```powershell
+uv run main.py launch --auto-play --profile ff7r --capture-duration 60
+# 在游戏中按 F8，观察 console:
+#   [AUTO-PLAY] driver=keep-alive profile=ff7r gamepad=...
+#   [CAPTURE] 开始采集 → ...
+#   [AUTO-PLAY] tick: keep-alive → N action(s) [...]
+# 至少 30 分钟无干预，应该看到:
+#   [WATCHDOG] static-frame 触发 #N ... → 注入 recovery (5 步)  （若卡住）
+#   [ATTACK-HB] 注入 attack#N (period=12.0s)                  （每 12s 一次）
+# 不应该看到任何 [VLM-COST] / [PATROL] / [HEARTBEAT] 行（这些都已删）
+```
 
-   **E) VLM 真用 left-turn 抵消 right-bias**
-   - 期望：tick log mouse/move 的 dx 正负**比例接近 50/50**
-   - 失败信号：仍以 `+250 / +300` 为主 → prompt direction balance 没生效
+### 单测 / 静态检查
 
-3. **如果 cycle escalation 不可靠**（最可能的下一个工作项）：
-   - 在 `tools/auto_play/runner.py` 加 `_last_menu_keys: collections.deque[str](maxlen=3)` 字段
-   - main loop inject 后记录"这次 inject 中的 menu key"（M/ESC/ENTER/TAB/BACKSPACE）
-   - 下次 tick 前判断：deque 最近 2 次相同 → 强制把当前 actions 里的同 menu key 替换为 escalation 序列下一个
-   - 这是 runner-level 强制 cycle，不依赖 VLM 自觉
+```powershell
+# 1. 语法 & import
+uv run --with PySide6 python -c "import main; from tools.auto_play.runner import *; from unicap_gui.app import MainWindow"
 
-4. **如果 menu 卡死时间仍 > 30s**：
-   - 考虑 watchdog 加新臂：`frame-hash bucket` 检测 perfect duplicate（菜单内静止帧的 hash 一致）
-   - `tools/auto_play/watchdog.py` 加 `_HASH_HISTORY` deque，连续 N 帧 hash 相同 → 强制触发 recovery（绕过 frame diff 阈值）
+# 2. profile YAML schema
+uv run python -c "from tools.auto_play.profile import load_profile; [load_profile(n, fallback=False) for n in ['_default', 'batman_ak', 'doom_eternal', 'ff7r']]"
+
+# 3. cli_schema flag 数量（删 game-name + 5 个 vlm-* 后应该是 16）
+uv run python -c "from unicap_gui.shared.cli_schema import LAUNCH; print(len(LAUNCH.flags))"
+# Expected: 16
+```
 
 ## Setup Required
 
-跑 auto-play 前需要的环境：
-
-| 配置 | 用途 |
-|------|------|
-| `.env` 含 `VLM_API_KEY` / `VLM_BASE_URL` / `VLM_MODEL` | VLM driver 端点（默认 Qwen-VL via DashScope） |
-| ViGEmBus driver 装好（可选） | 启用虚拟手柄；不装也能跑（键鼠通道仍可用） |
-| `uv sync --extra auto-play-vlm` | 装 openai SDK + python-dotenv |
-| `uv sync --extra auto-play-ocr` | 装 winrt-* 5 件套（OCR 臂） |
-| `tools/capture/config.py` 改 `GAME_PATH` | 指向 ff7remake_.exe |
+- Windows 11（GUI 用 SendInput 发 F8/F9，仅 Windows 实现）
+- Python 3.13+ (`uv` 管依赖)
+- PySide6 ≥ 6.6（`uv sync --extra gui`）
+- ViGEm Bus 内核驱动（`auto-play` extra 用，不装会 fallback 键鼠）
+- 环境变量：无（`.env` / `VLM_*` 全删了）
 
 ## Edge Cases & Error Handling
 
-- **VLM_API_KEY 缺失**：`VLMDriver` 第一次 `next_actions()` 抛 `BudgetExhausted` → runner 自动降级 `KeepAliveDriver` 继续 capture
-- **ViGEm 缺失**：`InputBackend` 走"键鼠 fallback"分支 + warn 一次；profile.input.prefer_gamepad=true 也强制键鼠
-- **OCR 臂禁用**（winrt 缺失）：watchdog 仍跑其他 4 臂，OCR tick 永远 skip
-- **watchdog daemon thread join 超时**：log warn `[WATCHDOG] thread join 超时 (3.0s)`，runner 继续 stop（thread 是 daemon，进程退出会被回收）
-- **VLM 输出无 movement key**：tick-level 兜底追加 W 1500ms（`runner._driver_loop`）；额外 thread-level heartbeat 1.5s 静默后再补
-- **VLM 输出连续相同 menu key（如反复 M）**：当前依赖 prompt rule 7c 自觉 cycle —— 未做 runner-level 强制（见 Resume Instructions #3）
+- **subprocess 启动失败**：`SubprocessRunner.start` 抛异常 → BaseTab 不会更新状态条，Start 按钮卡 disabled
+  - 当前行为：log pane 应显示 error；用户需重启 GUI 或手动 `runner._on_subprocess_stopped(rc=-1)`
+  - 改进点：catch + 立即 emit stopped(rc=-1)
+- **auto-play 子进程崩**：runner.stop 通过 `_on_run_stopped` 回 detach dashboard；btn_redo_survey 重新 enabled
+  - If 没收到 stopped 信号（如 Python OOM kill），按钮卡 disabled —— 见 Not Yet Done
+- **profile 文件不存在**：FlagForm 行可手填任意 profile 名 → `_precheck_before_start` 弹模态拦截
+- **dataset-root 父目录不存在**：precheck 拦截
+- **game-path 文件不存在**：precheck 拦截
+- **关 GUI 时有 running 子进程**：MainWindow.closeEvent 弹模态确认 → Yes 走 `runner.stop(timeout=5s)` → 5s 内不退就遗留孤儿进程（main.py 自己的 ctrl_break handler 应该 catch；游戏进程不归 main.py 管）
+- **recovery 后 attack_led 卡橙**：`_on_recovery_active(False)` 没主动 reset led，靠下一次 attack pulse 自然覆盖；30 分钟无 attack 时视觉上有点怪 —— 见 Not Yet Done
 
 ## Warnings
 
-- **不要回退 recovery 移除 menu 键的设计**。已有 3 代踩坑（ESC×3 → 末尾 ESC → 末尾 M），每代都被实测推 bot 进菜单。recovery 必须 100% 纯 movement。
-- **不要在 vlm 模式重新喂 VLM consultant 给 watchdog**。VLM 视觉判断不识别物理碰撞，watchdog 触发咨询 VLM 拿到的是同样 walk-forward = 等于啥都没做。
-- **不要把 turn `payload.direction` 默认改回固定值**（如 `right`）。FF7R 90° 墙角同向 turn 累积只是从一面墙转到另一面墙。`random` 或 prompt-driven left-bias 都比固定方向好。
-- **`InputBackend.last_inject_at_mono` 是 read-only for outsiders**。只有 `InputBackend.inject()` 内部更新；runner heartbeat thread / watchdog 都是 read-only consumer。
-- **`_recovery_active_evt` 必须用 `try/finally` 配对 set/clear**。否则 watchdog 跑 recovery 中途异常会让 event 永远 set，main loop 永远 skip → bot 完全没动。
-- **`scripts/verify_auto_play.py` 的 `_neutralize_os_inputs()` 必须在 main() 头部调用**。它 monkey-patch module-level `_user32.SendInput` 和 `vgamepad`，必须在 InputBackend 任何实例化之前生效。
-- **`profiles/ff7r.yaml` recovery 别再加 dismiss_ui / press_key**。即使是"轻量兜底"也会推 bot 进菜单。要 dismiss 让 main loop 的 VLM 处理，不要写在 recovery 里。
+- **`unicap_gui/shared/cli_schema.py` 必须与 main.py argparse 同步**：加新 flag 时两边都要改，否则 GUI 不会显示 / 不会传到 CLI。建议改 main.py 时立刻 grep 一下 `cli_schema.py`。
+- **`.env` 已 git rm + .gitignore**：但 git 历史里仍有真实 API key（`sk-a629...` in commit `fb59f3c "update"`）。如果 repo 要公开，需要 `git filter-repo` 或 `bfg` 重写历史。当前是私 repo 暂未处理。
+- **`docs/designs/impact_20260507_pyqt-ui.md` / `testplan_20260507_pyqt-ui.md`** 是本 session 的设计 / 测试计划文档，已 commit。如果计划被推翻（如本 session 中 Auto-Play 辅助面板被删），这两文档可能与代码不完全一致 —— 文档作为快照，不是 spec。
+- **`.scratch/ui/` 含 smoke test 脚本 + requirements.md**：本 session 的开发草稿，已 commit 进来。下个 session 不需要修改这些；要做新功能开新目录 `.scratch/<feature>/`。
+- **`auto-play` 的 keep-alive 注入 vs 人类输入无差别**：`capture_all._thread_input` 用 `GetAsyncKeyState` / XInput 采集时无法区分；这是设计意图（数据集训练用）。不要试图 "过滤掉 bot 输入"。
+- **CLI preview 的 `--game-path` 总是显示**：这是 `values_to_argv` 对 `path` 类型的特判（始终 emit）。若想改成"等于 default 时省略"，要改 `cli_schema.py:values_to_argv` 但会让用户不知道实际跑哪个游戏的 exe。
+- **`Ctrl+C in console`** 退 main.py 时游戏进程不动 —— 这是 main.py 设计行为；GUI 关窗也是同样语义（CTRL_BREAK 让 main.py 优雅退）。
