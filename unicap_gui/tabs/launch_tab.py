@@ -1,6 +1,6 @@
 """LaunchTab —— launch 子命令。
 
-5b 范围：dashboard + F8/F9 镜像按钮 + redo survey + auto-play 子面板 + 启动前预检。
+dashboard + F8/F9 镜像按钮 + redo survey + 启动前预检。
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from unicap_gui.shared import sendinput
 from unicap_gui.shared import settings as gui_settings
 from unicap_gui.shared.cli_schema import LAUNCH
 from unicap_gui.tabs.base_tab import BaseTab
-from unicap_gui.widgets.auto_play_panel import AutoPlayPanel
 from unicap_gui.widgets.dashboard import LaunchDashboard
 
 
@@ -28,17 +27,12 @@ class LaunchTab(BaseTab):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(LAUNCH, parent)
 
-        # auto_play / color 等参数：尊重 QSettings 已保存的值（BaseTab._restore_settings
-        # 已经做完恢复）。仅在首次运行（INI 没 auto_play key）时把 auto_play 缺省成
-        # True，方便 novice 一上来 panel 就是勾上的。
+        # auto_play 首次运行 default=True（INI 没保存过 auto_play key 的场景）。
+        # 已保存的值由 BaseTab._restore_settings 还原，这里不覆盖。
         saved = gui_settings.load_flag_values("launch")
         if "auto_play" not in saved:
             self._form.set_values({"auto_play": True})
             self._refresh_preview()
-        # panel checkbox 同步 form 当前 auto_play 值（saved 优先，否则上一行的 True）
-        current = bool(self._form.values().get("auto_play", False))
-        self._auto_panel.setChecked(current)
-        self._auto_panel.toggled.connect(self._on_auto_panel_toggled)
 
     def _wire_extra(self) -> None:
         # ── dashboard 顶部 ────────────────────────────────────────────────
@@ -69,11 +63,6 @@ class LaunchTab(BaseTab):
         self._btn_f8 = btn_f8
         self._btn_f9 = btn_f9
         self._btn_redo_survey = btn_survey
-
-        # ── auto-play 辅助面板（放在参数区顶部 —— 与 flag form 一体）──────
-        self._auto_panel = AutoPlayPanel(self)
-        self._auto_panel.profile_selected.connect(self._on_profile_picked)
-        self._form_top_box.addWidget(self._auto_panel)
 
         # 子进程 lifecycle 钩到 dashboard
         self._runner.started.connect(self._on_run_started)
@@ -110,16 +99,6 @@ class LaunchTab(BaseTab):
         ok = sendinput.press_f9()
         msg = "已发送 F9" if ok else "F9 SendInput 失败（仅 Windows 支持）"
         self._log.append_line(f"[unicap-gui] {msg}")
-
-    def _on_profile_picked(self, name: str) -> None:
-        # 把下拉选的 profile name 写回 FlagForm 的 --profile
-        self._form.set_values({"profile": name})
-        self._refresh_preview()
-
-    def _on_auto_panel_toggled(self, checked: bool) -> None:
-        # panel 折叠/展开 = `--auto-play` 启用/关闭（语义合一）
-        self._form.set_values({"auto_play": checked})
-        self._refresh_preview()
 
     def _on_redo_survey(self) -> None:
         v = self._form.values()
@@ -179,7 +158,7 @@ class LaunchTab(BaseTab):
             if not yaml.exists():
                 problems.append(
                     f"profile 不存在：profiles/{prof}.yaml\n"
-                    f"（点 Auto-Play 辅助 → 刷新 重扫，或改成已存在的 profile 名）"
+                    f"（改成已存在的 profile 名，或留空让程序按 exe 名 fuzzy match）"
                 )
 
         if problems:

@@ -101,11 +101,6 @@ class BaseTab(QWidget):
         self._form_layout = QVBoxLayout(form_box)
         self._form_layout.setContentsMargins(0, 0, 0, 0)
         self._form_layout.setSpacing(6)
-        # 子类扩展位（panel 等放这里 —— 在 form 上方、与参数区一体）
-        self._form_top_box = QVBoxLayout()
-        self._form_top_box.setContentsMargins(0, 0, 0, 0)
-        self._form_top_box.setSpacing(4)
-        self._form_layout.addLayout(self._form_top_box)
         self._form_layout.addWidget(self._form, stretch=1)
         self._form_layout.addWidget(self._preview)
         self._form_layout.addLayout(ctrl)
@@ -136,7 +131,7 @@ class BaseTab(QWidget):
     # ── 子类 hook ────────────────────────────────────────────────────────
 
     def _wire_extra(self) -> None:
-        """子类在这里加 dashboard / auto_play_panel / session_tree 等扩展。"""
+        """子类在这里加 dashboard / session_tree 等扩展。"""
 
     def _precheck_before_start(self) -> tuple[bool, str]:
         """子类返回 (ok, reason)；ok=False 时弹模态拦截。"""

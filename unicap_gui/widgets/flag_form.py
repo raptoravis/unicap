@@ -146,6 +146,24 @@ class FlagForm(QScrollArea):
             cb.editTextChanged.connect(self._emit_changed)
             return cb
 
+        # profile 用可编辑 combo —— 扫 profiles/*.yaml 列出可选项 + 空项
+        # （留空让 main.py 按 exe 名 fuzzy match）
+        if spec.cli_key() == "profile":
+            cb = QComboBox()
+            cb.setEditable(True)
+            cb.setInsertPolicy(QComboBox.NoInsert)
+            cb.addItem("")  # 空 = 不传 --profile，按 exe 名 fuzzy match
+            try:
+                from unicap_gui.shared.paths import profiles_dir
+                names = sorted(p.stem for p in profiles_dir().glob("*.yaml"))
+            except OSError:
+                names = []
+            for n in names:
+                cb.addItem(n)
+            cb.setCurrentText(str(spec.default or ""))
+            cb.editTextChanged.connect(self._emit_changed)
+            return cb
+
         # str / path
         le = QLineEdit()
         le.setText(str(spec.default or ""))
