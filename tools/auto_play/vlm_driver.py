@@ -325,11 +325,24 @@ For `kind: "wait"` — payload is always `{}`; `duration_ms` is how long to paus
 
 ## State: "Open exploration" (HUD visible, character standing in environment)
 
+⚠️ **Attack-diversity rule**: roughly **every 3-5 ticks during exploration**, include a `mouse/click/left` as part of your action list, even when no enemy is on screen. The unicap dataset is for ML training and needs attack-action samples; pure walking-around produces a one-mode dataset that overfits the navigation policy. FF7R-specific: swinging the buster sword in empty air or against breakable crates / scenery is harmless, costs nothing, and produces real attack frames. Do NOT attack during Cutscene / Menu / Dialog states (rules 6/7/7b still apply).
+
+Two valid recipes — use the second one ~30% of ticks:
+
 ```
-{"reasoning":"open exploration, walk forward and look left (alternate dx sign each tick to counter right-bias)",
+// recipe 1 — pure exploration (~70% of ticks)
+{"reasoning":"open exploration, walk forward and look left",
  "actions":[
    {"kind":"key","payload":{"vk":"W","event":"press"},"duration_ms":2500},
    {"kind":"mouse","payload":{"op":"move","dx":-250,"dy":0},"duration_ms":0}
+ ]}
+
+// recipe 2 — exploration + attack diversity (~30% of ticks; produces attack samples)
+{"reasoning":"open exploration with attack diversity sample",
+ "actions":[
+   {"kind":"key","payload":{"vk":"W","event":"press"},"duration_ms":2000},
+   {"kind":"mouse","payload":{"op":"click","button":"left"},"duration_ms":150},
+   {"kind":"mouse","payload":{"op":"move","dx":250,"dy":0},"duration_ms":0}
  ]}
 ```
 

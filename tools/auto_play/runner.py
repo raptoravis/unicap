@@ -191,6 +191,20 @@ class AutoPlayRunner:
         self._heartbeat_silence_s = 1.5    # tolerable inject gap before bridging
         self._heartbeat_check_s = 0.5      # how often the heartbeat thread polls
 
+        # Attack-diversity heartbeat: VLM tends to never produce attack actions
+        # during exploration in early FF7R chapters (no enemies → never enters
+        # the Combat recipe), leaving the dataset with 0 attack-action samples.
+        # This separate thread injects a left-click every _attack_period_s so
+        # the dataset always has attack diversity, regardless of VLM output.
+        # Mapped from profile.controls.attack so non-FF7R games (gamepad, keys,
+        # different mouse buttons) work too.
+        attack_ctrl = self._profile.controls.get("attack")
+        self._attack_action: _Action | None = self._build_attack_action(
+            attack_ctrl
+        )
+        self._attack_period_s = 12.0       # one attack frame every ~12s
+        self._attack_thread: threading.Thread | None = None
+
     def start(self) -> None:
         if self._driver_thread is not None and self._driver_thread.is_alive():
             return
@@ -252,6 +266,20 @@ class AutoPlayRunner:
                 self._heartbeat_silence_s, self._heartbeat_check_s,
                 self._heartbeat_action.payload.get("vk"),
             )
+        # Attack-diversity heartbeat — runs in any driver mode, ensures the
+        # dataset has attack-action samples even if VLM never outputs click
+        # during empty exploration (early FF7R chapters with no enemies).
+        if self._attack_action is not None:
+            self._attack_thread = threading.Thread(
+                target=self._attack_heartbeat_loop, name="auto-play-attack-hb",
+                daemon=True,
+            )
+            self._attack_thread.start()
+            log.info(
+                "[ATTACK-HB] 启动 period=%.1fs action=%s",
+                self._attack_period_s,
+                f"{self._attack_action.kind}/{self._attack_action.payload}",
+            )
 
     def stop(self, timeout_s: float = 3.0) -> None:
         if self._stopped:
@@ -272,6 +300,11 @@ class AutoPlayRunner:
             if self._heartbeat_thread.is_alive():
                 log.warning("[HEARTBEAT] thread join 超时 (%.1fs)", timeout_s)
             self._heartbeat_thread = None
+        if self._attack_thread is not None:
+            self._attack_thread.join(timeout=timeout_s)
+            if self._attack_thread.is_alive():
+                log.warning("[ATTACK-HB] thread join 超时 (%.1fs)", timeout_s)
+            self._attack_thread = None
         if self._driver_thread is not None:
             self._driver_thread.join(timeout=timeout_s)
             if self._driver_thread.is_alive():
@@ -295,6 +328,67 @@ class AutoPlayRunner:
             and self._driver_thread.is_alive()
             and not self._stop_evt.is_set()
         )
+
+    @staticmethod
+    def _build_attack_action(ctrl) -> "Action | None":
+        """Translate profile.controls.attack ('mouse_left' / 'gamepad_X' /
+        'SPACE' / etc.) into an attack heartbeat Action, mirroring the
+        keep_alive `_press_control` resolver."""
+        from tools.auto_play.driver import Action as _Action
+        if ctrl is None:
+            return None
+        ctrl_str = str(ctrl)
+        if ctrl_str.startswith("mouse_"):
+            button = ctrl_str.split("_", 1)[1]
+            return _Action(
+                kind="mouse",
+                payload={"op": "click", "button": button},
+                duration_ms=150,
+            )
+        if ctrl_str.startswith("gamepad_"):
+            button = ctrl_str.split("_", 1)[1]
+            return _Action(
+                kind="gamepad",
+                payload={"op": "button", "button": button},
+                duration_ms=150,
+            )
+        return _Action(
+            kind="key",
+            payload={"vk": ctrl_str, "event": "press"},
+            duration_ms=150,
+        )
+
+    def _attack_heartbeat_loop(self) -> None:
+        """Background attack-diversity heartbeat. VLM tends to never click in
+        empty exploration → dataset ends up with 0 attack samples. This thread
+        injects profile.controls.attack every _attack_period_s.
+
+        Yields to watchdog while it's running profile.recovery (recovery is
+        pure movement and an attack mid-back-step would confuse the unstuck
+        sequence)."""
+        if self._attack_action is None:
+            return
+        attack_count = 0
+        # Stagger first attack so it doesn't fire at session start (bot may
+        # still be in loading screen / opening cinematic).
+        self._stop_evt.wait(self._attack_period_s)
+        while not self._stop_evt.is_set():
+            if self._recovery_active_evt.is_set():
+                self._stop_evt.wait(0.5)
+                continue
+            try:
+                self._backend.inject(self._attack_action)
+            except Exception as e:
+                log.warning("[ATTACK-HB] inject 异常: %s", e)
+                self._stop_evt.wait(self._attack_period_s)
+                continue
+            attack_count += 1
+            if attack_count <= 3 or attack_count % 10 == 0:
+                log.info(
+                    "[ATTACK-HB] 注入 attack#%d (period=%.1fs)",
+                    attack_count, self._attack_period_s,
+                )
+            self._stop_evt.wait(self._attack_period_s)
 
     def _heartbeat_loop(self) -> None:
         """Background heartbeat — bridges the 3-5s VLM-API gap. The main
