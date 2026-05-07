@@ -4,10 +4,12 @@
     [可选 顶部插槽 — dashboard / 状态条]
     [FlagForm scroll 区]
     [CLIPreview]
-    [Start / Stop 按钮 + status label]
+    [Start 按钮 + status label]
     [LogPane]
 
 子类加 dashboard / session_tree 时通过 add_top_widget() 插。
+停止子进程：launch tab 用 F9 终止当前 capture 会话；要彻底退 main.py 关 GUI 窗口
+（MainWindow.closeEvent 会向所有 running runner 发 CTRL_BREAK_EVENT）。
 """
 
 from __future__ import annotations
@@ -46,16 +48,11 @@ class BaseTab(QWidget):
         # CLI preview
         self._preview = CLIPreview(schema.name, self)
 
-        # 控制按钮（放大 + 着色，便于一眼看到）
+        # 启动按钮（放大 + 着色）。停止由 F9（launch tab）或关 GUI 窗口完成。
         self._btn_start = QPushButton("▶ Start")
-        self._btn_stop = QPushButton("■ Stop")
-        self._btn_stop.setEnabled(False)
         self._btn_start.clicked.connect(self._on_start_clicked)
-        self._btn_stop.clicked.connect(self._on_stop_clicked)
-
-        for btn in (self._btn_start, self._btn_stop):
-            btn.setMinimumHeight(44)
-            btn.setMinimumWidth(140)
+        self._btn_start.setMinimumHeight(44)
+        self._btn_start.setMinimumWidth(140)
         self._btn_start.setStyleSheet(
             "QPushButton {"
             " font-size: 16px; font-weight: 700;"
@@ -66,16 +63,6 @@ class BaseTab(QWidget):
             "QPushButton:hover { background: #388e3c; }"
             "QPushButton:disabled { background: #555; color: #bbb; border-color: #444; }"
         )
-        self._btn_stop.setStyleSheet(
-            "QPushButton {"
-            " font-size: 16px; font-weight: 700;"
-            " background: #c62828; color: white;"
-            " border: 1px solid #8e0000; border-radius: 6px;"
-            " padding: 6px 18px;"
-            "}"
-            "QPushButton:hover { background: #d32f2f; }"
-            "QPushButton:disabled { background: #555; color: #bbb; border-color: #444; }"
-        )
 
         self._status = QLabel("未运行")
         self._status.setStyleSheet("color: #888; font-size: 14px;")
@@ -83,7 +70,6 @@ class BaseTab(QWidget):
         ctrl = QHBoxLayout()
         ctrl.setSpacing(10)
         ctrl.addWidget(self._btn_start)
-        ctrl.addWidget(self._btn_stop)
         ctrl.addStretch(1)
         ctrl.addWidget(self._status)
 
@@ -167,13 +153,8 @@ class BaseTab(QWidget):
         self._log.append_separator(f"启动 {self._schema.name}")
         self._runner.start(self._schema.name, argv_tail)
 
-    def _on_stop_clicked(self) -> None:
-        self._log.append_line("[unicap-gui] 发送 CTRL_BREAK_EVENT…")
-        self._runner.stop()
-
     def _on_subprocess_started(self, cmd: list[str]) -> None:
         self._btn_start.setEnabled(False)
-        self._btn_stop.setEnabled(True)
         self._status.setText(f"运行中（pid={self._runner.pid()}）")
         self._status.setStyleSheet("color: #2e7d32; font-weight: bold;")
         self._log.append_line(f"[unicap-gui] cmd: {_format_cmd(cmd)}")
@@ -181,7 +162,6 @@ class BaseTab(QWidget):
 
     def _on_subprocess_stopped(self, rc: int) -> None:
         self._btn_start.setEnabled(True)
-        self._btn_stop.setEnabled(False)
         self._status.setText(f"已退出 rc={rc}")
         color = "#2e7d32" if rc == 0 else "#c62828"
         self._status.setStyleSheet(f"color: {color};")
