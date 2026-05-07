@@ -22,7 +22,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal
 
-from unicap_gui.shared.paths import main_py, python_for_subprocess
+from unicap_gui.shared.paths import cli_argv_prefix, repo_root
 
 log = logging.getLogger("unicap_gui.process")
 
@@ -87,14 +87,8 @@ class SubprocessRunner(QObject):
             self.error.emit("子进程已在运行，先 Stop 再 Start。")
             return
 
-        cmd: list[str] = [
-            python_for_subprocess(),
-            "-X", "utf8",               # PEP 540 UTF-8 mode：强制子进程 stdout 用 utf-8
-            "-u",                       # 兜底 line-buffer（main.py 已 reconfigure 但 -u 多一道）
-            str(main_py()),
-            subcommand,
-            *argv_tail,
-        ]
+        # frozen: [unicap.exe, subcommand, ...]；dev: [python, -X utf8, -u, main.py, subcommand, ...]
+        cmd: list[str] = [*cli_argv_prefix(), subcommand, *argv_tail]
 
         # 兜底环境变量：老 Python / 第三方库即便忽略 -X utf8 也按 PYTHONIOENCODING
         import os
@@ -103,7 +97,7 @@ class SubprocessRunner(QObject):
         try:
             self._proc = subprocess.Popen(
                 cmd,
-                cwd=str(main_py().parent),
+                cwd=str(repo_root()),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,   # 合流：所有输出走一个 pipe
                 bufsize=1,                  # 行缓冲（text mode 必需 1）

@@ -90,7 +90,9 @@ class CLIPreview(QWidget):
     # ── 内部 ──────────────────────────────────────────────────────────────
 
     def _refresh(self) -> None:
-        parts = ["uv", "run", "main.py", self._subcommand, *self._argv,
+        from unicap_gui.shared.paths import is_frozen
+        head = ["unicap.exe"] if is_frozen() else ["uv", "run", "main.py"]
+        parts = [*head, self._subcommand, *self._argv,
                  *self.extra_args_argv()]
         cmd = " ".join(_quote(p) for p in parts)
         self._preview.setPlainText(cmd)

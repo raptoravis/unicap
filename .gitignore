@@ -1,8 +1,15 @@
 build/
 # dist/
 dist-exe/
+dist-exe-gui/
 dist-exe-build/
+dist-exe-build-*/
+dist-exe-gui-build/
+dist-exe-gui-build-*/
 unicap-*.zip
+# build-time multidist entry copies (cleaned by build-exe.ps1)
+/unicap.py
+/unicap-gui.py
 *.user
 *.suo
 .vs/

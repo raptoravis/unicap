@@ -1,33 +1,41 @@
 #!/usr/bin/env pwsh
-# build-exe.ps1 — Nuitka standalone build of main.py.
-# 输出: dist-exe\unicap.exe (+ Python 运行时 + 资产文件夹).
+# build-exe.ps1 — Nuitka standalone build of unicap CLI + GUI.
+#
+# 输出（按 -Target 选择）:
+#   dist-exe/         CLI standalone (main.py → unicap.exe，不含 PySide6)
+#   dist-exe-gui/     GUI standalone (multidist → unicap-gui.exe + 包内 unicap.exe，含 PySide6)
 #
 # Usage:
-#   scripts\build-exe.ps1            # incremental build (use Nuitka cache)
-#   scripts\build-exe.ps1 -Clean     # delete dist-exe + Nuitka cache 全量重建
+#   scripts\build-exe.ps1                       # build all (cli + gui)
+#   scripts\build-exe.ps1 -Target cli           # 只 CLI
+#   scripts\build-exe.ps1 -Target gui           # 只 GUI
+#   scripts\build-exe.ps1 -Clean                # 清 dist-exe* + Nuitka cache 全量重建
 #
 # 依赖: uv + Nuitka (脚本会自动 uv add 一次)。
 # 构建期会调用 MSVC (cl.exe) — 需 VS 2022 已安装 (与 build.ps1 一致)。
 #
-# 为什么 standalone 而不是 onefile:
-#   onefile 的 bootloader 解压主 dll 到 %TEMP%，被 Windows Defender 标记为
-#   "potentially unwanted" 概率极高 (Nuitka 加壳特征 = 常见恶意软件签名)。
-#   standalone 把 dll 留在文件夹里, AV 容忍度好得多, 同时反破解强度不变 —
-#   unicap.exe 仍是 Python→C→机器码的 Nuitka 产物。
-#   分发: zip dist-exe\ 整个文件夹给最终用户。
+# 双产物设计：
+#   - CLI 包仅含 unicap.exe + 必要 runtime（cv2/numpy/h5py），体积小，纯命令行用户
+#   - GUI 包通过 Nuitka multidist 一次构建产出 unicap-gui.exe + unicap.exe，
+#     共享同一份 Python runtime + PySide6，GUI 进程启动时 spawn 包内 unicap.exe
+#   - 两个包独立，分发时按用户需求选一个；GUI 包自带 CLI 不必额外解压 CLI 包
 
 param(
-    [switch]$Clean
+    [switch]$Clean,
+    [ValidateSet('all', 'cli', 'gui')]
+    [string]$Target = 'all'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$root      = Split-Path $PSScriptRoot -Parent
-$outDir    = Join-Path $root "dist-exe"
-$buildDir  = Join-Path $root "dist-exe-build"   # Nuitka 中间产物
-$mainPy    = Join-Path $root "main.py"
-$pyproject = Join-Path $root "pyproject.toml"
+$root         = Split-Path $PSScriptRoot -Parent
+$cliOutDir    = Join-Path $root "dist-exe"
+$guiOutDir    = Join-Path $root "dist-exe-gui"
+$cliBuildDir  = Join-Path $root "dist-exe-build"
+$guiBuildDir  = Join-Path $root "dist-exe-gui-build"
+$mainPy       = Join-Path $root "main.py"
+$pyproject    = Join-Path $root "pyproject.toml"
 
 # ── 前置检查 ──────────────────────────────────────────────────────────────────
 $preflight = @(
@@ -50,7 +58,7 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($version)) {
     exit 1
 }
 $version = $version.Trim()
-Write-Host "Version: $version (来自 pyproject.toml)" -ForegroundColor Cyan
+Write-Host "Version: $version (来自 pyproject.toml) | Target: $Target" -ForegroundColor Cyan
 
 # ── Nuitka 安装检查 ───────────────────────────────────────────────────────────
 & uv run python -c "import nuitka" *>$null
@@ -60,9 +68,19 @@ if ($LASTEXITCODE -ne 0) {
     if ($LASTEXITCODE -ne 0) { Write-Host "[错误] uv add nuitka 失败" -ForegroundColor Red; exit 1 }
 }
 
+# GUI build 还需要 PySide6 在 venv 里（即便不带 --extra gui sync 的人也得跑得起 build）
+if ($Target -eq 'gui' -or $Target -eq 'all') {
+    & uv run python -c "import PySide6" *>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "PySide6 未安装（GUI build 需要），uv sync --extra gui…" -ForegroundColor Yellow
+        & uv sync --extra gui
+        if ($LASTEXITCODE -ne 0) { Write-Host "[错误] uv sync --extra gui 失败" -ForegroundColor Red; exit 1 }
+    }
+}
+
 # ── Clean 模式 ────────────────────────────────────────────────────────────────
 if ($Clean) {
-    foreach ($d in @($outDir, $buildDir)) {
+    foreach ($d in @($cliOutDir, $guiOutDir, $cliBuildDir, $guiBuildDir)) {
         if (Test-Path $d) {
             Write-Host "Removing $d" -ForegroundColor Yellow
             Remove-Item -Recurse -Force $d
@@ -75,126 +93,260 @@ if ($Clean) {
     }
 }
 
-# 中间目录每次重建 (避免 Nuitka 看到旧 main.dist 直接 reuse)
-if (Test-Path $buildDir) {
-    Remove-Item -Recurse -Force $buildDir
-}
-New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
-
-# ── Nuitka 构建 ───────────────────────────────────────────────────────────────
-# 反破解关键 flag:
-#   --standalone             生成自包含文件夹 (不嵌入到单 exe，避免 AV 误报)
-#   --lto=yes                LTO 优化, 函数边界模糊化
-#   --remove-output          删除中间 .build/ 目录, 不留 .c 源
-#   --no-pyi-file            不生成 .pyi 接口文件
-#   --assume-yes-for-downloads  自动下载 depends.exe (首次)
-
-Write-Host "`n构建 Nuitka standalone…" -ForegroundColor Green
-Write-Host "  中间: $buildDir\main.dist\" -ForegroundColor Gray
-Write-Host "  最终: $outDir\unicap.exe" -ForegroundColor Gray
-Write-Host "  首次构建可能耗时 5-10 分钟 (编译 cv2/numpy/h5py 适配层)" -ForegroundColor Gray
-
-Push-Location $root
-try {
-    & uv run python -m nuitka `
-        --standalone `
-        --assume-yes-for-downloads `
-        --lto=yes `
-        --remove-output `
-        --output-dir=$buildDir `
-        --output-filename=unicap.exe `
-        --include-package=tools `
-        --include-package=cv2 `
-        --include-package=h5py `
-        --include-package=numpy `
-        --include-data-dir=dist=dist `
-        --include-data-files=dist/dxgi.dll=dist/dxgi.dll `
-        --include-data-files=dist/UniCap64.dll=dist/UniCap64.dll `
-        --include-data-dir=shaders=shaders `
-        --include-data-dir=config=config `
-        --include-data-dir=profiles=profiles `
-        --include-data-files=pyproject.toml=pyproject.toml `
-        --product-name=unicap `
-        --file-version=$version `
-        --product-version=$version `
-        --file-description="unicap game capture pipeline" `
-        --company-name=unicap `
-        $mainPy
-    $code = $LASTEXITCODE
-} finally {
-    Pop-Location
-}
-
-if ($code -ne 0) {
-    Write-Host "`n[错误] Nuitka 构建失败 (exit $code)" -ForegroundColor Red
-    exit $code
-}
-
-# ── 整理产物：buildDir\main.dist\* → outDir\ ─────────────────────────────────
-$nuitkaDist = Join-Path $buildDir "main.dist"
-if (-not (Test-Path (Join-Path $nuitkaDist "unicap.exe"))) {
-    Write-Host "`n[错误] $nuitkaDist\unicap.exe 未生成 — 检查 Nuitka 输出" -ForegroundColor Red
-    exit 1
-}
-
-if (Test-Path $outDir) {
-    Remove-Item -Recurse -Force $outDir
-}
-Move-Item -Path $nuitkaDist -Destination $outDir
-Remove-Item -Recurse -Force $buildDir -ErrorAction SilentlyContinue
-
-# ── 校验关键资产 ──────────────────────────────────────────────────────────────
-$exe = Join-Path $outDir "unicap.exe"
-$required = @(
-    "dist\dxgi.dll",
-    "dist\UniCap64.dll",
-    "dist\UniCap64.json",
-    "dist\frame_capture.addon",
-    "shaders\DepthToAddon.fx",
-    "config\unicapPreset.ini",
-    "profiles\_default.yaml",
-    "profiles\ff7r.yaml"
-)
-$missing = @()
-foreach ($rel in $required) {
-    if (-not (Test-Path (Join-Path $outDir $rel))) { $missing += $rel }
-}
-if ($missing.Count -gt 0) {
-    Write-Host "`n[错误] 关键资产缺失（构建配置需修正）：" -ForegroundColor Red
-    $missing | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
-    exit 1
-}
-
-# ── 打包 zip 分发包 ───────────────────────────────────────────────────────────
-# zip 内顶级目录 = unicap-<version>/，解压不污染当前目录
-$staging = Join-Path $root "unicap-$version"
-$zip     = Join-Path $root "unicap-$version.zip"
-if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }
-if (Test-Path $zip)     { Remove-Item -Force $zip }
-
-Write-Host "`n打包分发 zip…" -ForegroundColor Cyan
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-Move-Item -Path $outDir -Destination $staging
-try {
-    [System.IO.Compression.ZipFile]::CreateFromDirectory(
-        $staging, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $true
+# ── 公共：编译产物 → 分发 zip ─────────────────────────────────────────────────
+function Pack-Distribution {
+    param(
+        [Parameter(Mandatory)] [string] $OutDir,     # dist-exe / dist-exe-gui
+        [Parameter(Mandatory)] [string] $StagingName # unicap-cli-1.0.7 / unicap-gui-1.0.7
     )
-} finally {
-    # 还原 dist-exe/ 目录，方便就地运行
-    Move-Item -Path $staging -Destination $outDir
+    $staging = Join-Path $root $StagingName
+    $zip     = Join-Path $root "$StagingName.zip"
+    if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }
+    if (Test-Path $zip)     { Remove-Item -Force $zip }
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    Move-Item -Path $OutDir -Destination $staging
+    try {
+        [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            $staging, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $true
+        )
+    } finally {
+        # 还原产物目录，方便就地运行
+        Move-Item -Path $staging -Destination $OutDir
+    }
+    return $zip
 }
 
-# ── 报告 ──────────────────────────────────────────────────────────────────────
-$exeMB    = [math]::Round((Get-Item $exe).Length / 1MB, 1)
-$totalMB  = [math]::Round(((Get-ChildItem $outDir -Recurse | Measure-Object -Property Length -Sum).Sum) / 1MB, 1)
-$fileCnt  = (Get-ChildItem $outDir -Recurse -File).Count
-$zipMB    = [math]::Round((Get-Item $zip).Length / 1MB, 1)
+# ── CLI build ─────────────────────────────────────────────────────────────────
+function Build-Cli {
+    Write-Host "`n========== CLI build ==========" -ForegroundColor Magenta
 
-Write-Host "`n构建成功 ✓" -ForegroundColor Green
-Write-Host "  unicap.exe: $exeMB MB" -ForegroundColor White
-Write-Host "  总大小:     $totalMB MB ($fileCnt 个文件)" -ForegroundColor White
-Write-Host "  位置:       $outDir\" -ForegroundColor White
-Write-Host "  分发包:     $zip ($zipMB MB)" -ForegroundColor White
-Write-Host "  关键资产:   ✓ dxgi.dll / UniCap64.dll+json / frame_capture.addon / shaders / config" -ForegroundColor Green
-Write-Host "`n分发: 直接发 unicap-$version.zip。" -ForegroundColor Cyan
-Write-Host "运行: $exe launch --help" -ForegroundColor Cyan
+    # 中间目录每次重建（避免 Nuitka 看到旧 dist 直接 reuse）
+    if (Test-Path $cliBuildDir) { Remove-Item -Recurse -Force $cliBuildDir }
+    New-Item -ItemType Directory -Force -Path $cliBuildDir | Out-Null
+
+    Write-Host "构建 Nuitka standalone (CLI)…" -ForegroundColor Green
+    Write-Host "  中间: $cliBuildDir\main.dist\" -ForegroundColor Gray
+    Write-Host "  最终: $cliOutDir\unicap.exe" -ForegroundColor Gray
+
+    Push-Location $root
+    try {
+        & uv run python -m nuitka `
+            --standalone `
+            --assume-yes-for-downloads `
+            --lto=yes `
+            --remove-output `
+            --output-dir=$cliBuildDir `
+            --output-filename=unicap.exe `
+            --include-package=tools `
+            --include-package=cv2 `
+            --include-package=h5py `
+            --include-package=numpy `
+            --include-data-dir=dist=dist `
+            --include-data-files=dist/dxgi.dll=dist/dxgi.dll `
+            --include-data-files=dist/UniCap64.dll=dist/UniCap64.dll `
+            --include-data-dir=shaders=shaders `
+            --include-data-dir=config=config `
+            --include-data-dir=profiles=profiles `
+            --include-data-files=pyproject.toml=pyproject.toml `
+            --product-name=unicap `
+            --file-version=$version `
+            --product-version=$version `
+            --file-description="unicap game capture pipeline" `
+            --company-name=unicap `
+            $mainPy
+        $code = $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
+    if ($code -ne 0) {
+        Write-Host "`n[错误] Nuitka CLI 构建失败 (exit $code)" -ForegroundColor Red
+        exit $code
+    }
+
+    # 整理产物
+    $nuitkaDist = Join-Path $cliBuildDir "main.dist"
+    if (-not (Test-Path (Join-Path $nuitkaDist "unicap.exe"))) {
+        Write-Host "[错误] $nuitkaDist\unicap.exe 未生成" -ForegroundColor Red
+        exit 1
+    }
+    if (Test-Path $cliOutDir) { Remove-Item -Recurse -Force $cliOutDir }
+    Move-Item -Path $nuitkaDist -Destination $cliOutDir
+    Remove-Item -Recurse -Force $cliBuildDir -ErrorAction SilentlyContinue
+
+    # 校验关键资产
+    $required = @(
+        "unicap.exe",
+        "dist\dxgi.dll", "dist\UniCap64.dll", "dist\UniCap64.json", "dist\frame_capture.addon",
+        "shaders\DepthToAddon.fx",
+        "profiles\_default.yaml", "profiles\ff7r.yaml"
+    )
+    $missing = @()
+    foreach ($rel in $required) {
+        if (-not (Test-Path (Join-Path $cliOutDir $rel))) { $missing += $rel }
+    }
+    if ($missing.Count -gt 0) {
+        Write-Host "[错误] CLI 关键资产缺失：" -ForegroundColor Red
+        $missing | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+        exit 1
+    }
+
+    $zipPath = Pack-Distribution -OutDir $cliOutDir -StagingName "unicap-cli-$version"
+
+    $exeMB    = [math]::Round((Get-Item (Join-Path $cliOutDir "unicap.exe")).Length / 1MB, 1)
+    $totalMB  = [math]::Round(((Get-ChildItem $cliOutDir -Recurse | Measure-Object -Property Length -Sum).Sum) / 1MB, 1)
+    $fileCnt  = (Get-ChildItem $cliOutDir -Recurse -File).Count
+    $zipMB    = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
+    Write-Host "`nCLI 构建成功 ✓" -ForegroundColor Green
+    Write-Host "  unicap.exe: $exeMB MB" -ForegroundColor White
+    Write-Host "  总大小:     $totalMB MB ($fileCnt 个文件)" -ForegroundColor White
+    Write-Host "  位置:       $cliOutDir\" -ForegroundColor White
+    Write-Host "  分发包:     $zipPath ($zipMB MB)" -ForegroundColor White
+}
+
+# ── GUI build (multidist: unicap.exe + unicap-gui.exe) ────────────────────────
+function Build-Gui {
+    Write-Host "`n========== GUI build (multidist) ==========" -ForegroundColor Magenta
+
+    # buildDir 可能被 antivirus / explorer 持锁导致 Remove 失败 → 改用 timestamp 后缀。
+    # 旧目录留在磁盘上不影响新 build；下次 -Clean 一并清理。
+    $localBuildDir = $guiBuildDir
+    if (Test-Path $localBuildDir) {
+        try {
+            Remove-Item -Recurse -Force $localBuildDir -ErrorAction Stop
+        } catch {
+            $stamp = Get-Date -Format 'yyyyMMddHHmmss'
+            $localBuildDir = "$guiBuildDir-$stamp"
+            Write-Host "[警告] 旧 buildDir 被锁，改用 $localBuildDir" -ForegroundColor Yellow
+        }
+    }
+    New-Item -ItemType Directory -Force -Path $localBuildDir | Out-Null
+
+    # multidist 按文件 basename 命名 exe — 必须让源文件叫 unicap.py / unicap-gui.py
+    # 这俩是 build-time temp 文件（gitignored），出口在 finally 删
+    $cliEntry = Join-Path $root "unicap.py"
+    $guiEntry = Join-Path $root "unicap-gui.py"
+
+    Copy-Item -Path $mainPy -Destination $cliEntry -Force
+
+    @"
+"""multidist GUI entry — Nuitka 将其编译为 unicap-gui.exe（与 unicap.exe 共享 runtime）。"""
+from unicap_gui.__main__ import main
+import sys
+sys.exit(main())
+"@ | Set-Content -Path $guiEntry -Encoding utf8
+
+    Write-Host "构建 Nuitka multidist standalone (CLI + GUI 共享 runtime)…" -ForegroundColor Green
+    Write-Host "  中间: $localBuildDir\unicap.dist\" -ForegroundColor Gray
+    Write-Host "  最终: $guiOutDir\{unicap.exe,unicap-gui.exe}" -ForegroundColor Gray
+    Write-Host "  首次构建 PySide6 + cv2/numpy/h5py 编译可能 10-15 分钟" -ForegroundColor Gray
+
+    Push-Location $root
+    try {
+        & uv run python -m nuitka `
+            --standalone `
+            --assume-yes-for-downloads `
+            --lto=yes `
+            --remove-output `
+            --output-dir=$localBuildDir `
+            --enable-plugin=pyside6 `
+            --include-package=tools `
+            --include-package=unicap_gui `
+            --include-package=cv2 `
+            --include-package=h5py `
+            --include-package=numpy `
+            --include-package=PySide6 `
+            --include-data-dir=dist=dist `
+            --include-data-files=dist/dxgi.dll=dist/dxgi.dll `
+            --include-data-files=dist/UniCap64.dll=dist/UniCap64.dll `
+            --include-data-dir=shaders=shaders `
+            --include-data-dir=config=config `
+            --include-data-dir=profiles=profiles `
+            --include-data-files=pyproject.toml=pyproject.toml `
+            --product-name=unicap `
+            --file-version=$version `
+            --product-version=$version `
+            --file-description="unicap game capture pipeline (GUI bundle)" `
+            --company-name=unicap `
+            --main=$cliEntry `
+            --main=$guiEntry
+        $code = $LASTEXITCODE
+    } finally {
+        Pop-Location
+        Remove-Item -Path $cliEntry, $guiEntry -ErrorAction SilentlyContinue
+    }
+    if ($code -ne 0) {
+        Write-Host "`n[错误] Nuitka GUI 构建失败 (exit $code)" -ForegroundColor Red
+        exit $code
+    }
+
+    # multidist：dist 目录用第一个 main 的名字 (unicap.dist)
+    # Nuitka 4.0.8 实际只产出单 binary unicap.exe — 它内嵌所有 main，
+    # 运行时用 argv[0] basename 分发。复制一份重命名为 unicap-gui.exe，
+    # 双 exe 共享 Python runtime，启动时各自走对应 entry。
+    $nuitkaDist = Join-Path $localBuildDir "unicap.dist"
+    $multidistExe = Join-Path $nuitkaDist "unicap.exe"
+    if (-not (Test-Path $multidistExe)) {
+        Write-Host "[错误] $multidistExe 未生成" -ForegroundColor Red
+        exit 1
+    }
+    Copy-Item -Path $multidistExe -Destination (Join-Path $nuitkaDist "unicap-gui.exe") -Force
+    if (Test-Path $guiOutDir) {
+        try {
+            Remove-Item -Recurse -Force $guiOutDir -ErrorAction Stop
+        } catch {
+            $stamp = Get-Date -Format 'yyyyMMddHHmmss'
+            Rename-Item -Path $guiOutDir -NewName "$(Split-Path -Leaf $guiOutDir).old-$stamp" -ErrorAction SilentlyContinue
+            if (Test-Path $guiOutDir) {
+                Write-Host "[错误] 旧 $guiOutDir 被锁，无法清理。请关闭 Explorer 等占用进程后重试。" -ForegroundColor Red
+                exit 1
+            }
+        }
+    }
+    Move-Item -Path $nuitkaDist -Destination $guiOutDir
+    Remove-Item -Recurse -Force $localBuildDir -ErrorAction SilentlyContinue
+
+    # 校验关键资产
+    $required = @(
+        "unicap.exe", "unicap-gui.exe",
+        "dist\dxgi.dll", "dist\UniCap64.dll", "dist\UniCap64.json", "dist\frame_capture.addon",
+        "shaders\DepthToAddon.fx",
+        "profiles\_default.yaml", "profiles\ff7r.yaml"
+    )
+    $missing = @()
+    foreach ($rel in $required) {
+        if (-not (Test-Path (Join-Path $guiOutDir $rel))) { $missing += $rel }
+    }
+    if ($missing.Count -gt 0) {
+        Write-Host "[错误] GUI 关键资产缺失：" -ForegroundColor Red
+        $missing | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+        exit 1
+    }
+
+    $zipPath = Pack-Distribution -OutDir $guiOutDir -StagingName "unicap-gui-$version"
+
+    $cliExeMB = [math]::Round((Get-Item (Join-Path $guiOutDir "unicap.exe")).Length / 1MB, 1)
+    $guiExeMB = [math]::Round((Get-Item (Join-Path $guiOutDir "unicap-gui.exe")).Length / 1MB, 1)
+    $totalMB  = [math]::Round(((Get-ChildItem $guiOutDir -Recurse | Measure-Object -Property Length -Sum).Sum) / 1MB, 1)
+    $fileCnt  = (Get-ChildItem $guiOutDir -Recurse -File).Count
+    $zipMB    = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
+    Write-Host "`nGUI 构建成功 ✓" -ForegroundColor Green
+    Write-Host "  unicap.exe:     $cliExeMB MB (multidist 第一入口)" -ForegroundColor White
+    Write-Host "  unicap-gui.exe: $guiExeMB MB (multidist 第二入口)" -ForegroundColor White
+    Write-Host "  总大小:         $totalMB MB ($fileCnt 个文件，含 PySide6)" -ForegroundColor White
+    Write-Host "  位置:           $guiOutDir\" -ForegroundColor White
+    Write-Host "  分发包:         $zipPath ($zipMB MB)" -ForegroundColor White
+}
+
+# ── 主流程 ────────────────────────────────────────────────────────────────────
+if ($Target -eq 'cli' -or $Target -eq 'all') { Build-Cli }
+if ($Target -eq 'gui' -or $Target -eq 'all') { Build-Gui }
+
+Write-Host "`n全部构建完成 ✓" -ForegroundColor Green
+Write-Host "分发：" -ForegroundColor Cyan
+if ($Target -eq 'cli' -or $Target -eq 'all') {
+    Write-Host "  - unicap-cli-$version.zip   （仅 CLI，体积小）" -ForegroundColor Cyan
+}
+if ($Target -eq 'gui' -or $Target -eq 'all') {
+    Write-Host "  - unicap-gui-$version.zip   （GUI + 内嵌 CLI，self-contained）" -ForegroundColor Cyan
+}
