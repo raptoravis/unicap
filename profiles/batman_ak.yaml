@@ -52,12 +52,3 @@ watchdog:
   sample_period_s: 5.0
   static_diff_threshold: 0.01
   consecutive_static_required: 2
-
-vlm:
-  game_instructions: |
-    Batman: Arkham Knight (Unreal Engine 3 fork / DX11). Open-world action.
-    WASD moves Batman; mouse turns camera. Left-click attacks; right-click
-    counters. Space launches grapple/cape glide. E interacts.
-    Goal: explore Gotham; keep moving; engage thugs as encountered.
-    Avoid the Riddler trophy menus. ESC exits menus.
-  frame_subsample_long_edge: 512

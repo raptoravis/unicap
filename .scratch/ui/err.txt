@@ -1,0 +1,9 @@
+D:\dev\unicap.git\unicap_gui\shared\process.py:188: ResourceWarning: unclosed file <_io.TextIOWrapper name=3 encoding='utf-8'>
+  self._reader = None
+Object allocated at (most recent call last):
+  File "D:\dev\unicap.git\.scratch\ui\smoke_runner.py", lineno 33
+    runner.start("--version", [])
+  File "D:\dev\unicap.git\unicap_gui\shared\process.py", lineno 99
+    self._proc = subprocess.Popen(
+  File "C:\Users\Admin\AppData\Roaming\uv\python\cpython-3.13-windows-x86_64-none\Lib\subprocess.py", lineno 1031
+    self.stdout = io.TextIOWrapper(self.stdout,

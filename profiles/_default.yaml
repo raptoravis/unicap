@@ -55,11 +55,3 @@ watchdog:
   sample_period_s: 5.0
   static_diff_threshold: 0.01    # 平均像素 diff（归一化 0-1）
   consecutive_static_required: 2
-
-vlm:
-  game_instructions: |
-    Generic action game. WASD moves the character relative to the camera.
-    Mouse aims/looks. Left-click attacks. E interacts. Space jumps.
-    Goal: keep the character moving in the world; explore and engage simple enemies.
-    Avoid menus and cutscenes.
-  frame_subsample_long_edge: 512

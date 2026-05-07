@@ -15,9 +15,8 @@ from typing import TYPE_CHECKING, Any
 import cv2
 import numpy as np
 
-from tools.auto_play.driver import Action, Observation
+from tools.auto_play.driver import Action
 from tools.auto_play.keep_alive import step_to_actions
-from tools.auto_play.vlm_driver import BudgetExhausted
 
 try:
     from tools.auto_play import ocr_detector
@@ -27,7 +26,6 @@ except Exception:  # pragma: no cover — defensive: ocr_detector itself imports
 if TYPE_CHECKING:
     from tools.auto_play.input_backend import InputBackend
     from tools.auto_play.profile import GameProfile
-    from tools.auto_play.vlm_driver import VLMDriver
 
 
 log = logging.getLogger("unicap.auto_play")
@@ -62,32 +60,9 @@ class StaticFrameWatchdog:
     _LONG_WINDOW_MEAN_CAP = 0.04     # mean diff vs N-old frame
     _LONG_WINDOW_RATIO_CAP = 0.30    # moved-pixel ratio vs N-old frame
 
-    # UI-mask arm: when --ui-mode=both, BackBufferUI.png (post-UI) ⊖
-    # BackBuffer.png (pre-UI) yields a per-pixel "is this a UI overlay" mask.
-    # Frame-diff arms can't classify split-screen tutorial popups (left half
-    # live game animates, right half popup GIF animates) — but the spatial
-    # ratio of UI pixels is unambiguous (popup covers ~30-50% of screen,
-    # normal HUD covers ~5-10%, fullscreen menu 70%+). Trigger when overlay
-    # is large enough to plausibly block gameplay AND persists across samples.
-    #
-    # ⚠️ Threshold tuning history: original 30/0.20 was too loose for FF7R —
-    # BackBuffer (pre-UI scene RT decoded HDR float→sRGB via Reinhard) and
-    # BackBufferUI (post-UI BackBuffer with the game's own tone-mapping) have
-    # different tone curves, so even a frame with no UI overlay shows ~50%+
-    # of pixels with per-channel diff > 30. Real-world log: 11 of 17 watchdog
-    # triggers in a 30-min session were UI-mask false positives during normal
-    # gameplay (VLM concurrently confirmed "gameplay state with HUD visible").
-    # Each false positive cascaded into menu-loop death spirals via the old
-    # ESC × 3 recovery head. Bumped to 80 / 0.70 — only fires on clear
-    # fullscreen-menu-grade overlays (dark panel covering most of the screen).
-    _UI_MASK_PIXEL_THRESHOLD = 80          # per-channel max diff to count as UI
-    _UI_MASK_RATIO_TRIGGER = 0.70          # ≥70% UI pixels = clear fullscreen menu
-    _UI_MASK_CONSECUTIVE = 2               # × sample_period_s = persist time
-
     # OCR arm: every N samples, run Windows.Media.Ocr on the latest frame and
     # check for explicit dismiss-prompt text ("M Back" / "ESC Close" / etc.).
-    # When matched, inject the key directly (OCR's match is ground-truth-ish;
-    # bypass VLM to save latency/cost). Sampled less often than other arms
+    # When matched, inject the key directly. Sampled less often than other arms
     # because OCR costs 100-500ms CPU.
     _OCR_SAMPLE_INTERVAL = 4               # × sample_period_s ≈ 8s
 
@@ -97,27 +72,18 @@ class StaticFrameWatchdog:
         profile: "GameProfile",
         input_backend: "InputBackend",
         log_path: Path | None = None,
-        vlm_driver: "VLMDriver | None" = None,
         recovery_active_evt: "threading.Event | None" = None,
     ) -> None:
         self._frames_dir = frames_dir
         self._profile = profile
         self._backend = input_backend
         self._log_path = log_path
-        # Optional VLM consultant. When set, _trigger_recovery asks the VLM for
-        # actions before falling back to profile.recovery — this is the "hybrid"
-        # driver mode: keep_alive runs the main loop cheap and fast; VLM only
-        # weighs in on the rare static-frame events ("the bot got stuck, what
-        # do you see?"). On BudgetExhausted we permanently disable VLM and use
-        # profile.recovery for the rest of the session.
-        self._vlm_driver = vlm_driver
-        self._vlm_disabled = False
         # Cross-thread "recovery in progress" flag. While set, the main driver
-        # loop and heartbeat thread skip their own inject calls so they don't
-        # collide with the recovery sequence (e.g. watchdog wants S 1500ms
-        # back-step, main loop simultaneously injects W 2500ms — they cancel).
-        # The runner constructs the Event and passes it to both watchdog and
-        # the loops; watchdog sets/clears around _trigger_recovery.
+        # loop skips its own inject calls so it doesn't collide with the
+        # recovery sequence (e.g. watchdog wants S 1500ms back-step, main loop
+        # simultaneously injects W 2500ms — they cancel). The runner constructs
+        # the Event and passes it to both watchdog and the loop; watchdog
+        # sets/clears around _trigger_recovery.
         self._recovery_active_evt = recovery_active_evt or threading.Event()
 
         wd_cfg = profile.watchdog
@@ -136,8 +102,6 @@ class StaticFrameWatchdog:
         self._frame_history: collections.deque = collections.deque(
             maxlen=self._LONG_WINDOW_SAMPLES,
         )
-        # UI-mask arm consecutive trigger counter.
-        self._ui_mask_consecutive = 0
         # OCR arm sample counter (mod _OCR_SAMPLE_INTERVAL).
         self._ocr_tick_counter = 0
 
@@ -241,37 +205,10 @@ class StaticFrameWatchdog:
                     self._frame_history.clear()
                     continue
 
-            # UI-mask arm — only fires under --ui-mode=both (needs both pre-UI
-            # BackBuffer.png AND post-UI BackBufferUI.png at the same frame).
-            # Pair lookup returns (None, None) when one or both missing → arm
-            # silently disabled (no warning, no trigger).
-            bb_img, ui_img = self._read_latest_pair()
-            if bb_img is not None and ui_img is not None \
-                    and bb_img.shape == ui_img.shape:
-                ui_diff = np.abs(
-                    bb_img.astype(np.int16) - ui_img.astype(np.int16)
-                ).max(axis=2)
-                ui_mask_ratio = float(
-                    (ui_diff > self._UI_MASK_PIXEL_THRESHOLD).mean()
-                )
-                if ui_mask_ratio >= self._UI_MASK_RATIO_TRIGGER:
-                    self._ui_mask_consecutive += 1
-                    if self._ui_mask_consecutive >= self._UI_MASK_CONSECUTIVE:
-                        log.info(
-                            "[WATCHDOG] UI-mask static (%.1fs): "
-                            "ui_ratio=%.1f%% — 当作 popup",
-                            self._sample_period_s * self._UI_MASK_CONSECUTIVE,
-                            ui_mask_ratio * 100,
-                        )
-                        self._trigger_recovery(ui_mask_ratio, ui_mask_ratio)
-                        self._ui_mask_consecutive = 0
-                else:
-                    self._ui_mask_consecutive = 0
-
             # OCR arm — every _OCR_SAMPLE_INTERVAL samples, scan for explicit
-            # dismiss-prompt text. Match → inject key directly (no VLM round-
-            # trip; OCR's match is the literal on-screen hint). Disabled when
-            # winrt-Windows.Media.Ocr is not installed.
+            # dismiss-prompt text. Match → inject key directly (OCR's match is
+            # the literal on-screen hint). Disabled when winrt-Windows.Media.Ocr
+            # is not installed.
             self._ocr_tick_counter += 1
             if (ocr_detector is not None
                     and self._ocr_tick_counter >= self._OCR_SAMPLE_INTERVAL):
@@ -297,19 +234,19 @@ class StaticFrameWatchdog:
     _BMP_MIN_AGE_S = 0.5
 
     def _read_latest_bmp(self) -> np.ndarray | None:
-        """Prefer BackBufferUI.png (post-UI, has HUD/menus) when --ui-mode={ui,both}.
-        Fall back to BackBuffer.png under --ui-mode=no-ui or pre-UI-only sessions.
-        Watchdog needs to see UI to detect 'Game Over' / pause menus / static HUD."""
+        """Read latest BackBuffer.png (no-ui / pre-UI scene). Watchdog only looks
+        at the no-ui stream now — UI/menu detection is delegated to OCR + frame-
+        diff arms; we no longer rely on post-UI BackBufferUI.png."""
         if not self._frames_dir.is_dir():
             return None
         now = time.time()
-        latest_ui_mtime = -1.0
-        latest_ui_path: Path | None = None
-        latest_bb_mtime = -1.0
-        latest_bb_path: Path | None = None
+        latest_mtime = -1.0
+        latest_path: Path | None = None
         for p in self._frames_dir.iterdir():
             if not p.name.endswith(".png"):
                 continue
+            if "BackBufferUI" in p.name:
+                continue  # post-UI 流不再使用
             try:
                 m = p.stat().st_mtime
             except OSError:
@@ -318,15 +255,9 @@ class StaticFrameWatchdog:
             # at 1920x1080 takes longer than BMP, but 500ms is still comfortable.
             if now - m < self._BMP_MIN_AGE_S:
                 continue
-            if "BackBufferUI" in p.name:
-                if m > latest_ui_mtime:
-                    latest_ui_mtime = m
-                    latest_ui_path = p
-            else:
-                if m > latest_bb_mtime:
-                    latest_bb_mtime = m
-                    latest_bb_path = p
-        latest_path = latest_ui_path if latest_ui_path is not None else latest_bb_path
+            if m > latest_mtime:
+                latest_mtime = m
+                latest_path = p
         if latest_path is None:
             return None
         # np.fromfile + cv2.imdecode (instead of cv2.imread) so partial/locked
@@ -348,91 +279,14 @@ class StaticFrameWatchdog:
                              interpolation=cv2.INTER_AREA)
         return img
 
-    # Two PNG mtimes from the same frame should land within ~100ms of each
-    # other (addon writes both back-to-back in on_reshade_present). Anything
-    # wider = different frames, can't pair them safely.
-    _PAIR_MAX_MTIME_GAP_S = 0.4
-
-    def _read_latest_pair(self) -> tuple[np.ndarray | None, np.ndarray | None]:
-        """Read latest BackBuffer.png + BackBufferUI.png pair from the same
-        frame (under --ui-mode=both). Returns (bb, ui) when both are present
-        AND their mtimes are within _PAIR_MAX_MTIME_GAP_S; (None, None)
-        otherwise (no warning — UI-mask arm silently inactive in single-stream
-        modes)."""
-        if not self._frames_dir.is_dir():
-            return None, None
-        now = time.time()
-        latest_ui_mtime = -1.0
-        latest_ui_path: Path | None = None
-        latest_bb_mtime = -1.0
-        latest_bb_path: Path | None = None
-        for p in self._frames_dir.iterdir():
-            if not p.name.endswith(".png"):
-                continue
-            try:
-                m = p.stat().st_mtime
-            except OSError:
-                continue
-            if now - m < self._BMP_MIN_AGE_S:
-                continue
-            if "BackBufferUI" in p.name:
-                if m > latest_ui_mtime:
-                    latest_ui_mtime, latest_ui_path = m, p
-            else:
-                if m > latest_bb_mtime:
-                    latest_bb_mtime, latest_bb_path = m, p
-        if latest_ui_path is None or latest_bb_path is None:
-            return None, None
-        if abs(latest_ui_mtime - latest_bb_mtime) > self._PAIR_MAX_MTIME_GAP_S:
-            return None, None
-        bb = self._decode_subsampled(latest_bb_path)
-        ui = self._decode_subsampled(latest_ui_path)
-        return bb, ui
-
-    def _decode_subsampled(self, path: Path) -> np.ndarray | None:
-        try:
-            data = np.fromfile(str(path), dtype=np.uint8)
-        except OSError:
-            return None
-        if data.size < 100:
-            return None
-        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
-        if img is None:
-            return None
-        h, w = img.shape[:2]
-        if w > 320:
-            img = cv2.resize(img, (320, max(1, int(h * 320 / w))),
-                             interpolation=cv2.INTER_AREA)
-        return img
-
     def _trigger_recovery(self, mean_diff: float, moved_ratio: float) -> None:
         self._trigger_count += 1
         diag = f"mean={mean_diff:.4f} moved={moved_ratio*100:.1f}%"
-        # Set the recovery flag so the main driver loop and heartbeat thread
-        # pause their own inject calls — without this, watchdog's S+turn
-        # back-step gets cancelled mid-flight by main loop's W+turn from a
-        # concurrent VLM tick. Always cleared in finally.
+        # Set the recovery flag so the main driver loop pauses its own inject
+        # calls — without this, watchdog's S+turn back-step gets cancelled
+        # mid-flight by main loop's W+turn. Always cleared in finally.
         self._recovery_active_evt.set()
         try:
-            # Hybrid path: ask VLM what to do; on success inject its actions and
-            # return without running profile.recovery. On any failure fall through.
-            if self._vlm_driver is not None and not self._vlm_disabled:
-                actions = self._consult_vlm()
-                if actions:
-                    log.info(
-                        "[WATCHDOG] static-frame 触发 #%d %s → VLM 决策 (%d actions)",
-                        self._trigger_count, diag, len(actions),
-                    )
-                    for action in actions:
-                        try:
-                            self._backend.inject(action)
-                        except Exception as e:
-                            log.warning("[WATCHDOG] VLM action inject 异常: %s", e)
-                        if self._stop_evt.is_set():
-                            return
-                    return
-                # else: VLM returned no actions or threw — fall through to profile.recovery
-
             log.info(
                 "[WATCHDOG] static-frame 触发 #%d %s → 注入 recovery (%d 步)",
                 self._trigger_count, diag, len(self._recovery_steps),
@@ -452,21 +306,3 @@ class StaticFrameWatchdog:
                         return
         finally:
             self._recovery_active_evt.clear()
-
-    def _consult_vlm(self) -> list[Any]:
-        """Ask the VLM driver for actions. Returns [] on any failure (caller
-        falls back to profile.recovery). On BudgetExhausted, disable VLM for
-        the rest of the session."""
-        try:
-            obs = Observation(timestamp=time.time(), profile=self._profile)
-            return list(self._vlm_driver.next_actions(obs) or [])
-        except BudgetExhausted as e:
-            log.warning(
-                "[WATCHDOG] VLM 不可用 (%s) — 本 session 后续 trigger 不再调 VLM",
-                e,
-            )
-            self._vlm_disabled = True
-            return []
-        except Exception as e:
-            log.warning("[WATCHDOG] VLM 决策异常: %s — 本次降级 profile.recovery", e)
-            return []

@@ -4,8 +4,8 @@ Drivers turn an `Observation` (current frame + timestamp + profile) into a list
 of `Action` objects. The runner injects each Action via the shared InputBackend.
 
 The contract is intentionally narrow: drivers declare *what* to do, never
-*how* it is delivered to the OS. That keeps A-layer (KeepAliveDriver) and
-C-layer (VLMDriver) interchangeable behind the same `next_actions(...)` call.
+*how* it is delivered to the OS — leaves room for future driver implementations
+behind the same `next_actions(...)` call.
 """
 
 from __future__ import annotations

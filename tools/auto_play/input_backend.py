@@ -164,12 +164,9 @@ class InputBackend:
         self.debug = debug
         self._lock = threading.Lock()
         self._closed = False
-        # Monotonic timestamp of the last successful inject. The runner's
-        # heartbeat thread reads this to decide whether to fire a fallback W
-        # press during long VLM API stalls (the main loop is blocked on
-        # client.chat.completions.create() for 3-5s, during which it cannot
-        # inject anything itself). Initialized to time.monotonic() so the
-        # heartbeat doesn't fire spuriously before the first real inject.
+        # Monotonic timestamp of the last successful inject. Initialized to
+        # time.monotonic() so consumers querying "time since last inject"
+        # don't get a spuriously huge value before the first real inject.
         self.last_inject_at_mono: float = time.monotonic()
 
         self._reserved_vks: set[int] = set()

@@ -53,14 +53,3 @@ watchdog:
   sample_period_s: 4.0
   static_diff_threshold: 0.015
   consecutive_static_required: 2
-
-vlm:
-  game_instructions: |
-    DOOM Eternal (id Tech 7 / Vulkan). Fast-paced FPS. WASD moves; mouse
-    looks/aims. Left-click fires. Space jumps (double-jump in air). Shift
-    dashes. E performs glory-kill or interacts.
-    Goal: keep moving and shooting; never stand still. The HUD is 3D geometry
-    drawn at near-plane (depth ~0.001-0.01) — ignore it.
-    Avoid menus and the level-end stats screen. If you see a stats screen, hit
-    Space to continue.
-  frame_subsample_long_edge: 512

@@ -7,8 +7,8 @@ Hotkeys (GetAsyncKeyState polls globally — game window doesn't need focus):
   F9  停止当前 survey/采集
 
 Usage:
-  uv run main.py launch [--game-path P] [--game-name N]
-                        [--dataset-root R] [--ui-mode {no-ui,ui,both}]
+  uv run main.py launch [--game-path P] [--dataset-root R]
+                        [--ui-mode {no-ui,ui,both}]
                         [--no-hints] [--video] [--pack] [--capture-duration N]
   uv run main.py video  --game-dir DIR [--fps N]
   uv run main.py pack   --game-dir DIR [--no-depth]
@@ -445,20 +445,11 @@ def _start_auto_play(args, frames_dir: Path, game_exe_stem: str):
 
     try:
         runner = AutoPlayRunner(
-            driver_name=getattr(args, "driver", "keep-alive"),
             profile=profile,
             frames_dir=frames_dir,
             debug=getattr(args, "auto_play_debug", False),
-            vlm_api_key=getattr(args, "vlm_api_key", None) or None,
-            vlm_base_url=getattr(args, "vlm_base_url", None) or None,
-            vlm_model=getattr(args, "vlm_model", None) or None,
-            vlm_budget_per_hour=getattr(args, "vlm_budget_per_hour", 10),
         )
         runner.start()
-    except NotImplementedError as e:
-        # 兜底：未来若新 driver 占位（如 Gemini provider 未接），构造时抛此异常
-        print(f"[AUTO-PLAY] {e}")
-        sys.exit(2)
     except Exception as e:
         print(f"[AUTO-PLAY] runner 启动失败：{e} — 关闭 auto-play 续 capture")
         return None
@@ -510,7 +501,7 @@ def cmd_deploy(args):
 
     dataset_root_arg = getattr(args, "dataset_root", "") or ""
     dataset_root = Path(dataset_root_arg) if dataset_root_arg else DATASET_ROOT
-    game_name = getattr(args, "game_name", "") or game_exe.stem
+    game_name = game_exe.stem
     ui_mode = getattr(args, "ui_mode", "no-ui")
     pre_ui_skip = _load_recommended_skip(dataset_root, game_name)
     if pre_ui_skip is not None:
@@ -526,37 +517,10 @@ def cmd_deploy(args):
 # ── Subcommand: launch (interactive) ──────────────────────────────────────────
 
 def cmd_launch(args):
-    # Resolve --ui-mode default: 'both' under --auto-play (bot/watchdog need
-    # post-UI BMP for HUD / menus / death screens), else 'no-ui' (pre-UI clean
-    # scene RT). cmd_deploy reads args.ui_mode so resolve before deploying.
+    # Resolve --ui-mode default → 'no-ui'（pre-UI clean scene RT，统一 ML 训练用）。
+    # cmd_deploy reads args.ui_mode so resolve before deploying.
     if args.ui_mode is None:
-        args.ui_mode = "both" if getattr(args, "auto_play", False) else "no-ui"
-        if getattr(args, "auto_play", False):
-            print("[AUTO-PLAY] --ui-mode 默认 both（bot/watchdog 看 post-UI BMP）", flush=True)
-
-    # Show VLM config (base_url / model / budget / api_key presence) up front
-    # so sponsors can sanity-check before pressing F8. Importing vlm_driver also
-    # triggers its module-level load_dotenv() side effect — config from .env
-    # becomes visible here, and a missing python-dotenv prints its setup hint.
-    if getattr(args, "auto_play", False) and \
-            getattr(args, "driver", "") in ("vlm", "hybrid"):
-        from tools.auto_play import vlm_driver  # noqa: F401  (side-effect import)
-        base = (getattr(args, "vlm_base_url", None)
-                or os.environ.get("VLM_BASE_URL") or "(SDK default)")
-        model = (getattr(args, "vlm_model", None)
-                 or os.environ.get("VLM_MODEL") or "(unset)")
-        api_key_present = bool(getattr(args, "vlm_api_key", None)
-                                or os.environ.get("VLM_API_KEY"))
-        budget = getattr(args, "vlm_budget_per_hour", 10)
-        tag = "VLM endpoint" if args.driver == "vlm" \
-              else "hybrid VLM (12s patrol + watchdog 触发介入)"
-        print(f"[AUTO-PLAY] {tag} base_url={base} model={model} "
-              f"budget={budget}/h api_key={'set' if api_key_present else 'MISSING'}",
-              flush=True)
-        if not api_key_present:
-            print("[AUTO-PLAY] WARN: VLM_API_KEY 未读到 — F8 后 VLM 介入会失败并降级"
-                  " profile.recovery。检查 .env 是否在 cwd 或祖先目录，或加 --vlm-api-key",
-                  flush=True)
+        args.ui_mode = "no-ui"
 
     game_dir, game_exe, game_name, dataset_root, api = cmd_deploy(args)
 
@@ -1104,11 +1068,10 @@ def main():
 
     p = sub.add_parser("launch", help="部署 + 启动游戏 + 进入交互式 F8/F9 工作流")
     p.add_argument("--game-path", default=str(GAME_PATH))
-    p.add_argument("--game-name", default="", help="游戏名（输出路径第一级，默认从 exe 推导）")
     p.add_argument("--dataset-root", default="", metavar="PATH")
     p.add_argument("--ui-mode", choices=["no-ui", "ui", "both"], default=None,
-                   help="输出: no-ui=只 pre-UI（无 --auto-play 时默认）, ui=只 post-UI BB（无需 survey）,"
-                        " both=双流（--auto-play 时默认 — bot/watchdog 看 post-UI 才有 HUD/菜单信息）")
+                   help="输出: no-ui=只 pre-UI（默认，含 --auto-play 时也是这个）, "
+                        "ui=只 post-UI BB（无需 survey）, both=双流（pre-UI + post-UI）")
     p.add_argument("--api", choices=["auto", "dx", "vulkan"], default="auto",
                    help="渲染后端: auto=按 exe 名启发（默认）, dx=DXGI proxy, vulkan=Vulkan layer")
     p.add_argument("--vk-debug", action="store_true",
@@ -1136,27 +1099,10 @@ def main():
                    help="--pack 时同时打包 /normal（默认不打包）")
     p.add_argument("--auto-play", action="store_true",
                    help="启用自动玩游戏 bot（capture 期间持续注入输入；F9 停止时一并停）")
-    p.add_argument("--driver", choices=["keep-alive", "vlm", "hybrid"], default="keep-alive",
-                   help="auto-play driver: keep-alive=哑 bot（默认，最便宜，纯 profile sequence）；"
-                        "vlm=纯 VLM 驱动每秒决策（贵且慢）；"
-                        "hybrid=keep-alive 主跑 + VLM 仅在 watchdog 静帧触发时介入做关键决策"
-                        "（推荐 — 平衡成本与智能；预算耗尽自动降级 profile.recovery）")
-    p.add_argument("--vlm-api-key", default=None,
-                   help="覆盖 .env 的 VLM_API_KEY（一次性测试用；注意：会留 "
-                        "shell history / process list 痕迹，常态请用 .env）")
-    p.add_argument("--vlm-base-url", default=None,
-                   help="覆盖 .env 的 VLM_BASE_URL（如 "
-                        "https://dashscope.aliyuncs.com/compatible-mode/v1）")
-    p.add_argument("--vlm-model", default=None,
-                   help="覆盖 .env 的 VLM_MODEL（如 qwen-vl-plus / kimi-k2.6 / gpt-4o-mini）")
     p.add_argument("--profile", default="",
                    help="auto-play profile 名 (profiles/<name>.yaml)；不传则按 exe 名 fuzzy match，回落 _default")
     p.add_argument("--auto-play-debug", action="store_true",
                    help="auto-play 详细 log（每次注入都打到 auto_play.log）")
-    p.add_argument("--vlm-budget-per-hour", type=int, default=360,
-                   help="VLM 每小时调用上限（默认 360 = hybrid 12s patrol 300/h "
-                        "+ watchdog/UI-mask/OCR 触发 60/h 余量；纯 vlm 1Hz 模式 "
-                        "建议拉到 3600；耗尽自动降级 keep-alive）")
 
     p = sub.add_parser("video", help="批量生成游戏目录下所有缺失的 video.mp4 / video_ui.mp4")
     p.add_argument("--game-dir", default="", metavar="DIR",

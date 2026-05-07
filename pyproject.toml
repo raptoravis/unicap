@@ -12,22 +12,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gui = [
+    # PySide6 = Qt for Python (LGPL). PyQt6 is GPL — PySide6 is friendlier
+    # for an OSS repo that may grow profile/plugins outside GPL.
+    "PySide6>=6.6",
+]
 auto-play = [
     "vgamepad",  # ViGEm Bus driver wrapper; soft-import in InputBackend
-]
-auto-play-vlm = [
-    "vgamepad",
-    # Single OpenAI-compatible SDK covers Qwen / Kimi / OpenAI / local Ollama
-    # via VLM_BASE_URL override.
-    "openai>=1.50",
-    # Loads .env file (VLM_API_KEY / VLM_BASE_URL / VLM_MODEL) at module import.
-    "python-dotenv>=1.0",
 ]
 auto-play-ocr = [
     # Windows.Media.Ocr via winrt — used by watchdog C arm to detect
     # on-screen "M Back" / "ESC Close" / "<KEY> Skip" dismiss prompts and
-    # trigger VLM consultant. Free, system-bundled OCR (no extra models /
-    # downloads), supports en + zh + ja out of the box on Windows 10+.
+    # inject the matched key directly. Free, system-bundled OCR (no extra
+    # models / downloads), supports en + zh + ja out of the box on Windows 10+.
     # Per-namespace winrt packages are mandatory (the legacy umbrella
     # `winrt` package is deprecated since 2024).
     "winrt-runtime",
@@ -36,6 +33,9 @@ auto-play-ocr = [
     "winrt-Windows.Media.Ocr",
     "winrt-Windows.Storage.Streams",
 ]
+
+[project.scripts]
+unicap-gui = "unicap_gui.__main__:main"
 
 [dependency-groups]
 dev = [

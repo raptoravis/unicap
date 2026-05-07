@@ -10,7 +10,7 @@ unicap-*.zip
 .claude/*.lock
 __pycache__
 config/
-# .env
+.env
 
 # 二进制/大文件：本地保留，不入库
 # vendor/installers/

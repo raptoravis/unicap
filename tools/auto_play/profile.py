@@ -1,8 +1,7 @@
 """GameProfile — declarative per-game config loaded from profiles/*.yaml.
 
 Profile is data, not code: control bindings, keep-alive sequence, watchdog
-parameters, VLM operation guidance. Loaded once at runner start, immutable
-afterwards.
+parameters. Loaded once at runner start, immutable afterwards.
 """
 
 from __future__ import annotations
@@ -19,14 +18,13 @@ PROFILES_DIR_NAME = "profiles"
 
 REQUIRED_TOP_LEVEL_KEYS = {
     "name", "description", "controls", "reserved_keys",
-    "keep_alive", "watchdog", "input", "vlm",
+    "keep_alive", "watchdog", "input",
 }
 REQUIRED_KEEP_ALIVE_KEYS = {"period_s", "sequence", "recovery"}
 REQUIRED_WATCHDOG_KEYS = {
     "sample_period_s", "static_diff_threshold", "consecutive_static_required",
 }
 REQUIRED_INPUT_KEYS = {"prefer_gamepad", "mouse_sensitivity"}
-REQUIRED_VLM_KEYS = {"game_instructions", "frame_subsample_long_edge"}
 
 # F8/F9 = capture start/stop. These two are unicap's hotkeys — auto-play
 # must NEVER inject them. Profile may add more entries but cannot remove these.
@@ -51,7 +49,6 @@ class GameProfile:
     keep_alive: dict[str, Any]
     watchdog: dict[str, Any]
     input: dict[str, Any]
-    vlm: dict[str, Any]
     source_path: Path | None = None
 
 
@@ -71,7 +68,6 @@ def _validate_profile(data: dict, source: str) -> None:
         ("keep_alive", REQUIRED_KEEP_ALIVE_KEYS),
         ("watchdog",   REQUIRED_WATCHDOG_KEYS),
         ("input",      REQUIRED_INPUT_KEYS),
-        ("vlm",        REQUIRED_VLM_KEYS),
     ):
         sub = data.get(sub_name)
         if not isinstance(sub, dict):
@@ -173,7 +169,6 @@ def _read_profile_file(path: Path) -> GameProfile:
         keep_alive=data["keep_alive"],
         watchdog=data["watchdog"],
         input=data["input"],
-        vlm=data["vlm"],
         source_path=path,
     )
 
