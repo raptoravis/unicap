@@ -26,6 +26,7 @@ except Exception:  # pragma: no cover — defensive: ocr_detector itself imports
 if TYPE_CHECKING:
     from tools.auto_play.input_backend import InputBackend
     from tools.auto_play.profile import GameProfile
+    from tools.auto_play.takeover import TakeoverDetector
 
 
 log = logging.getLogger("unicap.auto_play")
@@ -73,11 +74,14 @@ class StaticFrameWatchdog:
         input_backend: "InputBackend",
         log_path: Path | None = None,
         recovery_active_evt: "threading.Event | None" = None,
+        takeover_detector: "TakeoverDetector | None" = None,
     ) -> None:
         self._frames_dir = frames_dir
         self._profile = profile
         self._backend = input_backend
         self._log_path = log_path
+        # 人在玩时不要 inject recovery / OCR dismiss — runner 创建并传入
+        self._takeover = takeover_detector
         # Cross-thread "recovery in progress" flag. While set, the main driver
         # loop skips its own inject calls so it doesn't collide with the
         # recovery sequence (e.g. watchdog wants S 1500ms back-step, main loop
@@ -170,6 +174,11 @@ class StaticFrameWatchdog:
             if is_short_static:
                 consecutive_static += 1
                 if consecutive_static >= self._consecutive_required:
+                    if self._taken_over_skip("short-window"):
+                        consecutive_static = 0
+                        self._frame_history.clear()
+                        self._frame_history.append(current)
+                        continue
                     self._trigger_recovery(mean_diff, moved_ratio)
                     consecutive_static = 0
                     self._frame_history.clear()  # reset to avoid double-firing
@@ -196,6 +205,9 @@ class StaticFrameWatchdog:
                 )
                 if (long_mean < self._LONG_WINDOW_MEAN_CAP
                         and long_moved < self._LONG_WINDOW_RATIO_CAP):
+                    if self._taken_over_skip("long-window"):
+                        self._frame_history.clear()
+                        continue
                     log.info(
                         "[WATCHDOG] long-window static (%.0fs): "
                         "long_mean=%.4f long_moved=%.1f%% — 当作卡死",
@@ -215,6 +227,8 @@ class StaticFrameWatchdog:
                 self._ocr_tick_counter = 0
                 key = ocr_detector.detect_dismiss_prompt(current)
                 if key:
+                    if self._taken_over_skip(f"OCR/{key}"):
+                        continue
                     log.info(
                         "[WATCHDOG] OCR dismiss-prompt key=%s — 直接注入", key,
                     )
@@ -278,6 +292,15 @@ class StaticFrameWatchdog:
             img = cv2.resize(img, (320, max(1, int(h * 320 / w))),
                              interpolation=cv2.INTER_AREA)
         return img
+
+    def _taken_over_skip(self, source: str) -> bool:
+        """True 时调用方应该 skip 本次 inject 路径（人在玩）。"""
+        if self._takeover is None:
+            return False
+        if not self._takeover.is_taken_over():
+            return False
+        log.info("[WATCHDOG] %s 触发但人在接管 — 跳过", source)
+        return True
 
     def _trigger_recovery(self, mean_diff: float, moved_ratio: float) -> None:
         self._trigger_count += 1

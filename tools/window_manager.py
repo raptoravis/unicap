@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import subprocess
 import threading
 import time
 from ctypes import wintypes
@@ -210,6 +211,25 @@ def wait_for_game_foreground(exe_basename: str, timeout_s: float = 60.0) -> int 
                 return hwnd
         time.sleep(0.3)
     return None
+
+
+def is_process_alive_by_name(exe_basename: str) -> bool:
+    """tasklist 检查 exe basename 是否仍有进程在运行（不依赖 pid，FF7R 等
+    launcher → game handoff 场景下 Popen-returned pid 已死但游戏本体仍在跑）。
+
+    检查失败时返回 True（保守 —— 避免假阳性触发误退出）。
+    """
+    try:
+        out = subprocess.check_output(
+            ["tasklist", "/FI", f"IMAGENAME eq {exe_basename}", "/NH"],
+            text=True, timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            stderr=subprocess.DEVNULL,
+            encoding="utf-8", errors="replace",
+        )
+    except (subprocess.SubprocessError, OSError):
+        return True
+    return exe_basename.lower() in out.lower()
 
 
 def force_borderless_async(pid: int, exe_basename: str | None = None,

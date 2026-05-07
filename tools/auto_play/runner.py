@@ -15,6 +15,7 @@ from tools.auto_play.driver import BotDriver, Observation
 from tools.auto_play.input_backend import InputBackend
 from tools.auto_play.keep_alive import KeepAliveDriver
 from tools.auto_play.profile import GameProfile
+from tools.auto_play.takeover import TakeoverDetector
 from tools.auto_play.watchdog import StaticFrameWatchdog
 
 if TYPE_CHECKING:
@@ -66,6 +67,9 @@ class AutoPlayRunner:
 
         self._backend = InputBackend(profile, debug=debug)
         self._driver: BotDriver = create_driver(profile)
+        # Human-takeover detector: 3s 内有主动按键则暂停所有 inject 路径。
+        # 鼠标移动不算（避免 bot 自己的 mouse turn 误判为接管）。
+        self._takeover = TakeoverDetector(self._backend, profile)
         # Shared "recovery in progress" event — watchdog sets while running
         # profile.recovery; main driver loop skips its own injects while set.
         # Without this, watchdog's S+turn back-step gets immediately overwritten
@@ -76,6 +80,7 @@ class AutoPlayRunner:
             frames_dir=frames_dir, profile=profile, input_backend=self._backend,
             log_path=log_path,
             recovery_active_evt=self._recovery_active_evt,
+            takeover_detector=self._takeover,
         )
 
         self._stop_evt = threading.Event()
@@ -108,6 +113,7 @@ class AutoPlayRunner:
 
         self._stop_evt.clear()
         self._driver.on_start()
+        self._takeover.start()
         self._watchdog.start()
         self._driver_thread = threading.Thread(
             target=self._driver_loop, name="auto-play-driver", daemon=True,
@@ -136,6 +142,10 @@ class AutoPlayRunner:
             self._watchdog.stop(timeout_s=timeout_s)
         except Exception as e:
             log.warning("[AUTO-PLAY] watchdog stop 异常: %s", e)
+        try:
+            self._takeover.stop(timeout_s=timeout_s)
+        except Exception as e:
+            log.warning("[AUTO-PLAY] takeover stop 异常: %s", e)
         if self._attack_thread is not None:
             self._attack_thread.join(timeout=timeout_s)
             if self._attack_thread.is_alive():
@@ -154,8 +164,15 @@ class AutoPlayRunner:
             self._backend.close()
         except Exception as e:
             log.warning("[AUTO-PLAY] backend close 异常: %s", e)
-        log.info("[AUTO-PLAY] stop 完成 watchdog 触发=%d", self._watchdog.trigger_count)
-        print(f"[AUTO-PLAY] 停止；watchdog 触发 {self._watchdog.trigger_count} 次", flush=True)
+        log.info(
+            "[AUTO-PLAY] stop 完成 watchdog 触发=%d takeover=%d",
+            self._watchdog.trigger_count, self._takeover.detection_count,
+        )
+        print(
+            f"[AUTO-PLAY] 停止；watchdog 触发 {self._watchdog.trigger_count} 次"
+            f"，takeover {self._takeover.detection_count} 次",
+            flush=True,
+        )
 
     @property
     def is_running(self) -> bool:
@@ -213,6 +230,10 @@ class AutoPlayRunner:
             if self._recovery_active_evt.is_set():
                 self._stop_evt.wait(0.5)
                 continue
+            if self._takeover.is_taken_over():
+                # 人在玩 → 不要打扰；3s 后 detector 自动 expire 重新进 inject
+                self._stop_evt.wait(0.5)
+                continue
             try:
                 self._backend.inject(self._attack_action)
             except Exception as e:
@@ -265,6 +286,11 @@ class AutoPlayRunner:
             # sequence and the bot stays stuck. Cheap ~50ms poll.
             if self._recovery_active_evt.is_set():
                 self._stop_evt.wait(0.1)
+                continue
+            # Human takeover: 3s 内有主动按键则跳过整 tick；polled 短的 poll
+            # 让接管释放后 bot 能快速恢复（detector grace = 3s 自然 expire）。
+            if self._takeover.is_taken_over():
+                self._stop_evt.wait(0.2)
                 continue
             t0 = time.monotonic()
             try:

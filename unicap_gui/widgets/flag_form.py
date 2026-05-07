@@ -121,8 +121,14 @@ class FlagForm(QScrollArea):
 
         if kind == "float":
             ds = QDoubleSpinBox()
-            ds.setRange(-1e9, 1e9)
             ds.setDecimals(2)
+            if spec.special_value_text:
+                # special value 显示在 value == minimum 时；让 default == minimum
+                # 使"默认值"在 UI 上显示为 token 而非数字（如 fps=0 → "auto"）。
+                ds.setRange(float(spec.default or 0.0), 1e9)
+                ds.setSpecialValueText(spec.special_value_text)
+            else:
+                ds.setRange(-1e9, 1e9)
             ds.setValue(float(spec.default or 0.0))
             ds.valueChanged.connect(self._emit_changed)
             return ds

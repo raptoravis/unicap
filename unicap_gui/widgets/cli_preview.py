@@ -50,7 +50,7 @@ class CLIPreview(QWidget):
 
         extra_label = QLabel("Extra args（透传到子进程；空格分隔，shell-quoted）：")
         self._extra = QLineEdit()
-        self._extra.setPlaceholderText("--auto-play-debug")
+        self._extra.setPlaceholderText("（可选；空格分隔的额外 flag）")
         self._extra.textChanged.connect(self._on_extra_changed)
 
         layout = QVBoxLayout(self)

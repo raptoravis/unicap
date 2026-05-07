@@ -22,6 +22,7 @@ ui-mode:
   both     两路并行输出（pre-UI + post-UI；F8 首次会自动 survey）
 """
 
+import _thread
 import argparse
 import atexit
 import configparser
@@ -551,6 +552,29 @@ def cmd_launch(args):
             env["VK_LOADER_LOG_FILE"] = log_file
             print(f"[VULKAN] VK_LOADER_DEBUG enabled → {log_file}")
     proc = subprocess.Popen([str(game_exe)], cwd=str(game_dir), env=env)
+
+    # 监控游戏进程：用户从游戏内退出 / 关游戏窗口时让 main.py 也优雅退出，
+    # GUI 子进程 stopped 后 Start 按钮切回 ▶ 允许改 game-path 重启。
+    #
+    # NOTE: 不能用 proc.wait() —— FF7R 等用 launcher → game PID handoff，Popen
+    # 拿到的 pid 是 launcher，launcher 启动 game 后自己退出 → proc.wait() 立刻
+    # 返回 → 误以为游戏退出。改成按 exe basename polling + 30s grace 让 launcher
+    # → game handoff 完成。
+    def _watch_game_exit(exe_basename: str) -> None:
+        from tools.window_manager import is_process_alive_by_name
+        grace_until = time.monotonic() + 30.0  # 让 launcher 起 game 的窗口
+        while True:
+            time.sleep(5.0)
+            if is_process_alive_by_name(exe_basename):
+                continue
+            if time.monotonic() < grace_until:
+                continue  # 仍在 grace 内，可能 launcher 已退而 game 未起
+            print(f"\n[GAME-EXIT] 找不到 {exe_basename} 进程 —— main.py 自动停止",
+                  flush=True)
+            _thread.interrupt_main()
+            return
+    threading.Thread(target=_watch_game_exit, args=(game_exe.name,), daemon=True,
+                     name="game-exit-watcher").start()
 
     if getattr(args, "force_borderless", True):
         from tools.window_manager import force_borderless_async

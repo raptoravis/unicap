@@ -10,6 +10,7 @@ import re
 
 from PySide6.QtWidgets import QWidget
 
+from unicap_gui.shared import settings as gui_settings
 from unicap_gui.shared.cli_schema import VIDEO
 from unicap_gui.tabs.base_tab import BaseTab
 from unicap_gui.widgets.session_tree import SessionTree
@@ -33,6 +34,14 @@ class VideoTab(BaseTab):
 
         # 子进程行抓 `[VIDEO] xxx 完成` —— 增量重扫该 session 行
         self._runner.line_received.connect(self._on_log_line)
+
+    def _apply_smart_defaults(self) -> None:
+        # 用户没保存 game_dir 时，从 launch tab 推：<dataset_root>/<exe stem>
+        if self._form.values().get("game_dir"):
+            return
+        derived = gui_settings.derive_game_dir_from_launch()
+        if derived:
+            self._form.set_values({"game_dir": derived})
 
     def _on_form_changed(self) -> None:
         v = self._form.values()

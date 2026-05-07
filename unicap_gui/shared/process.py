@@ -125,12 +125,17 @@ class SubprocessRunner(QObject):
 
         # stdout reader 跑在 QThread
         self._thread = QThread()
+        self._thread.setObjectName(f"unicap-stdout-{subcommand}")
         self._reader = _StdoutReader(self._proc)
         self._reader.moveToThread(self._thread)
         self._thread.started.connect(self._reader.run)
         self._reader.line.connect(self._on_line)
         self._reader.finished.connect(self._on_finished)
         self._reader.finished.connect(self._thread.quit)
+        # reader / thread 都用 deleteLater 让 Qt event loop 在 thread 真退出后清；
+        # 不在 Python 端把 ref 提前置 None（提前置 None 会让 PyObject 在 thread
+        # 还跑着时被 sip GC，触发 "QThread: Destroyed while thread is still running"）
+        self._reader.finished.connect(self._reader.deleteLater)
         self._thread.finished.connect(self._thread.deleteLater)
         self._thread.start()
 
@@ -195,7 +200,7 @@ class SubprocessRunner(QObject):
     def _on_finished(self, rc: int) -> None:
         log.info("subprocess finished rc=%d", rc)
         self._proc = None
-        self._reader = None
-        # _thread 在 finished.connect(quit) 后会自然退出，deleteLater 已 wired
-        self._thread = None
+        # _reader / _thread 不在这清 Python ref —— 它们 schedule 了 deleteLater，
+        # 由 Qt main event loop 在 thread 真正退出后销毁底层 C++ 对象。
+        # 下一次 start() 会用新 QThread() 覆盖旧 ref，旧 wrapper 那时已 safe。
         self.stopped.emit(rc)

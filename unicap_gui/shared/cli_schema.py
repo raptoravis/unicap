@@ -26,6 +26,9 @@ class FlagSpec:
     metavar: str = ""
     # path kind 限定：file（必须存在的文件）/ dir（目录）/ optional_path（可空）
     path_kind: str | None = None  # "file" | "dir" | "optional_dir" | "optional_path" | None
+    # int/float SpinBox 的 specialValueText：当值 == minimum 时控件显示这段文字
+    # 而非数值。配合 default 设成 minimum 让"默认值"显示成易读 token（如 "auto"）。
+    special_value_text: str = ""
 
     def cli_key(self) -> str:
         """argparse 把 `--game-path` 转 `args.game_path`，反向用。"""
@@ -99,8 +102,8 @@ VIDEO = SubcommandSchema(
         FlagSpec("--game-dir", "path", default="",
                  metavar="DIR", path_kind="optional_dir",
                  help="dataset-root 下的游戏目录（其下含 <YYYYMMDD_HHMMSS>/frames/ 子目录）"),
-        FlagSpec("--fps", "float", default=0.0,
-                 help="编码 fps；0 = 从图像文件名时间戳自动估算（推荐）"),
+        FlagSpec("--fps", "float", default=0.0, special_value_text="auto",
+                 help="编码 fps；auto/0 = 从图像文件名时间戳自动估算（推荐，避免快/慢放）"),
         FlagSpec("--mask-ui", "store_true", default=False,
                  help="额外生成 video_masked.mp4：depth==0 像素置黑"),
     ],

@@ -48,21 +48,13 @@ class BaseTab(QWidget):
         # CLI preview
         self._preview = CLIPreview(schema.name, self)
 
-        # 启动按钮（放大 + 着色）。停止由 F9（launch tab）或关 GUI 窗口完成。
-        self._btn_start = QPushButton("▶ Start")
-        self._btn_start.clicked.connect(self._on_start_clicked)
+        # 启停按钮（toggle）：不跑时 "▶ Start" 绿；跑时 "⏹ 停止 main.py" 红，
+        # 点了发 CTRL_BREAK 优雅停。launch tab 的 F9 仍可独立停 capture session。
+        self._btn_start = QPushButton()
+        self._btn_start.clicked.connect(self._on_start_button_clicked)
         self._btn_start.setMinimumHeight(44)
-        self._btn_start.setMinimumWidth(140)
-        self._btn_start.setStyleSheet(
-            "QPushButton {"
-            " font-size: 16px; font-weight: 700;"
-            " background: #2e7d32; color: white;"
-            " border: 1px solid #1b5e20; border-radius: 6px;"
-            " padding: 6px 18px;"
-            "}"
-            "QPushButton:hover { background: #388e3c; }"
-            "QPushButton:disabled { background: #555; color: #bbb; border-color: #444; }"
-        )
+        self._btn_start.setMinimumWidth(160)
+        self._apply_start_button_style(running=False)
 
         self._status = QLabel("未运行")
         self._status.setStyleSheet("color: #888; font-size: 14px;")
@@ -135,11 +127,36 @@ class BaseTab(QWidget):
         return self._runner.is_running()
 
     def set_start_enabled(self, enabled: bool, reason: str = "") -> None:
-        """MainWindow 通过这个锁/解锁 video/pack 的 Start 按钮（C-LOCK / G-011）。"""
-        self._btn_start.setEnabled(enabled and not self._runner.is_running())
+        """MainWindow 通过这个锁/解锁 video/pack 的 Start 按钮（C-LOCK / G-011）。
+
+        子进程跑着时按钮处于 stop 模式（红），外部锁不应屏蔽 stop 路径 ——
+        所以 running 时永远 enabled。仅在 idle 时让外部锁生效。
+        """
+        if self._runner.is_running():
+            self._btn_start.setEnabled(True)
+            self._btn_start.setToolTip("")
+            return
+        self._btn_start.setEnabled(enabled)
         self._btn_start.setToolTip(reason if not enabled else "")
 
     # ── slot：start / stop ────────────────────────────────────────────────
+
+    def _on_start_button_clicked(self) -> None:
+        """Toggle dispatcher：跑着 → 二次确认 + CTRL_BREAK 停；不跑 → 启动。"""
+        if self._runner.is_running():
+            from PySide6.QtWidgets import QMessageBox
+            ret = QMessageBox.question(
+                self, "停止 main.py",
+                f"将向 {self._schema.name} 子进程发 CTRL_BREAK 让其优雅退出"
+                "（5s 内不退会 taskkill 兜底；游戏进程不受影响）。继续？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if ret != QMessageBox.Yes:
+                return
+            # stop() 同步阻塞最多 5s；CTRL_BREAK 一般 < 1s 完成
+            self._runner.stop(timeout_s=5.0)
+            return
+        self._on_start_clicked()
 
     def _on_start_clicked(self) -> None:
         ok, reason = self._precheck_before_start()
@@ -153,15 +170,50 @@ class BaseTab(QWidget):
         self._log.append_separator(f"启动 {self._schema.name}")
         self._runner.start(self._schema.name, argv_tail)
 
+    def _apply_start_button_style(self, running: bool) -> None:
+        """跑着 = outline 红 ■ 停止；不跑 = solid 绿 ▶ Start。"""
+        if running:
+            # outline 风格 —— 不抢视觉焦点、明示警示作用
+            self._btn_start.setText("■ 停止")
+            self._btn_start.setStyleSheet(
+                "QPushButton {"
+                " font-size: 16px; font-weight: 700;"
+                " background: transparent; color: #c62828;"
+                " border: 2px solid #c62828; border-radius: 6px;"
+                " padding: 6px 18px;"
+                "}"
+                "QPushButton:hover { background: #fbe9e7; }"
+                "QPushButton:pressed { background: #ffcdd2; }"
+                "QPushButton:disabled { color: #888; border-color: #888; }"
+            )
+        else:
+            self._btn_start.setText("▶ Start")
+            self._btn_start.setStyleSheet(
+                "QPushButton {"
+                " font-size: 16px; font-weight: 700;"
+                " background: #2e7d32; color: white;"
+                " border: 1px solid #1b5e20; border-radius: 6px;"
+                " padding: 6px 18px;"
+                "}"
+                "QPushButton:hover { background: #388e3c; }"
+                "QPushButton:disabled { background: #555; color: #bbb; border-color: #444; }"
+            )
+
     def _on_subprocess_started(self, cmd: list[str]) -> None:
-        self._btn_start.setEnabled(False)
+        self._apply_start_button_style(running=True)
+        self._btn_start.setEnabled(True)  # stop 路径永远可点
+        # 锁 form：跑起来后改字段没意义（不会重启 main.py）；要换 game-path
+        # 必须先停 main.py。dashboard / F8-F9 按钮 / log 不在 form 内，不受影响。
+        self._form.setEnabled(False)
         self._status.setText(f"运行中（pid={self._runner.pid()}）")
         self._status.setStyleSheet("color: #2e7d32; font-weight: bold;")
         self._log.append_line(f"[unicap-gui] cmd: {_format_cmd(cmd)}")
         self.process_running_changed.emit(True)
 
     def _on_subprocess_stopped(self, rc: int) -> None:
+        self._apply_start_button_style(running=False)
         self._btn_start.setEnabled(True)
+        self._form.setEnabled(True)
         self._status.setText(f"已退出 rc={rc}")
         color = "#2e7d32" if rc == 0 else "#c62828"
         self._status.setStyleSheet(f"color: {color};")
@@ -191,6 +243,11 @@ class BaseTab(QWidget):
         extra = gui_settings.load(f"flags/{self._schema.name}/__extra_args__", "")
         if extra:
             self._preview.set_extra_args(str(extra))
+        # 子类基于其他 tab 的 settings 填默认（如 video/pack 的 game-dir）
+        self._apply_smart_defaults()
+
+    def _apply_smart_defaults(self) -> None:
+        """子类 hook：在 _restore_settings 之后调，给空字段填跨 tab 派生的默认。"""
 
 
 def _format_cmd(cmd: list[str]) -> str:
