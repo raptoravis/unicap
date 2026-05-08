@@ -28,6 +28,10 @@ log = logging.getLogger("unicap_gui.process")
 
 # Windows 专用 flag。Linux/macOS 没这个常量但我们整体不支持。
 CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+# CREATE_NO_WINDOW：阻止 child Console subsystem 进程弹自己的黑色 console。
+# stdout/stderr 仍走 pipe 进 LogPane —— 用户看 GUI 日志即可，不需要原生 console。
+# 与 CREATE_NEW_PROCESS_GROUP 共存：CTRL_BREAK_EVENT 仍能下发优雅停。
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # `[CAPTURE] 开始采集 ... → <session_dir>` —— main.py:728/731
 _RE_SESSION = re.compile(r"\[CAPTURE\].*?→\s*(.+)$")
@@ -105,7 +109,7 @@ class SubprocessRunner(QObject):
                 encoding="utf-8",
                 errors="replace",           # 中文路径 / 非法 utf-8 不崩
                 env=env,
-                creationflags=CREATE_NEW_PROCESS_GROUP,
+                creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
             )
         except FileNotFoundError as e:
             self.error.emit(f"找不到可执行文件：{e}")
