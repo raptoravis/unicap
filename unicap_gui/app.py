@@ -9,6 +9,7 @@ from unicap_gui.shared import settings as gui_settings
 from unicap_gui.tabs.launch_tab import LaunchTab
 from unicap_gui.tabs.video_tab import VideoTab
 from unicap_gui.tabs.pack_tab import PackTab
+from unicap_gui.tabs.train_tab import TrainBCTab
 
 
 class MainWindow(QMainWindow):
@@ -34,14 +35,18 @@ class MainWindow(QMainWindow):
         self._launch = LaunchTab(self)
         self._video = VideoTab(self)
         self._pack = PackTab(self)
+        self._train = TrainBCTab(self)
 
         self._tabs.addTab(self._launch, "采集")
         self._tabs.addTab(self._video, "生成视频")
         self._tabs.addTab(self._pack, "打包")
+        self._tabs.addTab(self._train, "训练")
         self.setCentralWidget(self._tabs)
 
-        # G-011：launch 跑时锁 video/pack Start
+        # G-011 + G-006c：双向 Start 互斥 —— launch / train 任一跑时，禁止启动
+        # 另一方（避免 GPU/IO 抢占）。video / pack 也跟 launch 一起锁。
         self._launch.process_running_changed.connect(self._on_launch_running_changed)
+        self._train.process_running_changed.connect(self._on_train_running_changed)
 
         self._restore_window_settings()
 
@@ -51,6 +56,12 @@ class MainWindow(QMainWindow):
         reason = "launch 正在跑，暂不可启动（避 GPU 抢占）" if running else ""
         self._video.set_start_enabled(not running, reason)
         self._pack.set_start_enabled(not running, reason)
+        self._train.set_start_enabled(not running, reason)
+
+    def _on_train_running_changed(self, running: bool) -> None:
+        reason = "train-bc 正在跑，暂不可启动（避 GPU 显存抢占）" if running else ""
+        self._launch.set_start_enabled(not running, reason)
+        # video / pack 不吃 GPU，与 train 并行无显存冲突 — 不锁。
 
     # ── 持久化 ────────────────────────────────────────────────────────────
 
@@ -70,7 +81,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         # 任意 tab 子进程跑着 —— 弹模态确认（避免孤儿子进程）
-        running_tabs = [t for t in (self._launch, self._video, self._pack)
+        running_tabs = [t for t in (self._launch, self._video, self._pack, self._train)
                         if t.is_running()]
         if running_tabs:
             names = ", ".join(t.schema().name for t in running_tabs)

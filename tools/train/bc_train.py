@@ -318,10 +318,21 @@ def cli(args) -> None:
         Path("models") / profile_name
     )
     if args.dataset:
-        paths = [Path(p) for p in Path(".").glob(args.dataset)]
-        if not paths:
-            # Fall back to literal path interpretation
-            paths = [Path(args.dataset)]
+        ds = str(args.dataset)
+        has_glob = any(c in ds for c in "*?[")
+        if has_glob:
+            ds_path = Path(ds)
+            if ds_path.is_absolute():
+                # Python 3.13 禁 Path('.').glob(absolute) — 拆 anchor + relative
+                anchor = ds_path.anchor
+                rel = ds_path.relative_to(anchor).as_posix()
+                paths = [Path(p) for p in Path(anchor).glob(rel)]
+            else:
+                paths = [Path(p) for p in Path(".").glob(ds)]
+            if not paths:
+                paths = [Path(ds)]
+        else:
+            paths = [Path(ds)]
     else:
         from tools.capture.config import DATASET_ROOT
         paths = collect_hdf5_paths(DATASET_ROOT, profile_name)

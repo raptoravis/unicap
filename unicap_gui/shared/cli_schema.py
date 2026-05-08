@@ -29,6 +29,8 @@ class FlagSpec:
     # int/float SpinBox 的 specialValueText：当值 == minimum 时控件显示这段文字
     # 而非数值。配合 default 设成 minimum 让"默认值"显示成易读 token（如 "auto"）。
     special_value_text: str = ""
+    # float SpinBox 显示的小数位数；默认 2，遇到学习率（3e-4 等）这类小数需调大。
+    decimals: int = 2
 
     def cli_key(self) -> str:
         """argparse 把 `--game-path` 转 `args.game_path`，反向用。"""
@@ -88,6 +90,50 @@ LAUNCH = SubcommandSchema(
                  help="auto-play profile 名（profiles/<name>.yaml）；空=按 exe 名 fuzzy match"),
         FlagSpec("--auto-play-debug", "store_true", default=False,
                  help="auto-play 详细 log（每次注入打到 auto_play.log）"),
+        FlagSpec("--record-demo", "store_true", default=False,
+                 help="录人类 demo 模式：禁 auto-play；F6=标 good 段 / F7=标 bad 段"),
+        FlagSpec("--record-recovery", "store_true", default=False,
+                 help="DAgger：与 --auto-play 同用；接管期间样本标 good_recovery"),
+    ],
+)
+
+
+# ── train-bc ──────────────────────────────────────────────────────────────────
+
+
+TRAIN_BC = SubcommandSchema(
+    name="train-bc",
+    help="离线训 behavior-cloning 模型（需 uv sync --extra train）",
+    flags=[
+        FlagSpec("--profile", "str", default="",
+                 help="profile 名（决定 controls + 输出目录；必填）"),
+        FlagSpec("--dataset", "path", default="", metavar="PATH/GLOB",
+                 path_kind="optional_path",
+                 help="HDF5 路径或 glob；不传则扫 DATASET_ROOT/<profile>/*/dataset.h5"),
+        FlagSpec("--output", "path", default="", metavar="DIR",
+                 path_kind="optional_dir",
+                 help="输出目录；默认 models/<profile>/"),
+        FlagSpec("--epochs", "int", default=20),
+        FlagSpec("--batch-size", "int", default=16),
+        FlagSpec("--lr", "float", default=3e-4, decimals=6,
+                 help="learning rate（默认 3e-4）"),
+        FlagSpec("--device", "choice", default="cpu",
+                 choices=["cpu", "cuda"],
+                 help="cpu = 兜底；cuda = 有 NVIDIA GPU 时显著快"),
+        FlagSpec("--backbone", "choice", default="resnet18",
+                 choices=["resnet18", "mobilenetv3_small"],
+                 help="冻结的视觉 backbone；resnet18 默认；mobilenetv3_small 推理更快"),
+        FlagSpec("--frame-window", "int", default=8,
+                 help="每个样本喂入的连续帧数；默认 8"),
+        FlagSpec("--input-h", "int", default=144,
+                 help="resize 后的高（默认 144 = 1080→×0.133）"),
+        FlagSpec("--input-w", "int", default=256,
+                 help="resize 后的宽（默认 256 = 1920→×0.133）"),
+        FlagSpec("--recovery-weight", "float", default=2.0,
+                 help="demo_quality=good_recovery 样本的训练权重（DAgger）"),
+        FlagSpec("--ui-mode", "choice", default="no-ui",
+                 choices=["no-ui", "ui", "both"],
+                 help="标注训练 ui-mode（runtime BCDriver 校验一致性）"),
     ],
 )
 
@@ -143,6 +189,7 @@ SCHEMAS: dict[str, SubcommandSchema] = {
     "launch": LAUNCH,
     "video": VIDEO,
     "pack": PACK,
+    "train-bc": TRAIN_BC,
 }
 
 

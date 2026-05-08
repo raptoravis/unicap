@@ -50,6 +50,11 @@ def profiles_dir() -> Path:
     return repo_root() / "profiles"
 
 
+def models_dir() -> Path:
+    """`<repo_root>/models/<profile>/...` —— train-bc 产物根。"""
+    return repo_root() / "models"
+
+
 def unicap_temp() -> Path:
     """%TEMP%/unicap — addon + auto_play log 写这里。"""
     base = os.environ.get("TEMP") or os.environ.get("TMP") or "."
