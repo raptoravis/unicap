@@ -10,10 +10,18 @@ from pathlib import Path
 def is_frozen() -> bool:
     """是否运行在 Nuitka standalone 产物里（vs 源码 dev 运行）。
 
-    判据：sys.executable 不是 python.exe / pythonw.exe / py.exe。
-    Nuitka standalone 把 sys.executable 设为产物 exe（如 unicap-gui.exe）。
+    判据（任一命中即 frozen）：
+      1. sys.frozen（PyInstaller，本项目兜底）
+      2. sys._MEIPASS（PyInstaller onefile）
+      3. __main__ 模块上的 __compiled__（Nuitka 标记）
+      4. sys.executable basename 不像 python —— 启发兜底（multidist 可靠）
     """
-    if getattr(sys, "frozen", False):  # PyInstaller marker (兜底)
+    if getattr(sys, "frozen", False):
+        return True
+    if hasattr(sys, "_MEIPASS"):
+        return True
+    main_mod = sys.modules.get("__main__")
+    if main_mod is not None and hasattr(main_mod, "__compiled__"):
         return True
     name = Path(sys.executable).name.lower()
     return "python" not in name and name not in ("py.exe", "py")
