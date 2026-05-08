@@ -6,9 +6,10 @@
 #   dist-exe-gui/     GUI standalone (multidist → unicap-gui.exe + 包内 unicap.exe，含 PySide6)
 #
 # Usage:
-#   scripts\build-exe.ps1                       # build all (cli + gui)
+#   scripts\build-exe.ps1                       # 默认只 GUI（GUI 包已自带 CLI）
 #   scripts\build-exe.ps1 -Target cli           # 只 CLI
-#   scripts\build-exe.ps1 -Target gui           # 只 GUI
+#   scripts\build-exe.ps1 -Target gui           # 只 GUI（默认）
+#   scripts\build-exe.ps1 -Target both          # CLI + GUI 两个包
 #   scripts\build-exe.ps1 -Clean                # 清 dist-exe* + Nuitka cache 全量重建
 #
 # 依赖: uv + Nuitka (脚本会自动 uv add 一次)。
@@ -22,8 +23,8 @@
 
 param(
     [switch]$Clean,
-    [ValidateSet('all', 'cli', 'gui')]
-    [string]$Target = 'all'
+    [ValidateSet('cli', 'gui', 'both')]
+    [string]$Target = 'gui'
 )
 
 Set-StrictMode -Version Latest
@@ -36,6 +37,7 @@ $cliBuildDir  = Join-Path $root "dist-exe-build"
 $guiBuildDir  = Join-Path $root "dist-exe-gui-build"
 $mainPy       = Join-Path $root "main.py"
 $pyproject    = Join-Path $root "pyproject.toml"
+$favicon      = Join-Path $root "favicon.png"
 
 # ── 前置检查 ──────────────────────────────────────────────────────────────────
 $preflight = @(
@@ -43,6 +45,7 @@ $preflight = @(
     @{ Name = "dist\UniCap64.dll";        Hint = "scripts\build.ps1（Vulkan layer DLL）" }
     @{ Name = "dist\UniCap64.json";       Hint = "scripts\build.ps1（Vulkan layer manifest）" }
     @{ Name = "dist\frame_capture.addon"; Hint = "scripts\build.ps1" }
+    @{ Name = "favicon.png";              Hint = "把项目 logo 放到 repo 根（图标用）" }
 )
 foreach ($p in $preflight) {
     if (-not (Test-Path (Join-Path $root $p.Name))) {
@@ -69,7 +72,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # GUI build 还需要 PySide6 在 venv 里（即便不带 --extra gui sync 的人也得跑得起 build）
-if ($Target -eq 'gui' -or $Target -eq 'all') {
+if ($Target -eq 'gui' -or $Target -eq 'both') {
     & uv run python -c "import PySide6" *>$null
     if ($LASTEXITCODE -ne 0) {
         Write-Host "PySide6 未安装（GUI build 需要），uv sync --extra gui…" -ForegroundColor Yellow
@@ -149,6 +152,8 @@ function Build-Cli {
             --include-data-dir=config=config `
             --include-data-dir=profiles=profiles `
             --include-data-files=pyproject.toml=pyproject.toml `
+            --include-data-files=favicon.png=favicon.png `
+            --windows-icon-from-ico=$favicon `
             --product-name=unicap `
             --file-version=$version `
             --product-version=$version `
@@ -179,7 +184,8 @@ function Build-Cli {
         "unicap.exe",
         "dist\dxgi.dll", "dist\UniCap64.dll", "dist\UniCap64.json", "dist\frame_capture.addon",
         "shaders\DepthToAddon.fx",
-        "profiles\_default.yaml", "profiles\ff7r.yaml"
+        "profiles\_default.yaml", "profiles\ff7r.yaml",
+        "favicon.png"
     )
     $missing = @()
     foreach ($rel in $required) {
@@ -263,6 +269,8 @@ sys.exit(main())
             --include-data-dir=config=config `
             --include-data-dir=profiles=profiles `
             --include-data-files=pyproject.toml=pyproject.toml `
+            --include-data-files=favicon.png=favicon.png `
+            --windows-icon-from-ico=$favicon `
             --product-name=unicap `
             --file-version=$version `
             --product-version=$version `
@@ -339,14 +347,14 @@ sys.exit(main())
 }
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────
-if ($Target -eq 'cli' -or $Target -eq 'all') { Build-Cli }
-if ($Target -eq 'gui' -or $Target -eq 'all') { Build-Gui }
+if ($Target -eq 'cli' -or $Target -eq 'both') { Build-Cli }
+if ($Target -eq 'gui' -or $Target -eq 'both') { Build-Gui }
 
 Write-Host "`n全部构建完成 ✓" -ForegroundColor Green
 Write-Host "分发：" -ForegroundColor Cyan
-if ($Target -eq 'cli' -or $Target -eq 'all') {
+if ($Target -eq 'cli' -or $Target -eq 'both') {
     Write-Host "  - unicap-cli-$version.zip   （仅 CLI，体积小）" -ForegroundColor Cyan
 }
-if ($Target -eq 'gui' -or $Target -eq 'all') {
+if ($Target -eq 'gui' -or $Target -eq 'both') {
     Write-Host "  - unicap-gui-$version.zip   （GUI + 内嵌 CLI，self-contained）" -ForegroundColor Cyan
 }

@@ -47,12 +47,18 @@ def main() -> int:
         )
         return 1
 
+    from PySide6.QtGui import QIcon
     from unicap_gui.app import MainWindow
+    from unicap_gui.shared.paths import favicon_path
 
     app = QApplication(sys.argv)
     app.setApplicationName("unicap-gui")
     app.setOrganizationName("unicap")
     app.setOrganizationDomain("unicap.local")
+
+    icon = favicon_path()
+    if icon.is_file():
+        app.setWindowIcon(QIcon(str(icon)))
 
     win = MainWindow()
     win.show()

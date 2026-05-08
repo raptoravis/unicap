@@ -55,6 +55,12 @@ def models_dir() -> Path:
     return repo_root() / "models"
 
 
+def favicon_path() -> Path:
+    """程序图标。Dev 模式：repo 根；frozen 模式：exe 同目录（build 时
+    --include-data-files 拷到 dist 根）。返回值可能不存在 —— caller 自己 fallback。"""
+    return repo_root() / "favicon.png"
+
+
 def unicap_temp() -> Path:
     """%TEMP%/unicap — addon + auto_play log 写这里。"""
     base = os.environ.get("TEMP") or os.environ.get("TMP") or "."
