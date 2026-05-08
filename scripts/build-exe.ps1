@@ -160,9 +160,6 @@ function Build-Cli {
             --output-dir=$cliBuildDir `
             --output-filename=unicap.exe `
             --include-package=tools `
-            --include-package=cv2 `
-            --include-package=h5py `
-            --include-package=numpy `
             --include-data-dir=dist=dist `
             --include-data-files=dist/dxgi.dll=dist/dxgi.dll `
             --include-data-files=dist/UniCap64.dll=dist/UniCap64.dll `
@@ -276,10 +273,26 @@ sys.exit(main())
             --enable-plugin=pyside6 `
             --include-package=tools `
             --include-package=unicap_gui `
-            --include-package=cv2 `
-            --include-package=h5py `
-            --include-package=numpy `
-            --include-package=PySide6 `
+            --noinclude-qt-translations `
+            --nofollow-import-to=PySide6.QtWebEngineCore `
+            --nofollow-import-to=PySide6.QtWebEngineWidgets `
+            --nofollow-import-to=PySide6.QtWebEngineQuick `
+            --nofollow-import-to=PySide6.QtMultimedia `
+            --nofollow-import-to=PySide6.QtMultimediaWidgets `
+            --nofollow-import-to=PySide6.QtPdf `
+            --nofollow-import-to=PySide6.QtPdfWidgets `
+            --nofollow-import-to=PySide6.QtCharts `
+            --nofollow-import-to=PySide6.QtDataVisualization `
+            --nofollow-import-to=PySide6.Qt3DCore `
+            --nofollow-import-to=PySide6.Qt3DRender `
+            --nofollow-import-to=PySide6.QtBluetooth `
+            --nofollow-import-to=PySide6.QtNetworkAuth `
+            --nofollow-import-to=PySide6.QtPositioning `
+            --nofollow-import-to=PySide6.QtSensors `
+            --nofollow-import-to=PySide6.QtSerialPort `
+            --nofollow-import-to=PySide6.QtTest `
+            --nofollow-import-to=PySide6.QtWebChannel `
+            --nofollow-import-to=PySide6.QtWebSockets `
             --include-data-dir=dist=dist `
             --include-data-files=dist/dxgi.dll=dist/dxgi.dll `
             --include-data-files=dist/UniCap64.dll=dist/UniCap64.dll `
