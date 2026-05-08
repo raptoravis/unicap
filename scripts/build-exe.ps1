@@ -37,7 +37,8 @@ $cliBuildDir  = Join-Path $root "dist-exe-build"
 $guiBuildDir  = Join-Path $root "dist-exe-gui-build"
 $mainPy       = Join-Path $root "main.py"
 $pyproject    = Join-Path $root "pyproject.toml"
-$favicon      = Join-Path $root "favicon.png"
+$faviconPng   = Join-Path $root "favicon.png"
+$faviconIco   = Join-Path $root "favicon.ico"
 
 # ── 前置检查 ──────────────────────────────────────────────────────────────────
 $preflight = @(
@@ -50,6 +51,23 @@ $preflight = @(
 foreach ($p in $preflight) {
     if (-not (Test-Path (Join-Path $root $p.Name))) {
         Write-Host "[错误] $($p.Name) 不存在 — 先跑 $($p.Hint)。" -ForegroundColor Red
+        exit 1
+    }
+}
+
+# favicon.ico 比 favicon.png 旧 → 用 Pillow 重生成（Nuitka 原生吃 ICO，不需
+# imageio；多尺寸 ICO 让 Windows 在不同 DPI 下挑合适分辨率）
+$needIco = -not (Test-Path $faviconIco) -or `
+           (Get-Item $faviconPng).LastWriteTime -gt (Get-Item $faviconIco).LastWriteTime
+if ($needIco) {
+    Write-Host "favicon.ico 缺失或过期 → 用 Pillow 从 favicon.png 重生成…" -ForegroundColor Yellow
+    & uv run python -c @"
+from PIL import Image
+src = Image.open(r'$faviconPng').convert('RGBA')
+src.save(r'$faviconIco', format='ICO', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)])
+"@
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[错误] favicon.ico 生成失败（Pillow 是否在 venv？）" -ForegroundColor Red
         exit 1
     }
 }
@@ -153,7 +171,7 @@ function Build-Cli {
             --include-data-dir=profiles=profiles `
             --include-data-files=pyproject.toml=pyproject.toml `
             --include-data-files=favicon.png=favicon.png `
-            --windows-icon-from-ico=$favicon `
+            --windows-icon-from-ico=$faviconIco `
             --product-name=unicap `
             --file-version=$version `
             --product-version=$version `
@@ -270,7 +288,7 @@ sys.exit(main())
             --include-data-dir=profiles=profiles `
             --include-data-files=pyproject.toml=pyproject.toml `
             --include-data-files=favicon.png=favicon.png `
-            --windows-icon-from-ico=$favicon `
+            --windows-icon-from-ico=$faviconIco `
             --product-name=unicap `
             --file-version=$version `
             --product-version=$version `
