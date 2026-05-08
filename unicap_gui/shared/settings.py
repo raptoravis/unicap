@@ -13,10 +13,26 @@ from PySide6.QtCore import QSettings
 from unicap_gui.shared.paths import gui_settings_dir
 
 
+def ini_path() -> Path:
+    return gui_settings_dir() / "unicap-gui.ini"
+
+
 def _make_settings() -> QSettings:
-    ini = gui_settings_dir() / "unicap-gui.ini"
+    ini = ini_path()
     ini.parent.mkdir(parents=True, exist_ok=True)
     return QSettings(str(ini), QSettings.Format.IniFormat)
+
+
+def clear_all() -> Path:
+    """清空 unicap-gui.ini 所有键。返回 ini 路径供调用者展示给用户。
+
+    用 QSettings.clear() 而非直接删文件 —— sync() 后文件清成空 [General]，
+    不会在内存里留 stale 值。
+    """
+    s = _make_settings()
+    s.clear()
+    s.sync()
+    return ini_path()
 
 
 def save(key: str, value: Any) -> None:
