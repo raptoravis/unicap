@@ -84,6 +84,65 @@ def save_string_list(group_key: str, items: list[str]) -> None:
     s.sync()
 
 
+def derive_train_dataset_from_launch() -> str:
+    """train-bc tab 的 --dataset 智能默认。
+
+    从 launch tab 已保存的 game_path + dataset_root 推 `<dataset_root>/<exe stem>/`，
+    然后挑一个 session：
+      - 优先最新的 dataset.h5 (`<game_dir>/<ts>/dataset.h5`，--raw 关时直接用)
+      - 没有就挑最新的 raw session 目录（含 frames/ + inputs.jsonl，--raw 时用）
+      - 都没有就回退到 game_dir 本身（让用户自己点浏览）
+      - launch tab 从未存过路径 → 返回空字符串
+
+    "最新" 按目录名字典序最大（`YYYYMMDD_HHMMSS` 排序与时间一致）。
+    """
+    launch = load_flag_values("launch")
+    game_path = str(launch.get("game_path") or "")
+    dataset_root = str(launch.get("dataset_root") or "")
+
+    # 回退源 1：launch tab 的 game_path history（用户只用过 dropdown 选过游戏，
+    # 但还没按 Start 持久化 game_path 时，能从 history 里捞到第一条）
+    if not game_path:
+        history = load_string_list("flags/launch/__game_path_history__")
+        if history:
+            game_path = history[0]
+
+    # 回退源 2：schema 里 --dataset-root 的硬编码默认（main.py 也用同一份）
+    if not dataset_root:
+        from unicap_gui.shared.cli_schema import LAUNCH
+        for f in LAUNCH.flags:
+            if f.name == "--dataset-root":
+                dataset_root = str(f.default or "")
+                break
+
+    if not dataset_root:
+        return ""
+
+    stem = Path(game_path).stem if game_path else ""
+    game_dir = Path(dataset_root) / stem if stem else Path(dataset_root)
+
+    # game_dir 已经存在 → 优先扫 session 目录，挑最新一份带数据的
+    if game_dir.is_dir():
+        sessions = sorted(
+            (p for p in game_dir.iterdir() if p.is_dir() and p.name != "survey"),
+            reverse=True,
+        )
+        for s in sessions:
+            h5 = s / "dataset.h5"
+            if h5.is_file():
+                return str(h5)  # h5 模式默认值
+        for s in sessions:
+            if (s / "frames").is_dir() and (s / "inputs.jsonl").is_file():
+                return str(s)   # raw 模式默认值
+
+    # game_dir 还没建 / 没 session：回退到 game_dir，再回退到 dataset_root
+    if game_dir.is_dir():
+        return str(game_dir)
+    if Path(dataset_root).is_dir():
+        return str(dataset_root)
+    return str(game_dir) if stem else str(dataset_root)
+
+
 def derive_game_dir_from_launch() -> str:
     """video/pack tab 的 --game-dir 智能默认：从 launch tab 已保存的
     game_path + dataset_root 推 `<dataset_root>/<exe stem>`。

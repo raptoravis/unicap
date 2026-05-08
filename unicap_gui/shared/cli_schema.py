@@ -107,6 +107,8 @@ TRAIN_BC = SubcommandSchema(
     flags=[
         FlagSpec("--profile", "str", default="",
                  help="profile 名（决定 controls + 输出目录；必填）"),
+        FlagSpec("--raw", "store_true", default=False,
+                 help="直读 frames/ + inputs.jsonl（跳过 pack）；--dataset 应指向 session 目录"),
         FlagSpec("--dataset", "path", default="", metavar="PATH/GLOB",
                  path_kind="optional_path",
                  help="HDF5 路径或 glob；不传则扫 DATASET_ROOT/<profile>/*/dataset.h5"),
@@ -134,6 +136,9 @@ TRAIN_BC = SubcommandSchema(
         FlagSpec("--ui-mode", "choice", default="no-ui",
                  choices=["no-ui", "ui", "both"],
                  help="标注训练 ui-mode（runtime BCDriver 校验一致性）"),
+        FlagSpec("--color", "choice", default="no-ui",
+                 choices=["no-ui", "ui"],
+                 help="--raw 模式：选 BackBuffer.bmp（no-ui）或 BackBufferUI.bmp 优先（ui）"),
     ],
 )
 

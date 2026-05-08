@@ -27,7 +27,10 @@ from tools.train.bc_common import (
     MOUSE_DIR_BINS_PER_AXIS,
     derive_action_space,
 )
-from tools.train.bc_dataset import BCConfig, BCDataset, collect_hdf5_paths
+from tools.train.bc_dataset import (
+    BCConfig, BCDataset, BCRawDataset,
+    collect_hdf5_paths, collect_session_dirs,
+)
 from tools.train.bc_model import BCModel, BCModelConfig
 
 
@@ -160,8 +163,14 @@ def run(
     input_w: int = 256,
     recovery_weight: float = 2.0,
     seed: int = 42,
+    raw: bool = False,
+    color: str = "no-ui",
 ) -> dict:
-    """Train BC for one game profile. Returns the metrics dict."""
+    """Train BC for one game profile. Returns the metrics dict.
+
+    raw=False (默认): dataset_paths 是 dataset.h5 文件 → BCDataset
+    raw=True: dataset_paths 是 session 目录（含 frames/ + inputs.jsonl）→ BCRawDataset
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path = output_dir / "train_log.txt"
@@ -197,8 +206,14 @@ def run(
     _flog(f"[BC-TRAIN]   mouse_btns={action_space.mouse_btns}")
     _flog(f"[BC-TRAIN] window={frame_window} input={input_h}x{input_w} backbone={backbone}")
 
-    train_ds = BCDataset(dataset_paths, action_space, cfg, split="train")
-    val_ds = BCDataset(dataset_paths, action_space, cfg, split="val")
+    if raw:
+        _flog(f"[BC-TRAIN] 模式=raw（直读 frames/ + inputs.jsonl，跳过 pack）  color={color}")
+        train_ds = BCRawDataset(dataset_paths, action_space, cfg, split="train", color=color)
+        val_ds   = BCRawDataset(dataset_paths, action_space, cfg, split="val",   color=color)
+    else:
+        _flog(f"[BC-TRAIN] 模式=h5（dataset.h5）")
+        train_ds = BCDataset(dataset_paths, action_space, cfg, split="train")
+        val_ds   = BCDataset(dataset_paths, action_space, cfg, split="val")
 
     sampler = WeightedRandomSampler(
         weights=torch.from_numpy(train_ds.weights).double(),
@@ -213,6 +228,32 @@ def run(
         val_ds, batch_size=batch_size, shuffle=False,
         num_workers=0, pin_memory=False,
     )
+
+    if device == "cuda" and not torch.cuda.is_available():
+        _flog("")
+        _flog("=" * 72)
+        _flog("[BC-TRAIN] ✗ 选了 --device cuda 但当前 torch 不支持 CUDA")
+        _flog(f"           torch={torch.__version__} (CPU-only build)")
+        _flog("")
+        _flog("           解决：装 CUDA 版 torch（pyproject.toml 已配好 cu128 index）")
+        _flog("")
+        _flog("             uv sync --extra train")
+        _flog("")
+        _flog("           然后验证：")
+        _flog("")
+        _flog("             uv run python -c \"import torch; print(torch.cuda.is_available())\"")
+        _flog("")
+        _flog("           期望输出 True；显示 False 说明 PyTorch wheel 还是 CPU 版，")
+        _flog("           手动装：")
+        _flog("")
+        _flog("             uv pip install --upgrade --reinstall \\")
+        _flog("               --index-url https://download.pytorch.org/whl/cu128 \\")
+        _flog("               torch torchvision")
+        _flog("")
+        _flog("           或先回退 CPU 训练（慢但能跑）：--device cpu")
+        _flog("=" * 72)
+        log_fh.close()
+        raise SystemExit(2)
 
     dev = torch.device(device)
     model_cfg = BCModelConfig(
@@ -317,6 +358,9 @@ def cli(args) -> None:
     output_dir = Path(args.output) if args.output else (
         Path("models") / profile_name
     )
+    raw = bool(getattr(args, "raw", False))
+    color = getattr(args, "color", "no-ui")
+
     if args.dataset:
         ds = str(args.dataset)
         has_glob = any(c in ds for c in "*?[")
@@ -335,15 +379,29 @@ def cli(args) -> None:
             paths = [Path(ds)]
     else:
         from tools.capture.config import DATASET_ROOT
-        paths = collect_hdf5_paths(DATASET_ROOT, profile_name)
-    paths = [p for p in paths if p.is_file()]
-    if not paths:
-        raise SystemExit(
-            f"[BC-TRAIN] 未找到任何 dataset.h5；先用 launch --record-demo 录数据，"
-            f"再 pack；或加 --dataset PATH"
-        )
+        if raw:
+            paths = collect_session_dirs(DATASET_ROOT, profile_name)
+        else:
+            paths = collect_hdf5_paths(DATASET_ROOT, profile_name)
 
-    print(f"[BC-TRAIN] dataset.h5 文件数 = {len(paths)}", flush=True)
+    if raw:
+        paths = [p for p in paths if p.is_dir()
+                 and (p / "frames").is_dir()
+                 and (p / "inputs.jsonl").is_file()]
+        if not paths:
+            raise SystemExit(
+                f"[BC-TRAIN] --raw 未找到任何 session 目录（需含 frames/ + inputs.jsonl）；"
+                f"用 launch --record-demo 录数据，或 --dataset DIR/GLOB"
+            )
+        print(f"[BC-TRAIN] raw session 目录数 = {len(paths)}", flush=True)
+    else:
+        paths = [p for p in paths if p.is_file()]
+        if not paths:
+            raise SystemExit(
+                f"[BC-TRAIN] 未找到任何 dataset.h5；先用 launch --record-demo 录数据，"
+                f"再 pack；或加 --dataset PATH（或试 --raw 直读未打包数据）"
+            )
+        print(f"[BC-TRAIN] dataset.h5 文件数 = {len(paths)}", flush=True)
     for p in paths:
         print(f"  - {p}", flush=True)
 
@@ -360,6 +418,8 @@ def cli(args) -> None:
         input_h=args.input_h,
         input_w=args.input_w,
         recovery_weight=args.recovery_weight,
+        raw=raw,
+        color=color,
     )
     # patch ui_mode into meta (argparse passes it, but BCDataset doesn't track)
     meta_path = output_dir / "meta.json"

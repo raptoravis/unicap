@@ -34,3 +34,4 @@ models/
 # 仅排除临时 smoke 脚本
 .scratch/bc-imitation/smoke_*.py
 nuitka-crash-report.xml
+.wolf/

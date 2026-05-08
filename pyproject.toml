@@ -56,3 +56,20 @@ unicap-gui = "unicap_gui.__main__:main"
 dev = [
     "nuitka>=4.0.8",
 ]
+
+# ── PyTorch CUDA wheel 源 ─────────────────────────────────────────────────────
+# 默认 PyPI 上的 torch 是 CPU-only。把 torch / torchvision 钉到 PyTorch 官方
+# cu128 wheel index（CUDA 12.8 runtime + cuDNN，~2.5GB），让 RTX 30/40/50 系
+# 列直接能用 GPU 训练。`explicit = true` = 只有 [tool.uv.sources] 里显式引用
+# 才走这个 index，其它包仍然走 PyPI（避免污染）。
+#
+# Windows-only 项目（DX12 capture），所以不做 platform 条件。CPU-only 用户
+# 装这个 wheel 仍可正常工作（torch.cuda.is_available()=False），只是多占盘。
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }

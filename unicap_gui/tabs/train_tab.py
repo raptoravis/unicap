@@ -13,6 +13,7 @@ import re
 
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QProgressBar, QWidget
 
+from unicap_gui.shared import settings as gui_settings
 from unicap_gui.shared.cli_schema import TRAIN_BC
 from unicap_gui.shared.paths import models_dir
 from unicap_gui.tabs.base_tab import BaseTab
@@ -56,6 +57,26 @@ class TrainBCTab(BaseTab):
         self._runner.started.connect(self._on_train_started)
         self._runner.stopped.connect(self._on_train_stopped)
 
+    def _apply_smart_defaults(self) -> None:
+        # GUI 默认勾选 --raw（schema 默认 False 是为了对齐 CLI argparse；
+        # GUI 用户面对的 99% 场景是直读 raw 训练，所以这里覆写）。
+        # _restore_settings 已 set saved values；判断 saved 是否含 raw —— 用 ini
+        # 里的实际持久化键决定，避免覆盖用户上次手动取消的勾选。
+        saved = gui_settings.load_flag_values(self._schema.name)
+        if "raw" not in saved:
+            self._form.set_values({"raw": True})
+        # GUI 默认 --device cuda（schema 默认 cpu 是为了对齐 CLI argparse）。
+        if "device" not in saved:
+            self._form.set_values({"device": "cuda"})
+
+        # 历史已存过 --dataset 不覆盖；空时从 launch tab 的 dataset-root +
+        # game-path 推一个最新 session（h5 优先，否则 raw session 目录）。
+        if self._form.values().get("dataset"):
+            return
+        derived = gui_settings.derive_train_dataset_from_launch()
+        if derived:
+            self._form.set_values({"dataset": derived})
+
     def _precheck_before_start(self) -> tuple[bool, str]:
         prof = (self._form.values().get("profile") or "").strip()
         if not prof:
@@ -63,8 +84,17 @@ class TrainBCTab(BaseTab):
         return True, ""
 
     def _on_form_changed(self) -> None:
-        prof = (self._form.values().get("profile") or "").strip()
+        v = self._form.values()
+        prof = (v.get("profile") or "").strip()
         self._models.set_models_root(models_dir(), prof)
+
+        # --raw 时 --dataset 应该指向 session 目录而不是 dataset.h5；动态切
+        # 浏览按钮的目标类型，避免 file 选择器在 raw 模式下误导用户。
+        raw = bool(v.get("raw", False))
+        for f in TRAIN_BC.flags:
+            if f.name == "--dataset":
+                f.path_kind = "optional_dir" if raw else "optional_path"
+                break
 
     def _on_train_started(self, _cmd) -> None:
         # 训练启动时显示"等待第一个 epoch"，直到 [BC-TRAIN] epoch= 行到来。

@@ -202,3 +202,187 @@ def collect_hdf5_paths(dataset_root: Path, profile_name: str,
     if not game_dir.is_dir():
         return []
     return sorted(p for p in game_dir.glob("*/dataset.h5") if p.is_file())
+
+
+def collect_session_dirs(dataset_root: Path, profile_name: str) -> list[Path]:
+    """Scan DATASET_ROOT/<profile>/<ts>/ for raw sessions (frames/ + inputs.jsonl).
+
+    Skips the fixed `survey/` subdir. A session dir is valid if it contains
+    a `frames/` directory and an `inputs.jsonl` file."""
+    game_dir = Path(dataset_root) / profile_name
+    if not game_dir.is_dir():
+        return []
+    out: list[Path] = []
+    for sub in sorted(game_dir.iterdir()):
+        if not sub.is_dir() or sub.name == "survey":
+            continue
+        if (sub / "frames").is_dir() and (sub / "inputs.jsonl").is_file():
+            out.append(sub)
+    return out
+
+
+# ── Raw (pre-pack) dataset ────────────────────────────────────────────────────
+
+class BCRawDataset(Dataset):
+    """Same interface as BCDataset, but reads BMP + inputs.jsonl directly —
+    skipping the HDF5 pack step.
+
+    Pros: F9 停下立刻可训；省盘（不写一份 raw uint8 副本）。
+    Cons: __getitem__ cv2.imread 单帧解码 ≈ ms 级，比 h5 chunk slice 慢一截 —
+    建议 DataLoader 配 num_workers≥2 抵消。
+
+    Inputs are aligned to frames once at __init__ (bisect nearest-neighbor),
+    same logic as pack_hdf5.py — so the resulting samples are identical to
+    what BCDataset would yield from the packed h5.
+    """
+
+    def __init__(
+        self,
+        session_dirs: Sequence[Path],
+        action_space: ActionSpace,
+        config: BCConfig,
+        split: str = "train",
+        color: str = "no-ui",  # 'no-ui' | 'ui' — 决定挑哪份 BMP
+    ) -> None:
+        if split not in ("train", "val"):
+            raise ValueError(f"split must be 'train' or 'val', got {split!r}")
+        if color not in ("no-ui", "ui"):
+            raise ValueError(f"color must be 'no-ui' or 'ui', got {color!r}")
+
+        self.action_space = action_space
+        self.config = config
+        self.split = split
+        self.color = color
+
+        # Lazy import to keep pack-side deps (cv2, h5py) optional at import time
+        from tools.capture.pack_hdf5 import scan_frames, load_inputs, nearest_input
+
+        # Per-session aligned arrays + bmp paths
+        self._sessions: list[dict] = []
+        # Flat sample index: (session_idx, frame_i)
+        self._index: list[tuple[int, int]] = []
+        self._weights: list[float] = []
+
+        for sess_dir in session_dirs:
+            sess_dir = Path(sess_dir)
+            frames_dir = sess_dir / "frames"
+            inputs_path = sess_dir / "inputs.jsonl"
+            if not frames_dir.is_dir() or not inputs_path.is_file():
+                log.warning("[BC-DS-RAW] %s 缺 frames/ 或 inputs.jsonl，跳过", sess_dir)
+                continue
+
+            _mode, frames = scan_frames(frames_dir)
+            n = len(frames)
+            if n < config.frame_window:
+                log.warning("[BC-DS-RAW] %s 帧数 %d < frame_window %d，跳过",
+                            sess_dir, n, config.frame_window)
+                continue
+
+            ts_list, inputs = load_inputs(inputs_path)
+
+            kb_arr = np.zeros((n, 256), dtype=np.uint8)
+            mouse_arr = np.zeros((n, 2), dtype=np.int32)
+            quality_arr = np.zeros((n,), dtype=np.uint8)
+            bmp_paths: list[Path] = []
+
+            for i, frame in enumerate(frames):
+                inp, _ = nearest_input(frame['ts'], ts_list, inputs)
+                if inp is not None:
+                    kb_list = inp.get('kb') or [0] * 256
+                    if len(kb_list) >= 256:
+                        kb_arr[i] = np.asarray(kb_list[:256], dtype=np.uint8)
+                    m = inp.get('mouse') or [0, 0]
+                    mouse_arr[i] = (int(m[0]), int(m[1]))
+                    quality_arr[i] = int(inp.get('demo_quality', 0))
+                # color='ui' 优先 BackBufferUI.bmp；不存在 fallback BackBuffer.bmp
+                bmp = (frame.get('bmp_ui') if color == 'ui' and frame.get('bmp_ui')
+                       else frame['bmp'])
+                bmp_paths.append(bmp)
+
+            dxdy = np.zeros((n, 2), dtype=np.float32)
+            if n >= 2:
+                dxdy[1:] = (mouse_arr[1:] - mouse_arr[:-1]).astype(np.float32)
+
+            sess_idx = len(self._sessions)
+            self._sessions.append({
+                'dir': sess_dir,
+                'bmp_paths': bmp_paths,
+                'kb': kb_arr,
+                'mouse': mouse_arr,
+                'dxdy': dxdy,
+                'quality': quality_arr,
+            })
+
+            split_cut = int(n * (1.0 - config.holdout_fraction))
+            if split == "train":
+                rng_lo, rng_hi = config.frame_window - 1, split_cut
+            else:
+                rng_lo, rng_hi = max(split_cut, config.frame_window - 1), n
+
+            for i in range(rng_lo, rng_hi):
+                q = int(quality_arr[i])
+                w_q = quality_weight(q, recovery_weight=config.recovery_weight)
+                if w_q == 0.0:
+                    continue
+                kb_l = kb_label_from_row(kb_arr[i], action_space)
+                mb_l = mouse_btn_label_from_row(kb_arr[i], action_space)
+                active = is_active_frame(
+                    kb_l, mb_l, dxdy[i, 0], dxdy[i, 1],
+                    mouse_motion_thresh=config.mouse_motion_thresh,
+                )
+                w = (1.0 if active else 0.2) * w_q
+                self._index.append((sess_idx, i))
+                self._weights.append(w)
+
+        if not self._index:
+            raise RuntimeError(
+                f"[BC-DS-RAW] split={split} 没有任何样本 — 检查 session 目录 / "
+                f"inputs.jsonl / frame_window 配置"
+            )
+        log.info("[BC-DS-RAW] split=%s 样本数=%d sessions=%d",
+                 split, len(self._index), len(self._sessions))
+
+    @property
+    def weights(self) -> np.ndarray:
+        return np.asarray(self._weights, dtype=np.float64)
+
+    def __len__(self) -> int:
+        return len(self._index)
+
+    def __getitem__(self, idx: int) -> dict:
+        import cv2
+        sess_idx, frame_i = self._index[idx]
+        cfg = self.config
+        T = cfg.frame_window
+        sess = self._sessions[sess_idx]
+
+        lo = max(0, frame_i - T + 1)
+        idxs = list(range(lo, frame_i + 1))
+        while len(idxs) < T:
+            idxs.insert(0, idxs[0])
+
+        frames = np.empty((T, cfg.input_h, cfg.input_w, 3), dtype=np.float32)
+        for t, j in enumerate(idxs):
+            path = sess['bmp_paths'][j]
+            img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+            if img is None:
+                raise RuntimeError(f"[BC-DS-RAW] 无法读取: {path}")
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            frames[t] = _resize(img, cfg.input_h, cfg.input_w)
+
+        kb_row = sess['kb'][frame_i]
+        kb_l = kb_label_from_row(kb_row, self.action_space)
+        mb_l = mouse_btn_label_from_row(kb_row, self.action_space)
+        dx = float(sess['dxdy'][frame_i, 0])
+        dy = float(sess['dxdy'][frame_i, 1])
+        dx_bin, dy_bin = mouse_dir_label(dx, dy)
+
+        frames_t = torch.from_numpy(frames).permute(0, 3, 1, 2).contiguous()
+        return {
+            "frames": frames_t,
+            "kb": torch.from_numpy(kb_l),
+            "mouse_btn": torch.from_numpy(mb_l),
+            "mouse_dx": torch.tensor(dx_bin, dtype=torch.long),
+            "mouse_dy": torch.tensor(dy_bin, dtype=torch.long),
+            "weight": torch.tensor(self._weights[idx], dtype=torch.float32),
+        }

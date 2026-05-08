@@ -1256,6 +1256,13 @@ def main():
     p.add_argument("--recovery-weight", type=float, default=2.0)
     p.add_argument("--ui-mode", choices=["no-ui", "ui", "both"], default="no-ui",
                    help="标注训练时使用的 ui-mode，runtime BCDriver 会校验一致性")
+    p.add_argument("--raw", action="store_true",
+                   help="直读 frames/ + inputs.jsonl 训练（跳过 pack 成 HDF5）。"
+                        "--dataset 应指向 session 目录（含 frames/ + inputs.jsonl）；"
+                        "不传则扫 DATASET_ROOT/<profile>/<*ts*>/")
+    p.add_argument("--color", choices=["no-ui", "ui"], default="no-ui",
+                   help="--raw 模式：选 BackBuffer.bmp（no-ui，默认）"
+                        "或优先 BackBufferUI.bmp（ui）")
 
     p = sub.add_parser("pack", help="批量打包游戏目录下所有采集会话；已有 dataset.h5 跳过")
     p.add_argument("--game-dir", default="", metavar="DIR",
