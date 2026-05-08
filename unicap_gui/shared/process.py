@@ -93,15 +93,32 @@ class SubprocessRunner(QObject):
 
         # frozen: [unicap.exe, subcommand, ...]；dev: [python, -X utf8, -u, main.py, subcommand, ...]
         cmd: list[str] = [*cli_argv_prefix(), subcommand, *argv_tail]
+        cwd = str(repo_root())
 
         # 兜底环境变量：老 Python / 第三方库即便忽略 -X utf8 也按 PYTHONIOENCODING
         import os
         env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
 
+        # Pre-flight: cmd[0] 不存在时直接给出可读诊断（Popen 的 WinError 2
+        # 不告诉你哪个文件缺）。只在 frozen + 绝对路径时检查；dev 走 PATH
+        # 解析 (python) 不该提前判断。
+        from pathlib import Path as _P
+        from unicap_gui.shared.paths import is_frozen
+        exe_path = _P(cmd[0])
+        if exe_path.is_absolute() and not exe_path.is_file():
+            self.error.emit(
+                f"找不到 CLI 可执行文件：{exe_path}\n"
+                f"  cwd = {cwd}\n"
+                f"  frozen = {is_frozen()}\n"
+                f"  sys.executable = {sys.executable}\n"
+                f"  GUI 包应当与 unicap.exe 同目录；请确认解压完整。"
+            )
+            return
+
         try:
             self._proc = subprocess.Popen(
                 cmd,
-                cwd=str(repo_root()),
+                cwd=cwd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,   # 合流：所有输出走一个 pipe
                 bufsize=1,                  # 行缓冲（text mode 必需 1）
@@ -112,7 +129,12 @@ class SubprocessRunner(QObject):
                 creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
             )
         except FileNotFoundError as e:
-            self.error.emit(f"找不到可执行文件：{e}")
+            self.error.emit(
+                f"找不到可执行文件：{e}\n"
+                f"  cmd[0] = {cmd[0]}\n"
+                f"  cwd = {cwd}\n"
+                f"  cmd[0] 存在? {exe_path.is_file() if exe_path.is_absolute() else '(PATH 解析)'}"
+            )
             return
         except OSError as e:
             self.error.emit(f"启动失败：{e}")
