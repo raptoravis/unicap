@@ -1154,6 +1154,23 @@ def cmd_pack(args):
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
+    # 缺省（无任何参数 / 双击 exe）→ 启 GUI。CLI 用户只要传 subcommand 就走原路径。
+    # GUI bundle (dist-exe-gui) 内置 PySide6；CLI bundle (dist-exe) 不含 → 落
+    # ImportError 时打友好提示 + argparse usage（让 console 用户知道该传什么）。
+    if len(sys.argv) <= 1:
+        try:
+            from unicap_gui.__main__ import main as _gui_main
+        except ImportError:
+            print(
+                "[unicap] 无参数运行 = 默认开 GUI；本 bundle 不含 GUI（CLI 包）。\n"
+                "  - 要用 GUI：下载 unicap-gui-*.zip，跑 unicap-gui.exe\n"
+                "  - 要用 CLI：传 subcommand，如 `unicap launch --help`\n",
+                flush=True,
+            )
+            # 落到下面打 usage
+        else:
+            sys.exit(_gui_main())
+
     # `uv run` pipes stdout — Python defaults to 4KB block buffering when
     # stdout isn't a TTY, so [CAPTURE] / [AUTO-PLAY] state-transition prints
     # only flush after the buffer fills (or process exit). Force line-buffering
