@@ -35,3 +35,4 @@ models/
 .scratch/bc-imitation/smoke_*.py
 nuitka-crash-report.xml
 .wolf/
+.venv/

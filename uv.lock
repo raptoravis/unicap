@@ -868,7 +868,7 @@ wheels = [
 [[package]]
 name = "unicap"
 version = "1.0.8"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "h5py" },
     { name = "numpy" },
