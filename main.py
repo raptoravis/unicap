@@ -73,7 +73,7 @@ CAP_HEIGHT = 1080
 CAP_FPS    = 30
 SURVEY_FPS = 1.0   # Python wait cadence during survey sweep
 
-VK_F8, VK_F9 = 0x77, 0x78
+VK_F6, VK_F7, VK_F8, VK_F9 = 0x75, 0x76, 0x77, 0x78
 _user32 = ctypes.WinDLL("user32")
 
 
@@ -153,6 +153,49 @@ def _spawn_f9_watcher(stop_event: threading.Event) -> threading.Event:
 
     threading.Thread(target=watcher, daemon=True).start()
     return quit_evt
+
+
+# ── Demo-quality watcher (record-demo mode) ──────────────────────────────────
+# F6 = mark current segment as "good demo" (DEMO_QUALITY_GOOD = 1)
+# F7 = mark current segment as "bad demo" (DEMO_QUALITY_BAD = 2)
+# Holds the value until user toggles. Starts unmarked (0). The watcher reads
+# transitions (key-down edges) and updates a shared mutable [int] cell that the
+# input thread polls every sample via quality_provider.
+
+def _spawn_quality_watcher(quality_state: list, quit_evt: threading.Event,
+                           announce: bool = True) -> None:
+    """quality_state: 1-element list[int] (mutable cell). Updated when F6/F7
+    pressed. Called from _run_capture; thread exits when quit_evt is set."""
+    from tools.capture.capture_all import (
+        DEMO_QUALITY_GOOD, DEMO_QUALITY_BAD, DEMO_QUALITY_UNMARKED,
+    )
+
+    def watcher():
+        _drain_keys([VK_F6, VK_F7])
+        if announce:
+            print("[DEMO] F6=标记 good 段 / F7=标记 bad 段 / 再按相同键取消（→ unmarked）",
+                  flush=True)
+        while not quit_evt.is_set():
+            if _key_down(VK_F6):
+                new = (DEMO_QUALITY_UNMARKED
+                       if quality_state[0] == DEMO_QUALITY_GOOD
+                       else DEMO_QUALITY_GOOD)
+                quality_state[0] = new
+                tag = "GOOD" if new == DEMO_QUALITY_GOOD else "UNMARKED"
+                print(f"[DEMO] F6 → {tag}", flush=True)
+                _drain_keys([VK_F6])
+            elif _key_down(VK_F7):
+                new = (DEMO_QUALITY_UNMARKED
+                       if quality_state[0] == DEMO_QUALITY_BAD
+                       else DEMO_QUALITY_BAD)
+                quality_state[0] = new
+                tag = "BAD" if new == DEMO_QUALITY_BAD else "UNMARKED"
+                print(f"[DEMO] F7 → {tag}", flush=True)
+                _drain_keys([VK_F7])
+            else:
+                time.sleep(0.05)
+
+    threading.Thread(target=watcher, daemon=True, name="quality-watcher").start()
 
 
 # ── Survey result lookup ──────────────────────────────────────────────────────
@@ -585,8 +628,9 @@ def cmd_launch(args):
 
     if args.hints:
         ui_mode = getattr(args, "ui_mode", "no-ui")
+        record_demo = getattr(args, "record_demo", False)
         print()
-        print(f"┌─ 操作提示 (ui-mode={ui_mode}) ────────────────────────┐")
+        print(f"┌─ 操作提示 (ui-mode={ui_mode}{', record-demo' if record_demo else ''}) ────────────────────────┐")
         if ui_mode == "ui":
             print("│  F8  开始采集 post-UI BackBuffer（无需 survey）       │")
         elif ui_mode == "both":
@@ -596,6 +640,9 @@ def cmd_launch(args):
         if ui_mode != "ui":
             print("│  (重做 survey: 删 dataset/<game>/survey/recommended_skip.txt) │")
         print("│  F9  停止当前 survey 或采集                           │")
+        if record_demo:
+            print("│  F6  标记当前段为 GOOD（再按一次 → UNMARKED）          │")
+            print("│  F7  标记当前段为 BAD（再按一次 → UNMARKED）           │")
         print("│  Ctrl+C  退出 main.py（不会关闭游戏）                 │")
         print("└──────────────────────────────────────────────────────┘\n")
 
@@ -712,7 +759,13 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path,
     session_dir.mkdir(parents=True, exist_ok=True)
 
     duration = float(getattr(args, "capture_duration", 60.0))
-    if duration > 0:
+    record_demo = bool(getattr(args, "record_demo", False))
+    if record_demo:
+        # record-demo mode is human-only: never start auto-play in this path.
+        # F6/F7 mark good/bad segments; no bot input is injected.
+        print(f"\n[CAPTURE] record-demo 模式（人类玩；F6/F7 标段；不启 auto-play） → {session_dir}",
+              flush=True)
+    elif duration > 0:
         print(f"\n[CAPTURE] 开始采集 (单次 {duration:.0f}s 自动 roll；F9 终止整轮) → {session_dir}",
               flush=True)
     else:
@@ -720,7 +773,29 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path,
     if just_surveyed:
         time.sleep(0.5)  # let the post-survey skip pulse settle
 
-    auto_play_runner = _start_auto_play(args, frames_dir, game_exe_stem=game_name)
+    auto_play_runner = (None if record_demo
+                        else _start_auto_play(args, frames_dir, game_exe_stem=game_name))
+
+    quality_state: list[int] = [0]  # mutable cell shared with input thread
+    quality_quit_evt: threading.Event | None = None
+    quality_provider = None
+    if record_demo:
+        quality_quit_evt = threading.Event()
+        _spawn_quality_watcher(quality_state, quality_quit_evt)
+        quality_provider = lambda: quality_state[0]
+    elif getattr(args, "record_recovery", False) and auto_play_runner is not None:
+        # G-004 DAgger: while bot drives, samples are unmarked (0); when human
+        # takes over (TakeoverDetector trips), tag those samples as good_recovery
+        # so train-bc can upweight them on the next training pass.
+        from tools.capture.capture_all import (
+            DEMO_QUALITY_RECOVERY, DEMO_QUALITY_UNMARKED,
+        )
+        _runner_ref = auto_play_runner
+        def _recovery_provider():
+            return (DEMO_QUALITY_RECOVERY if _runner_ref.is_taken_over()
+                    else DEMO_QUALITY_UNMARKED)
+        quality_provider = _recovery_provider
+        print("[CAPTURE] --record-recovery: 接管期间 demo_quality=good_recovery", flush=True)
 
     t_cap = time.perf_counter()
     f9_event = threading.Event()
@@ -748,11 +823,14 @@ def _run_capture(args, game_dir: Path, game_name: str, dataset_root: Path,
             inputs_out=inputs_out,
             watch_dir=game_dir,
             stop_event=stop_event,
+            quality_provider=quality_provider,
         )
     finally:
         if timer is not None:
             timer.cancel()
         quit_watcher.set()
+        if quality_quit_evt is not None:
+            quality_quit_evt.set()
         if auto_play_runner is not None:
             auto_play_runner.stop()
         _set_state(game_dir, "idle")
@@ -1123,6 +1201,12 @@ def main():
                    help="--pack 时同时打包 /normal（默认不打包）")
     p.add_argument("--auto-play", action="store_true",
                    help="启用自动玩游戏 bot（capture 期间持续注入输入；F9 停止时一并停）")
+    p.add_argument("--record-demo", action="store_true",
+                   help="录人类 demo 模式：禁 auto-play；F6=标 good 段 / F7=标 bad 段（每条 "
+                        "input 写 demo_quality；pack 时进 /demo_quality HDF5）")
+    p.add_argument("--record-recovery", action="store_true",
+                   help="DAgger：与 --auto-play 同用；接管期间样本标 good_recovery（train-bc "
+                        "用 --recovery-weight 加权再训）")
     p.add_argument("--profile", default="",
                    help="auto-play profile 名 (profiles/<name>.yaml)；不传则按 exe 名 fuzzy match，回落 _default")
     p.add_argument("--auto-play-debug", action="store_true",
@@ -1136,6 +1220,25 @@ def main():
     p.add_argument("--mask-ui", action="store_true",
                    help="额外生成 video_masked.mp4：用 sibling DepthBuffer.exr 的 depth==0 "
                         "把 UI 像素置黑（适用于 --ui-mode ui 采集 + UE4/id Tech 引擎）")
+
+    p = sub.add_parser("train-bc", help="离线训 behavior-cloning 模型（需 uv sync --extra train）")
+    p.add_argument("--profile", required=True, help="profile 名（决定 controls + 输出目录）")
+    p.add_argument("--dataset", default="", metavar="PATH/GLOB",
+                   help="HDF5 路径或 glob；不传则扫 DATASET_ROOT/<profile>/*/dataset.h5")
+    p.add_argument("--output", default="", metavar="DIR",
+                   help="输出目录；默认 models/<profile>/")
+    p.add_argument("--epochs", type=int, default=20)
+    p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
+    p.add_argument("--backbone", default="resnet18",
+                   choices=["resnet18", "mobilenetv3_small"])
+    p.add_argument("--frame-window", type=int, default=8)
+    p.add_argument("--input-h", type=int, default=144)
+    p.add_argument("--input-w", type=int, default=256)
+    p.add_argument("--recovery-weight", type=float, default=2.0)
+    p.add_argument("--ui-mode", choices=["no-ui", "ui", "both"], default="no-ui",
+                   help="标注训练时使用的 ui-mode，runtime BCDriver 会校验一致性")
 
     p = sub.add_parser("pack", help="批量打包游戏目录下所有采集会话；已有 dataset.h5 跳过")
     p.add_argument("--game-dir", default="", metavar="DIR",
@@ -1153,7 +1256,11 @@ def main():
 
     args = parser.parse_args()
     print(f"unicap v{VERSION}", flush=True)
-    {"launch": cmd_launch, "video": cmd_video, "pack": cmd_pack}[args.cmd](args)
+    if args.cmd == "train-bc":
+        from tools.train.bc_train import cli as cmd_train_bc
+        cmd_train_bc(args)
+    else:
+        {"launch": cmd_launch, "video": cmd_video, "pack": cmd_pack}[args.cmd](args)
 
 
 if __name__ == "__main__":

@@ -27,3 +27,9 @@ config/
 graphify-out/cache/
 graphify-out/*
 .understand-anything/
+
+# BC 训练产物：模型/checkpoint/metrics 不入库（本地大文件）
+models/
+# .scratch/<feature>/ 是项目 issue tracker（per CLAUDE.md）— 入库；
+# 仅排除临时 smoke 脚本
+.scratch/bc-imitation/smoke_*.py

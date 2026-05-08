@@ -306,6 +306,11 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path,
         ds_mouse    = hf.create_dataset('mouse',       (n, 2),              dtype='int32',   chunks=(min(256, n), 2),    **_C)
         ds_gamepad  = hf.create_dataset('gamepad',     (n, GAMEPAD_DIM),    dtype='float32', chunks=(min(256, n), GAMEPAD_DIM), **_C)
 
+        # /demo_quality is created lazily on the first non-zero sample so legacy
+        # captures (no quality field in inputs.jsonl) don't grow a useless
+        # all-zeros dataset. Enum values: 0=unmarked, 1=good, 2=bad, 3=recovery.
+        ds_demo_quality = None
+
         ds_depth  = None
         ds_normal = None
         if mode == 'triplet':
@@ -339,6 +344,15 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path,
             ds_mouse[i]     = np.array(inp['mouse'], dtype='int32')
             ds_gamepad[i]   = _encode_gamepad(inp.get('gamepad'))
 
+            quality = int(inp.get('demo_quality', 0))
+            if quality != 0:
+                if ds_demo_quality is None:
+                    ds_demo_quality = hf.create_dataset(
+                        'demo_quality', (n,), dtype='uint8',
+                        chunks=(min(256, n),), **_C,
+                    )
+                ds_demo_quality[i] = quality
+
             max_dt = max(max_dt, abs(dt_ms))
             if (i + 1) % 10 == 0 or i == n - 1:
                 print(f"\r[PACK] {i + 1}/{n}  对齐误差 {dt_ms:+.1f} ms", end='', flush=True)
@@ -354,8 +368,9 @@ def pack(frames_dir: Path, inputs_path: Path, output_path: Path,
         hf.attrs['timezone']   = 'UTC+8 (frame filenames are local time)'
         hf.attrs['color']       = color           # 'no-ui' or 'ui'
         hf.attrs['primary_bmp'] = primary_key     # 'bmp' or 'bmp_ui'
-        hf.attrs['has_depth']   = ds_depth is not None
-        hf.attrs['has_normal']  = ds_normal is not None
+        hf.attrs['has_depth']        = ds_depth is not None
+        hf.attrs['has_normal']       = ds_normal is not None
+        hf.attrs['has_demo_quality'] = ds_demo_quality is not None
 
     datasets = ['color']
     if ds_depth  is not None: datasets.append('depth')

@@ -25,8 +25,22 @@ if TYPE_CHECKING:
 log = logging.getLogger("unicap.auto_play")
 
 
-def create_driver(profile: GameProfile, *, seed: int | None = None) -> BotDriver:
-    """Factory: only keep-alive driver is supported."""
+def create_driver(profile: GameProfile, *, seed: int | None = None,
+                  frames_dir: Path | None = None) -> BotDriver:
+    """Factory: dispatch on profile.driver.
+
+    'keep_alive' (default) → KeepAliveDriver — scripted YAML sequence
+    'bc'                   → BCDriver — ONNX inference; requires bc.model_path
+                             and a frames_dir for reading BackBuffer.png input
+    """
+    drv = getattr(profile, "driver", "keep_alive")
+    if drv == "bc":
+        if frames_dir is None:
+            raise RuntimeError(
+                "create_driver: driver=bc 需要 frames_dir 参数（读 BackBuffer.png）"
+            )
+        from tools.auto_play.bc_driver import BCDriver
+        return BCDriver(profile, frames_dir=frames_dir, seed=seed)
     return KeepAliveDriver(profile, seed=seed)
 
 
@@ -66,7 +80,7 @@ class AutoPlayRunner:
             logging.getLogger("unicap.auto_play").setLevel(logging.DEBUG)
 
         self._backend = InputBackend(profile, debug=debug)
-        self._driver: BotDriver = create_driver(profile)
+        self._driver: BotDriver = create_driver(profile, frames_dir=frames_dir)
         # Human-takeover detector: 3s 内有主动按键则暂停所有 inject 路径。
         # 鼠标移动不算（避免 bot 自己的 mouse turn 误判为接管）。
         self._takeover = TakeoverDetector(self._backend, profile)
@@ -102,12 +116,14 @@ class AutoPlayRunner:
     def start(self) -> None:
         if self._driver_thread is not None and self._driver_thread.is_alive():
             return
+        drv_name = type(self._driver).__name__
         log.info(
-            "[AUTO-PLAY] 启动 driver=keep-alive profile=%s gamepad=%s",
+            "[AUTO-PLAY] 启动 driver=%s profile=%s gamepad=%s",
+            drv_name,
             self._profile.name,
             "vigem_ok" if self._backend.gamepad_available else "unavailable",
         )
-        print(f"[AUTO-PLAY] driver=keep-alive profile={self._profile.name}"
+        print(f"[AUTO-PLAY] driver={drv_name} profile={self._profile.name}"
               f" gamepad={'vigem_ok' if self._backend.gamepad_available else 'unavailable'}",
               flush=True)
 
@@ -181,6 +197,14 @@ class AutoPlayRunner:
             and self._driver_thread.is_alive()
             and not self._stop_evt.is_set()
         )
+
+    def is_taken_over(self) -> bool:
+        """Public delegation: True iff TakeoverDetector reports human input
+        within its grace window. Used by --record-recovery quality_provider."""
+        try:
+            return bool(self._takeover.is_taken_over())
+        except Exception:
+            return False
 
     @staticmethod
     def _build_attack_action(ctrl) -> "Action | None":

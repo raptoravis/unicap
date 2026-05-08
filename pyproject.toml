@@ -9,6 +9,10 @@ dependencies = [
     "h5py",
     "numpy",
     "pyyaml",
+    # CPU ONNX inference for BCDriver. ~50MB; acceptable runtime cost — see
+    # impact_20260507_bc-imitation.md R1. GPU users opt into onnxruntime-gpu
+    # via the [bc-runtime-gpu] extra (not yet implemented; CPU is the default).
+    "onnxruntime>=1.18",
 ]
 
 [project.optional-dependencies]
@@ -19,6 +23,17 @@ gui = [
 ]
 auto-play = [
     "vgamepad",  # ViGEm Bus driver wrapper; soft-import in InputBackend
+]
+train = [
+    # BC imitation training pipeline (offline only — runtime/inference uses
+    # onnxruntime, never torch). Big deps; isolated under [train] extra so
+    # standalone exe build doesn't pull them in.
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "onnx>=1.16",
+    # torch.onnx.export 在 2.10+ 走 dynamo 路径需要 onnxscript
+    "onnxscript>=0.1",
+    "tqdm>=4.66",
 ]
 auto-play-ocr = [
     # Windows.Media.Ocr via winrt — used by watchdog C arm to detect

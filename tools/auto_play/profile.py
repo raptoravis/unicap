@@ -20,15 +20,19 @@ REQUIRED_TOP_LEVEL_KEYS = {
     "name", "description", "controls", "reserved_keys",
     "keep_alive", "watchdog", "input",
 }
+# Optional top-level keys (do not raise if missing).
+OPTIONAL_TOP_LEVEL_KEYS = {"driver", "bc"}
+VALID_DRIVERS = {"keep_alive", "bc"}
 REQUIRED_KEEP_ALIVE_KEYS = {"period_s", "sequence", "recovery"}
 REQUIRED_WATCHDOG_KEYS = {
     "sample_period_s", "static_diff_threshold", "consecutive_static_required",
 }
 REQUIRED_INPUT_KEYS = {"prefer_gamepad", "mouse_sensitivity"}
 
-# F8/F9 = capture start/stop. These two are unicap's hotkeys — auto-play
-# must NEVER inject them. Profile may add more entries but cannot remove these.
-MANDATORY_RESERVED_KEYS = {"F8", "F9"}
+# F6/F7 = demo-quality markers (good/bad), F8/F9 = capture start/stop.
+# These are unicap's hotkeys — auto-play must NEVER inject them. Profile may
+# add more entries but cannot remove these.
+MANDATORY_RESERVED_KEYS = {"F6", "F7", "F8", "F9"}
 
 VALID_STEP_ACTIONS = {
     "move_forward", "move_back", "move_left", "move_right",
@@ -50,6 +54,8 @@ class GameProfile:
     watchdog: dict[str, Any]
     input: dict[str, Any]
     source_path: Path | None = None
+    driver: str = "keep_alive"          # 'keep_alive' (default) | 'bc'
+    bc: dict[str, Any] = field(default_factory=dict)
 
 
 def _profiles_dir(override: Path | None) -> Path:
@@ -63,6 +69,23 @@ def _validate_profile(data: dict, source: str) -> None:
     missing = REQUIRED_TOP_LEVEL_KEYS - data.keys()
     if missing:
         raise ValueError(f"profile {source}: 缺少必填字段 {sorted(missing)}")
+
+    driver = str(data.get("driver", "keep_alive"))
+    if driver not in VALID_DRIVERS:
+        raise ValueError(
+            f"profile {source}: driver={driver!r} 不在 {sorted(VALID_DRIVERS)}"
+        )
+    if driver == "bc":
+        bc = data.get("bc")
+        if not isinstance(bc, dict):
+            raise ValueError(
+                f"profile {source}: driver=bc 时必须有 'bc:' 段（含 model_path）"
+            )
+        if not bc.get("model_path"):
+            raise ValueError(
+                f"profile {source}: driver=bc 时 bc.model_path 必填"
+                f"（指向 train-bc 输出的 model.onnx）"
+            )
 
     for sub_name, required in (
         ("keep_alive", REQUIRED_KEEP_ALIVE_KEYS),
@@ -81,12 +104,9 @@ def _validate_profile(data: dict, source: str) -> None:
     reserved = data["reserved_keys"]
     if not isinstance(reserved, list) or not all(isinstance(k, str) for k in reserved):
         raise ValueError(f"profile {source}: 'reserved_keys' 必须是 str list")
-    reserved_upper = {k.upper() for k in reserved}
-    if not MANDATORY_RESERVED_KEYS.issubset(reserved_upper):
-        raise ValueError(
-            f"profile {source}: reserved_keys 必须包含 {sorted(MANDATORY_RESERVED_KEYS)}"
-            f"（unicap 自身的 F8/F9 不允许 bot 注入）"
-        )
+    # Auto-merge mandatory keys (F6/F7/F8/F9 are unicap-managed; profile may
+    # omit them — we silently inject so existing profiles stay valid).
+    reserved_upper = {k.upper() for k in reserved} | MANDATORY_RESERVED_KEYS
 
     controls = data["controls"]
     if not isinstance(controls, dict):
@@ -95,7 +115,7 @@ def _validate_profile(data: dict, source: str) -> None:
         if isinstance(ctrl_value, str) and ctrl_value.upper() in reserved_upper:
             raise ValueError(
                 f"profile {source}: controls.{ctrl_name}={ctrl_value!r}"
-                f" 与 reserved_keys 冲突"
+                f" 与 reserved_keys 冲突（含 unicap 自管 F6/F7/F8/F9）"
             )
 
     for seq_name in ("sequence", "recovery"):
@@ -161,15 +181,20 @@ def _read_profile_file(path: Path) -> GameProfile:
     if not isinstance(data, dict):
         raise ValueError(f"profile {path}: 顶层必须是 mapping/dict")
     _validate_profile(data, str(path))
+    # Auto-merge MANDATORY_RESERVED_KEYS so callers can rely on F6/F7/F8/F9
+    # being present regardless of the profile YAML's explicit list.
+    merged_reserved = sorted({k.upper() for k in data["reserved_keys"]} | MANDATORY_RESERVED_KEYS)
     return GameProfile(
         name=data["name"],
         description=data["description"],
         controls=data["controls"],
-        reserved_keys=[k.upper() for k in data["reserved_keys"]],
+        reserved_keys=merged_reserved,
         keep_alive=data["keep_alive"],
         watchdog=data["watchdog"],
         input=data["input"],
         source_path=path,
+        driver=str(data.get("driver", "keep_alive")),
+        bc=dict(data.get("bc", {})),
     )
 
 

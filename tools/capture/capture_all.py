@@ -64,8 +64,23 @@ def _parse_xinput(state):
         "ry": g.sThumbRY  / 32767.0,
     }
 
+# Demo-quality enum, written to inputs.jsonl per sample (G-001 / G-004).
+# 0=unmarked (default — also written by older runs that had no field at all)
+# 1=good          — F6 in record-demo mode tagged this segment
+# 2=bad           — F7 tagged this segment
+# 3=good_recovery — human took over BC bot; sample comes from human input
+DEMO_QUALITY_UNMARKED = 0
+DEMO_QUALITY_GOOD = 1
+DEMO_QUALITY_BAD = 2
+DEMO_QUALITY_RECOVERY = 3
+
+
 # ── 线程：输入录制 ─────────────────────────────────────────────────────────────
-def _thread_input(stop: threading.Event, inputs_out: Path):
+def _thread_input(stop: threading.Event, inputs_out: Path,
+                  quality_provider=None):
+    """quality_provider: optional callable () -> int returning DEMO_QUALITY_*.
+    When provided, each sample stamps the returned value into 'demo_quality'.
+    When None, demo_quality is omitted (legacy schema)."""
     inputs_out.parent.mkdir(parents=True, exist_ok=True)
     log = []
     t_start = time.time_ns()
@@ -89,7 +104,14 @@ def _thread_input(stop: threading.Event, inputs_out: Path):
             state = XINPUT_STATE()
             if xinput.XInputGetState(0, ctypes.byref(state)) == 0:
                 gamepad = _parse_xinput(state)
-        log.append({"ts": t, "kb": list(kb), "mouse": [pt.x, pt.y], "gamepad": gamepad})
+        entry = {"ts": t, "kb": list(kb), "mouse": [pt.x, pt.y], "gamepad": gamepad}
+        if quality_provider is not None:
+            try:
+                entry["demo_quality"] = int(quality_provider())
+            except Exception:
+                # Provider failure must not kill the input thread.
+                entry["demo_quality"] = DEMO_QUALITY_UNMARKED
+        log.append(entry)
         stop.wait(1 / 120)
 
     elapsed = (time.time_ns() - t_start) / 1e9
@@ -101,7 +123,8 @@ def _thread_input(stop: threading.Event, inputs_out: Path):
 
 # ── 主入口 ────────────────────────────────────────────────────────────────────
 def run(fps: int = 30, duration=None, frames_dir: Path = None, inputs_out: Path = None,
-        watch_dir: Path = None, stop_event: threading.Event = None):
+        watch_dir: Path = None, stop_event: threading.Event = None,
+        quality_provider=None):
     """
     采集帧 + 输入。停止条件（任一触发即停）：
       - 外部 stop_event 被 set（F9 热键）
@@ -124,7 +147,10 @@ def run(fps: int = 30, duration=None, frames_dir: Path = None, inputs_out: Path 
     print(f"       输入 → {inputs_out}\n")
 
     stop = stop_event if stop_event is not None else threading.Event()
-    t_input = threading.Thread(target=_thread_input, args=(stop, inputs_out), name="input", daemon=True)
+    t_input = threading.Thread(
+        target=_thread_input, args=(stop, inputs_out, quality_provider),
+        name="input", daemon=True,
+    )
     t_input.start()
 
     t_start = time.perf_counter()
