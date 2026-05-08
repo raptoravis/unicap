@@ -160,6 +160,11 @@ function Build-Cli {
             --output-dir=$cliBuildDir `
             --output-filename=unicap.exe `
             --include-package=tools `
+            --nofollow-import-to=tools.train `
+            --nofollow-import-to=torch `
+            --nofollow-import-to=torchvision `
+            --nofollow-import-to=onnx `
+            --nofollow-import-to=onnxscript `
             --include-data-dir=dist=dist `
             --include-data-files=dist/dxgi.dll=dist/dxgi.dll `
             --include-data-files=dist/UniCap64.dll=dist/UniCap64.dll `
@@ -293,6 +298,11 @@ sys.exit(main())
             --nofollow-import-to=PySide6.QtTest `
             --nofollow-import-to=PySide6.QtWebChannel `
             --nofollow-import-to=PySide6.QtWebSockets `
+            --nofollow-import-to=tools.train `
+            --nofollow-import-to=torch `
+            --nofollow-import-to=torchvision `
+            --nofollow-import-to=onnx `
+            --nofollow-import-to=onnxscript `
             --include-data-dir=dist=dist `
             --include-data-files=dist/dxgi.dll=dist/dxgi.dll `
             --include-data-files=dist/UniCap64.dll=dist/UniCap64.dll `

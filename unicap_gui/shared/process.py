@@ -28,11 +28,11 @@ log = logging.getLogger("unicap_gui.process")
 
 # Windows 专用 flag。Linux/macOS 没这个常量但我们整体不支持。
 CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-# 注：曾经加过 CREATE_NO_WINDOW (0x08000000) 防止 child 弹 console，但 GUI 在
-# frozen 模式已 FreeConsole，再加 CREATE_NO_WINDOW 会触发 CreateProcess
-# WinError 50 ERROR_NOT_SUPPORTED（父进程无 console + CREATE_NO_WINDOW 组合
-# 在某些 Windows 版本上不被支持）。stdout 走 PIPE 本身就足以避免 child 弹
-# 新 console，所以 flag 不再需要。
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+# unicap.exe 是 console-subsystem 二进制（Nuitka multidist 与 unicap-gui.exe 同
+# 一份字节）。GUI frozen 启动时已 FreeConsole，spawn 时若不加 CREATE_NO_WINDOW，
+# Windows loader 会给 child 重新分配一个可见 console。stdout=PIPE 只重定向 stdio
+# handle，不阻止 console 分配。
 
 # `[CAPTURE] 开始采集 ... → <session_dir>` —— main.py:728/731
 _RE_SESSION = re.compile(r"\[CAPTURE\].*?→\s*(.+)$")
@@ -127,7 +127,7 @@ class SubprocessRunner(QObject):
                 encoding="utf-8",
                 errors="replace",           # 中文路径 / 非法 utf-8 不崩
                 env=env,
-                creationflags=CREATE_NEW_PROCESS_GROUP,
+                creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
             )
         except FileNotFoundError as e:
             self.error.emit(
