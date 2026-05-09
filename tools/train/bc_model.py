@@ -104,7 +104,8 @@ class BCModel(nn.Module):
         """Export ONNX with static shape (1, T, 3, H, W). Output names match
         forward() dict keys; BCDriver reads them by name."""
         self.eval()
-        dummy = torch.zeros(1, frame_window, 3, input_h, input_w)
+        device = next(self.parameters()).device
+        dummy = torch.zeros(1, frame_window, 3, input_h, input_w, device=device)
         out_names = ["kb", "mouse_dx", "mouse_dy"]
         if self.head_mouse_btn is not None:
             out_names.append("mouse_btn")

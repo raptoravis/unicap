@@ -319,12 +319,28 @@ def run(
         if metrics["macro_kb_f1"] > best_macro_f1:
             best_macro_f1 = metrics["macro_kb_f1"]
 
-    # Final ONNX export
+        # 每 epoch 末覆盖式存 last.pt — 防止后续 ONNX export / OOM 等崩溃把
+        # 几小时训练全丢。文件不大（resnet18 ~45MB），覆盖写不占空间。
+        ckpt_path = output_dir / "last.pt"
+        torch.save({
+            "model_state": model.state_dict(),
+            "epoch": epoch,
+            "frame_window": frame_window,
+            "input_h": input_h,
+            "input_w": input_w,
+        }, ckpt_path)
+
+    # Final ONNX export — 失败也保留 last.pt，可用 --resume-export 重做
     onnx_path = output_dir / "model.onnx"
     model.eval()
-    model.export_onnx(onnx_path, frame_window=frame_window,
-                      input_h=input_h, input_w=input_w)
-    _flog(f"[BC-TRAIN] ONNX 写入: {onnx_path} ({onnx_path.stat().st_size/1024/1024:.1f} MB)")
+    try:
+        model.export_onnx(onnx_path, frame_window=frame_window,
+                          input_h=input_h, input_w=input_w)
+        _flog(f"[BC-TRAIN] ONNX 写入: {onnx_path} ({onnx_path.stat().st_size/1024/1024:.1f} MB)")
+    except Exception as e:
+        _flog(f"[BC-TRAIN] ONNX export 失败: {e}")
+        _flog(f"[BC-TRAIN] last.pt 已保留: {output_dir / 'last.pt'}")
+        raise
 
     # Final metrics + meta
     final_metrics = _evaluate(model, val_loader, dev, has_mouse_btn)
