@@ -27,9 +27,6 @@ _RE_TRAIN_DONE = re.compile(r"\[BC-TRAIN\].*?完成")
 _RE_EPOCH = re.compile(r"\[BC-TRAIN\]\s+epoch=\s*(\d+)/(\d+)")
 # `val_kb_f1=0.123 val_dx_top1=0.234 val_dy_top1=0.345`
 _RE_VAL = re.compile(r"val_kb_f1=([\d.]+)\s+val_dx_top1=([\d.]+)\s+val_dy_top1=([\d.]+)")
-# `epoch_time=12.3s total_elapsed=45.6s`
-_RE_TIMING = re.compile(r"epoch_time=([\d.]+s)\s+total_elapsed=([\d.]+s)")
-
 
 class TrainBCTab(BaseTab):
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -153,9 +150,6 @@ class TrainBCTab(BaseTab):
             mv = _RE_VAL.search(line)
             if mv:
                 label_parts.append(f"val: kb_f1={mv.group(1)} dx={mv.group(2)} dy={mv.group(3)}")
-            mt = _RE_TIMING.search(line)
-            if mt:
-                label_parts.append(f"time: epoch={mt.group(1)} total={mt.group(2)}")
             if label_parts:
                 self._progress_label.setText("  |  ".join(label_parts))
             return
@@ -173,12 +167,12 @@ class TrainBCTab(BaseTab):
         cur = min(max(1, cur), total)
 
         if self._epoch_started_at is None:
-            self._progress.setFormat(f"epoch {self._progress.value()}/{total} | 总耗时 {total_elapsed}")
+            self._progress.setFormat(f"已完成 {self._progress.value()}/{total} epoch | 总耗时 {total_elapsed}")
             return
 
         epoch_elapsed = _format_duration(now - self._epoch_started_at)
         self._progress.setFormat(
-            f"第 {cur}/{total} epoch | 当前 {epoch_elapsed} | 总耗时 {total_elapsed}"
+            f"第 {cur}/{total} epoch | 本轮耗时 {epoch_elapsed} | 总耗时 {total_elapsed}"
         )
 
 
