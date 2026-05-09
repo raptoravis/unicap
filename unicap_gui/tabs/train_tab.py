@@ -10,7 +10,9 @@ UI 与其它 tab 同骨架（FlagForm + CLIPreview + Start/Stop + Log）；额�
 from __future__ import annotations
 
 import re
+import time
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QProgressBar, QWidget
 
 from unicap_gui.shared import settings as gui_settings
@@ -25,6 +27,8 @@ _RE_TRAIN_DONE = re.compile(r"\[BC-TRAIN\].*?完成")
 _RE_EPOCH = re.compile(r"\[BC-TRAIN\]\s+epoch=\s*(\d+)/(\d+)")
 # `val_kb_f1=0.123 val_dx_top1=0.234 val_dy_top1=0.345`
 _RE_VAL = re.compile(r"val_kb_f1=([\d.]+)\s+val_dx_top1=([\d.]+)\s+val_dy_top1=([\d.]+)")
+# `epoch_time=12.3s total_elapsed=45.6s`
+_RE_TIMING = re.compile(r"epoch_time=([\d.]+s)\s+total_elapsed=([\d.]+s)")
 
 
 class TrainBCTab(BaseTab):
@@ -34,6 +38,13 @@ class TrainBCTab(BaseTab):
     def _wire_extra(self) -> None:
         self._models = ModelList(self)
         self._top_box.addWidget(self._models)
+        self._train_started_at: float | None = None
+        self._epoch_started_at: float | None = None
+        self._current_epoch = 0
+        self._total_epochs = 0
+        self._progress_timer = QTimer(self)
+        self._progress_timer.setInterval(60_000)
+        self._progress_timer.timeout.connect(self._refresh_progress_format)
 
         # Progress bar —— 训练时显示 epoch 进度 + 最近一次 val metrics。
         self._progress = QProgressBar(self)
@@ -99,12 +110,21 @@ class TrainBCTab(BaseTab):
     def _on_train_started(self, _cmd) -> None:
         # 训练启动时显示"等待第一个 epoch"，直到 [BC-TRAIN] epoch= 行到来。
         epochs = int(self._form.values().get("epochs", 20) or 20)
-        self._progress.setRange(0, max(1, epochs))
+        self._total_epochs = max(1, epochs)
+        now = time.perf_counter()
+        self._train_started_at = now
+        self._epoch_started_at = now
+        self._current_epoch = 1
+        self._progress.setRange(0, self._total_epochs)
         self._progress.setValue(0)
-        self._progress.setFormat(f"等待第 1/{epochs} epoch …")
         self._progress_label.setText("")
+        self._refresh_progress_format()
+        self._progress_timer.start()
 
     def _on_train_stopped(self, rc: int) -> None:
+        self._progress_timer.stop()
+        self._train_started_at = None
+        self._epoch_started_at = None
         self._models.rescan()
         if rc == 0 and self._progress.value() < self._progress.maximum():
             # 训练成功但 epoch 没全跑完？把进度填满让用户视觉确认成功。
@@ -120,13 +140,52 @@ class TrainBCTab(BaseTab):
             cur, total = int(m.group(1)), int(m.group(2))
             if self._progress.maximum() != total:
                 self._progress.setRange(0, total)
+            self._total_epochs = total
             self._progress.setValue(cur)
-            self._progress.setFormat(f"epoch {cur}/{total}")
+            if cur < total:
+                self._current_epoch = cur + 1
+                self._epoch_started_at = time.perf_counter()
+            else:
+                self._current_epoch = cur
+                self._epoch_started_at = None
+            self._refresh_progress_format()
+            label_parts: list[str] = []
             mv = _RE_VAL.search(line)
             if mv:
-                self._progress_label.setText(
-                    f"val: kb_f1={mv.group(1)} dx={mv.group(2)} dy={mv.group(3)}"
-                )
+                label_parts.append(f"val: kb_f1={mv.group(1)} dx={mv.group(2)} dy={mv.group(3)}")
+            mt = _RE_TIMING.search(line)
+            if mt:
+                label_parts.append(f"time: epoch={mt.group(1)} total={mt.group(2)}")
+            if label_parts:
+                self._progress_label.setText("  |  ".join(label_parts))
             return
         if _RE_TRAIN_DONE.search(line):
             self._models.rescan()
+
+    def _refresh_progress_format(self) -> None:
+        if self._train_started_at is None:
+            return
+
+        now = time.perf_counter()
+        total_elapsed = _format_duration(now - self._train_started_at)
+        total = self._total_epochs or max(1, self._progress.maximum())
+        cur = self._current_epoch or min(self._progress.value() + 1, total)
+        cur = min(max(1, cur), total)
+
+        if self._epoch_started_at is None:
+            self._progress.setFormat(f"epoch {self._progress.value()}/{total} | 总耗时 {total_elapsed}")
+            return
+
+        epoch_elapsed = _format_duration(now - self._epoch_started_at)
+        self._progress.setFormat(
+            f"第 {cur}/{total} epoch | 当前 {epoch_elapsed} | 总耗时 {total_elapsed}"
+        )
+
+
+def _format_duration(seconds: float) -> str:
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"

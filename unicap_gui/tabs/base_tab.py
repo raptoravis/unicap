@@ -202,9 +202,9 @@ class BaseTab(QWidget):
     def _on_subprocess_started(self, cmd: list[str]) -> None:
         self._apply_start_button_style(running=True)
         self._btn_start.setEnabled(True)  # stop 路径永远可点
-        # 锁 form：跑起来后改字段没意义（不会重启 main.py）；要换 game-path
-        # 必须先停 main.py。dashboard / F8-F9 按钮 / log 不在 form 内，不受影响。
-        self._form.setEnabled(False)
+        # 锁 form 控件：跑起来后改字段没意义（不会重启 main.py）；但滚动区
+        # 本身要保持可拖动，方便查看被锁定的参数。
+        self._form.set_controls_enabled(False)
         self._status.setText(f"运行中（pid={self._runner.pid()}）")
         self._status.setStyleSheet("color: #2e7d32; font-weight: bold;")
         self._log.append_line(f"[unicap-gui] cmd: {_format_cmd(cmd)}")
@@ -213,7 +213,7 @@ class BaseTab(QWidget):
     def _on_subprocess_stopped(self, rc: int) -> None:
         self._apply_start_button_style(running=False)
         self._btn_start.setEnabled(True)
-        self._form.setEnabled(True)
+        self._form.set_controls_enabled(True)
         self._status.setText(f"已退出 rc={rc}")
         color = "#2e7d32" if rc == 0 else "#c62828"
         self._status.setStyleSheet(f"color: {color};")

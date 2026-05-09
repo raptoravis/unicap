@@ -39,6 +39,7 @@ class FlagForm(QScrollArea):
         super().__init__(parent)
         self._schema = schema
         self._editors: dict[str, QWidget] = {}
+        self._browse_buttons: dict[str, QPushButton] = {}
 
         inner = QWidget()
         layout = QVBoxLayout(inner)
@@ -70,6 +71,12 @@ class FlagForm(QScrollArea):
     def schema(self) -> SubcommandSchema:
         return self._schema
 
+    def set_controls_enabled(self, enabled: bool) -> None:
+        for editor in self._editors.values():
+            editor.setEnabled(enabled)
+        for button in self._browse_buttons.values():
+            button.setEnabled(enabled)
+
     # ── 行 builder ────────────────────────────────────────────────────────
 
     def _build_row(self, spec: FlagSpec) -> QHBoxLayout:
@@ -91,6 +98,7 @@ class FlagForm(QScrollArea):
             btn = QPushButton("浏览…")
             btn.setMaximumWidth(80)
             btn.clicked.connect(lambda _=False, s=spec: self._browse_path(s))
+            self._browse_buttons[spec.cli_key()] = btn
             row.addWidget(btn)
 
         return row

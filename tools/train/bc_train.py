@@ -4,7 +4,7 @@ Produces:
   <output>/model.onnx
   <output>/meta.json       — schema for runtime BCDriver
   <output>/metrics.json    — held-out validation metrics (G-005)
-  <output>/train_log.txt   — per-epoch loss + val
+  <output>/train_log.txt   — per-epoch loss + val + timing
 """
 
 from __future__ import annotations
@@ -175,6 +175,7 @@ def run(
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path = output_dir / "train_log.txt"
     log_fh = log_path.open("w", encoding="utf-8")
+    train_started_at = time.perf_counter()
     def _flog(msg: str) -> None:
         log_fh.write(msg + "\n")
         log_fh.flush()
@@ -269,8 +270,8 @@ def run(
     has_mouse_btn = action_space.num_mouse_btn > 0
     best_macro_f1 = -1.0
 
-    t_start = time.perf_counter()
     for epoch in range(1, epochs + 1):
+        epoch_started_at = time.perf_counter()
         model.train()
         # Re-freeze backbone batchnorm running stats (eval mode for BN).
         model.backbone.eval()
@@ -307,14 +308,17 @@ def run(
 
         avg_loss = total_loss / max(n_batches, 1)
         metrics = _evaluate(model, val_loader, dev, has_mouse_btn)
-        elapsed = time.perf_counter() - t_start
+        now = time.perf_counter()
+        epoch_elapsed = now - epoch_started_at
+        total_elapsed = now - train_started_at
         _flog(
             f"[BC-TRAIN] epoch={epoch:2d}/{epochs} "
             f"train_loss={avg_loss:.4f} "
             f"val_kb_f1={metrics['macro_kb_f1']:.3f} "
             f"val_dx_top1={metrics['mouse_dx_top1']:.3f} "
             f"val_dy_top1={metrics['mouse_dy_top1']:.3f} "
-            f"elapsed={elapsed:.1f}s"
+            f"epoch_time={epoch_elapsed:.1f}s "
+            f"total_elapsed={total_elapsed:.1f}s"
         )
         if metrics["macro_kb_f1"] > best_macro_f1:
             best_macro_f1 = metrics["macro_kb_f1"]
