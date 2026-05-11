@@ -9,6 +9,7 @@ Produces:
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import math
@@ -280,6 +281,32 @@ def run(
 
     has_mouse_btn = action_space.num_mouse_btn > 0
     best_macro_f1 = -1.0
+    best_state: dict | None = None
+    best_epoch = 0
+    best_metrics: dict | None = None
+
+    # ── pos_weight: 缓解 idle 帧主导导致 BCE 收敛到全 0 ──────────────
+    # pos_weight_k = (1 - p_k) / p_k，其中 p_k = 第 k 个键的正样本频率
+    # 极稀有键会得到 huge weight → cap 到 POS_WEIGHT_CAP 防梯度爆炸
+    POS_WEIGHT_CAP = 20.0
+    POS_WEIGHT_FLOOR = 1e-3   # p_k < floor 视为该键全无样本，权重设 1（不放大）
+    kb_pos_freq, mb_pos_freq = train_ds.label_pos_freq()
+    def _pos_weight(freq: np.ndarray) -> torch.Tensor | None:
+        if freq.size == 0:
+            return None
+        pw = np.where(freq > POS_WEIGHT_FLOOR,
+                      (1.0 - freq) / np.clip(freq, POS_WEIGHT_FLOOR, 1.0),
+                      1.0)
+        pw = np.clip(pw, 1.0, POS_WEIGHT_CAP).astype(np.float32)
+        return torch.from_numpy(pw).to(dev)
+    kb_pos_weight = _pos_weight(kb_pos_freq)
+    mb_pos_weight = _pos_weight(mb_pos_freq) if has_mouse_btn else None
+    if kb_pos_weight is not None:
+        _flog(f"[BC-TRAIN] kb_pos_freq={[f'{x:.3f}' for x in kb_pos_freq.tolist()]}")
+        _flog(f"[BC-TRAIN] kb_pos_weight={[f'{x:.2f}' for x in kb_pos_weight.cpu().tolist()]} (cap={POS_WEIGHT_CAP})")
+    if mb_pos_weight is not None:
+        _flog(f"[BC-TRAIN] mb_pos_freq={[f'{x:.3f}' for x in mb_pos_freq.tolist()]}")
+        _flog(f"[BC-TRAIN] mb_pos_weight={[f'{x:.2f}' for x in mb_pos_weight.cpu().tolist()]}")
 
     for epoch in range(1, epochs + 1):
         epoch_started_at = time.perf_counter()
@@ -298,9 +325,10 @@ def run(
             w = batch["weight"].to(dev, non_blocking=nb)
 
             out = model(frames)
-            # KB loss: sample-weighted BCE
+            # KB loss: sample-weighted BCE + per-key pos_weight
             kb_loss = F.binary_cross_entropy_with_logits(
-                out["kb"], kb_t, reduction="none"
+                out["kb"], kb_t, reduction="none",
+                pos_weight=kb_pos_weight,
             ).mean(dim=1)
             kb_loss = (kb_loss * w).mean()
             dx_loss = (F.cross_entropy(out["mouse_dx"], dx_t, reduction="none") * w).mean()
@@ -308,7 +336,8 @@ def run(
             loss = kb_loss + 0.5 * (dx_loss + dy_loss)
             if has_mouse_btn and "mouse_btn" in out:
                 mb_loss = F.binary_cross_entropy_with_logits(
-                    out["mouse_btn"], mb_t, reduction="none"
+                    out["mouse_btn"], mb_t, reduction="none",
+                    pos_weight=mb_pos_weight,
                 ).mean(dim=1)
                 loss = loss + (mb_loss * w).mean()
 
@@ -332,8 +361,23 @@ def run(
             f"epoch_time={epoch_elapsed:.1f}s "
             f"total_elapsed={total_elapsed:.1f}s"
         )
-        if metrics["macro_kb_f1"] > best_macro_f1:
+        is_best = metrics["macro_kb_f1"] > best_macro_f1
+        if is_best:
             best_macro_f1 = metrics["macro_kb_f1"]
+            best_epoch = epoch
+            best_metrics = metrics
+            # CPU 副本 — 避免后续 epoch 修改原 state_dict 张量
+            best_state = {k: v.detach().cpu().clone()
+                          for k, v in model.state_dict().items()}
+            torch.save({
+                "model_state": best_state,
+                "epoch": epoch,
+                "frame_window": frame_window,
+                "input_h": input_h,
+                "input_w": input_w,
+                "val_macro_kb_f1": best_macro_f1,
+            }, output_dir / "best.pt")
+            _flog(f"[BC-TRAIN]   ↑ new best val_kb_f1={best_macro_f1:.3f} → best.pt")
 
         # 每 epoch 末覆盖式存 last.pt — 防止后续 ONNX export / OOM 等崩溃把
         # 几小时训练全丢。文件不大（resnet18 ~45MB），覆盖写不占空间。
@@ -346,7 +390,14 @@ def run(
             "input_w": input_w,
         }, ckpt_path)
 
-    # Final ONNX export — 失败也保留 last.pt，可用 --resume-export 重做
+    # 用 best ckpt 导 ONNX（不用 last — last 通常已过拟合）
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        _flog(f"[BC-TRAIN] 加载 best ckpt (epoch={best_epoch}, val_kb_f1={best_macro_f1:.3f}) → ONNX")
+    else:
+        _flog(f"[BC-TRAIN] WARN: best ckpt 不存在，用 last 权重导 ONNX")
+
+    # Final ONNX export — 失败也保留 best.pt/last.pt，可用 --resume-export 重做
     onnx_path = output_dir / "model.onnx"
     model.eval()
     try:
@@ -355,10 +406,10 @@ def run(
         _flog(f"[BC-TRAIN] ONNX 写入: {onnx_path} ({onnx_path.stat().st_size/1024/1024:.1f} MB)")
     except Exception as e:
         _flog(f"[BC-TRAIN] ONNX export 失败: {e}")
-        _flog(f"[BC-TRAIN] last.pt 已保留: {output_dir / 'last.pt'}")
+        _flog(f"[BC-TRAIN] best.pt / last.pt 已保留: {output_dir}")
         raise
 
-    # Final metrics + meta
+    # Final metrics + meta — 注意此时 model 已载入 best 权重
     final_metrics = _evaluate(model, val_loader, dev, has_mouse_btn)
     metrics_path = output_dir / "metrics.json"
     metrics_path.write_text(json.dumps(final_metrics, indent=2), encoding="utf-8")
@@ -374,6 +425,8 @@ def run(
         "n_train_samples": len(train_ds),
         "n_val_samples": len(val_ds),
         "best_macro_kb_f1": best_macro_f1,
+        "best_epoch": best_epoch,
+        "total_epochs": epochs,
     }
     (output_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     log_fh.close()
