@@ -120,6 +120,11 @@ class TrainBCTab(BaseTab):
 
     def _on_train_stopped(self, rc: int) -> None:
         self._progress_timer.stop()
+        total_elapsed = (
+            _format_duration(time.perf_counter() - self._train_started_at)
+            if self._train_started_at is not None
+            else None
+        )
         self._train_started_at = None
         self._epoch_started_at = None
         self._models.rescan()
@@ -127,9 +132,15 @@ class TrainBCTab(BaseTab):
             # 训练成功但 epoch 没全跑完？把进度填满让用户视觉确认成功。
             self._progress.setValue(self._progress.maximum())
         if rc == 0:
-            self._progress.setFormat("完成 ✓")
+            if total_elapsed:
+                self._progress.setFormat(f"完成 ✓ | 总耗时 {total_elapsed}")
+            else:
+                self._progress.setFormat("完成 ✓")
         else:
-            self._progress.setFormat(f"退出 rc={rc}")
+            if total_elapsed:
+                self._progress.setFormat(f"退出 rc={rc} | 总耗时 {total_elapsed}")
+            else:
+                self._progress.setFormat(f"退出 rc={rc}")
 
     def _on_log_line(self, line: str) -> None:
         m = _RE_EPOCH.search(line)
