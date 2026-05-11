@@ -1,0 +1,55 @@
+name: cyberpunk
+description: |
+  Cyberpunk 2077 — DX12。
+  FPS/RPG 混合：WASD 移动 + 鼠标视角 + LMB 射击/攻击 + RMB 瞄准/格挡 + Space 跳 + F 互动 + ESC 菜单。
+
+controls:
+  move_forward: W
+  move_back: S
+  move_left: A
+  move_right: D
+  turn_axis: mouse
+  attack: mouse_left
+  aim: mouse_right        # 瞄准 / 格挡
+  interact: F             # Cyberpunk 默认互动键是 F（不是 E）
+  jump: SPACE
+  dismiss_ui: ESC
+
+reserved_keys: [F8, F9]
+
+input:
+  prefer_gamepad: false
+  mouse_sensitivity: 1.0
+
+keep_alive:
+  period_s: 0.8
+  sequence:
+    - {action: move_forward, duration_ms: 2500}
+    - {action: turn,         duration_ms: 500, payload: {direction: random, magnitude: 1.0}}
+    - {action: move_forward, duration_ms: 2000}
+    - {action: interact,     duration_ms: 200}
+    - {action: turn,         duration_ms: 700, payload: {direction: random, magnitude: 1.5}}
+    - {action: move_left,    duration_ms: 600}
+    - {action: attack,       duration_ms: 200}
+    - {action: move_right,   duration_ms: 600}
+    - {action: jump,         duration_ms: 100}
+    - {action: move_forward, duration_ms: 1500}
+    - {action: wait,         duration_ms: 400}
+  recovery:
+    - {action: dismiss_ui, duration_ms: 100}
+    - {action: wait,       duration_ms: 200}
+    - {action: dismiss_ui, duration_ms: 100}
+    - {action: press_key,  payload: {vk: SPACE}, duration_ms: 100}
+    # 连续 4 次同向大转向 ≈ 180° 调头
+    - {action: turn, duration_ms: 100, payload: {direction: left, magnitude: 2.0}}
+    - {action: turn, duration_ms: 100, payload: {direction: left, magnitude: 2.0}}
+    - {action: turn, duration_ms: 100, payload: {direction: left, magnitude: 2.0}}
+    - {action: turn, duration_ms: 100, payload: {direction: left, magnitude: 2.0}}
+    - {action: move_back,    duration_ms: 1200}
+    - {action: turn,         duration_ms: 600, payload: {direction: random, magnitude: 1.2}}
+    - {action: move_forward, duration_ms: 1500}
+
+watchdog:
+  sample_period_s: 5.0
+  static_diff_threshold: 0.01
+  consecutive_static_required: 2

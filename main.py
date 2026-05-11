@@ -386,10 +386,14 @@ def _resolve_api(api_arg: str, game_exe: Path) -> str:
 
 # ── unicap.ini / preset writers ───────────────────────────────────────────────
 
-def _ensure_addon_enabled(addon_dir: Path, pre_ui_skip: int = 0, ui_mode: str = "no-ui"):
-    """ui_mode: 'no-ui' (pre-UI only) | 'ui' (post-UI BB only) | 'both' (pre-UI + post-UI)."""
+def _ensure_addon_enabled(addon_dir: Path, pre_ui_skip: int = 0, ui_mode: str = "no-ui",
+                          export_depth: bool = True):
+    """ui_mode: 'no-ui' (pre-UI only) | 'ui' (post-UI BB only) | 'both' (pre-UI + post-UI).
+    export_depth=False 关掉 FC_ExportDepth — 跳过 depth EXR 落盘，仅 BC 训练（只用 color）
+    时可显著提速（EXR ZIP 单线程编码是 1080p capture 的主要瓶颈之一）。"""
     pre_ui_flag  = "0" if ui_mode == "ui" else "1"
     both_flag    = "1" if ui_mode == "both" else "0"
+    depth_flag   = "1" if export_depth else "0"
     UNICAP_TEMP.mkdir(parents=True, exist_ok=True)
     ini = UNICAP_TEMP / "unicap.ini"
     cfg = configparser.RawConfigParser()
@@ -399,7 +403,7 @@ def _ensure_addon_enabled(addon_dir: Path, pre_ui_skip: int = 0, ui_mode: str = 
     settings = [
         ("ADDON", "AddonPath", str(addon_dir)),
         ("ADDON", "FC_EnableCapture", "1"),
-        ("ADDON", "FC_ExportDepth", "1"),
+        ("ADDON", "FC_ExportDepth", depth_flag),
         ("ADDON", "FC_ExportNormal", "0"),
         ("ADDON", "FC_CaptureWidth", str(CAP_WIDTH)),
         ("ADDON", "FC_CaptureHeight", str(CAP_HEIGHT)),
@@ -470,6 +474,14 @@ def _start_auto_play(args, frames_dir: Path, game_exe_stem: str):
     except Exception as e:
         print(f"[AUTO-PLAY] profile 加载失败：{e} — 关闭 auto-play 续 capture")
         return None
+
+    # --driver CLI override（auto = 不动 profile.driver）
+    drv_override = getattr(args, "driver", "auto")
+    if drv_override and drv_override != "auto" and drv_override != profile.driver:
+        import dataclasses as _dc
+        print(f"[AUTO-PLAY] driver 覆盖: {profile.driver} → {drv_override} "
+              f"(profile.yaml 未改)", flush=True)
+        profile = _dc.replace(profile, driver=drv_override)
 
     # Pull game window to foreground before bot starts injecting — otherwise
     # SendInput goes to whatever window has focus (often the unicap console),
@@ -553,7 +565,11 @@ def cmd_deploy(args):
     else:
         pre_ui_skip = 0
 
-    _ensure_addon_enabled(ADDON_BIN.parent, pre_ui_skip=pre_ui_skip, ui_mode=ui_mode)
+    export_depth = not bool(getattr(args, "no_depth", False))
+    _ensure_addon_enabled(ADDON_BIN.parent, pre_ui_skip=pre_ui_skip, ui_mode=ui_mode,
+                          export_depth=export_depth)
+    if not export_depth:
+        print("[DEPLOY] --no-depth: addon 跳过 depth EXR 落盘（BC 训练只用 color；提速）")
     _ensure_preset()
     return game_dir, game_exe, game_name, dataset_root, api
 
@@ -1228,6 +1244,14 @@ def main():
                    help="auto-play profile 名 (profiles/<name>.yaml)；不传则按 exe 名 fuzzy match，回落 _default")
     p.add_argument("--auto-play-debug", action="store_true",
                    help="auto-play 详细 log（每次注入都打到 auto_play.log）")
+    p.add_argument("--driver", default="auto",
+                   choices=["auto", "keep_alive", "bc", "hybrid"],
+                   help="auto-play driver 覆盖：auto=用 profile.driver（默认）；"
+                        "keep_alive=纯脚本序列；bc=纯 ONNX 模型；"
+                        "hybrid=BC + 定期穿插 keep_alive（推荐冷启动）")
+    p.add_argument("--no-depth", action="store_true",
+                   help="addon 跳过 depth EXR 落盘（FC_ExportDepth=0）— BC 训练只用 color，"
+                        "省掉单线程 EXR ZIP 编码，1080p capture 实测瓶颈之一")
 
     p = sub.add_parser("video", help="批量生成游戏目录下所有缺失的 video.mp4 / video_ui.mp4")
     p.add_argument("--game-dir", default="", metavar="DIR",
@@ -1246,6 +1270,9 @@ def main():
                    help="输出目录；默认 models/<profile>/")
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--num-workers", type=int, default=-1,
+                   help="DataLoader 子进程数；-1=自动（min(8, os.cpu_count()//2)）；0=主线程串行。"
+                        "GPU 利用率低时调高（典型瓶颈：BMP 解码 + resize）")
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
     p.add_argument("--backbone", default="resnet18",

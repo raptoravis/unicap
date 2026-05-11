@@ -27,6 +27,8 @@ _RE_TRAIN_DONE = re.compile(r"\[BC-TRAIN\].*?完成")
 _RE_EPOCH = re.compile(r"\[BC-TRAIN\]\s+epoch=\s*(\d+)/(\d+)")
 # `val_kb_f1=0.123 val_dx_top1=0.234 val_dy_top1=0.345`
 _RE_VAL = re.compile(r"val_kb_f1=([\d.]+)\s+val_dx_top1=([\d.]+)\s+val_dy_top1=([\d.]+)")
+# `epoch_time=12.2s` — 来自 bc_train.run() _flog 的同一行
+_RE_EPOCH_TIME = re.compile(r"epoch_time=([\d.]+)s")
 
 class TrainBCTab(BaseTab):
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -39,6 +41,7 @@ class TrainBCTab(BaseTab):
         self._epoch_started_at: float | None = None
         self._current_epoch = 0
         self._total_epochs = 0
+        self._last_epoch_time_s: float | None = None  # 上一个已完成 epoch 的耗时
         self._progress_timer = QTimer(self)
         self._progress_timer.setInterval(60_000)
         self._progress_timer.timeout.connect(self._refresh_progress_format)
@@ -112,6 +115,7 @@ class TrainBCTab(BaseTab):
         self._train_started_at = now
         self._epoch_started_at = now
         self._current_epoch = 1
+        self._last_epoch_time_s = None
         self._progress.setRange(0, self._total_epochs)
         self._progress.setValue(0)
         self._progress_label.setText("")
@@ -150,6 +154,12 @@ class TrainBCTab(BaseTab):
                 self._progress.setRange(0, total)
             self._total_epochs = total
             self._progress.setValue(cur)
+            mt = _RE_EPOCH_TIME.search(line)
+            if mt:
+                try:
+                    self._last_epoch_time_s = float(mt.group(1))
+                except ValueError:
+                    pass
             if cur < total:
                 self._current_epoch = cur + 1
                 self._epoch_started_at = time.perf_counter()
@@ -177,13 +187,18 @@ class TrainBCTab(BaseTab):
         cur = self._current_epoch or min(self._progress.value() + 1, total)
         cur = min(max(1, cur), total)
 
+        last_label = ""
+        if self._last_epoch_time_s is not None:
+            last_label = f" | 上轮耗时 {_format_duration(self._last_epoch_time_s)}"
+
         if self._epoch_started_at is None:
-            self._progress.setFormat(f"已完成 {self._progress.value()}/{total} epoch | 总耗时 {total_elapsed}")
+            self._progress.setFormat(
+                f"已完成 {self._progress.value()}/{total} epoch{last_label} | 总耗时 {total_elapsed}"
+            )
             return
 
-        epoch_elapsed = _format_duration(now - self._epoch_started_at)
         self._progress.setFormat(
-            f"第 {cur}/{total} epoch | 本轮耗时 {epoch_elapsed} | 总耗时 {total_elapsed}"
+            f"第 {cur}/{total} epoch{last_label} | 总耗时 {total_elapsed}"
         )
 
 

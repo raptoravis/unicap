@@ -16,9 +16,9 @@ from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QVBoxLayout,
-    QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout,
+    QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QSizePolicy,
+    QSpinBox, QVBoxLayout, QWidget,
 )
 
 from unicap_gui.shared import settings as gui_settings
@@ -42,15 +42,71 @@ class FlagForm(QScrollArea):
         self._browse_buttons: dict[str, QPushButton] = {}
 
         inner = QWidget()
-        layout = QVBoxLayout(inner)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(4)
+        outer = QVBoxLayout(inner)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(0)
 
+        # 按 group 分块；保留 schema 里的相对顺序作为组内顺序。
+        groups: dict[str, list[FlagSpec]] = {}
+        group_order: list[str] = []
         for spec in schema.flags:
-            row = self._build_row(spec)
-            layout.addLayout(row)
+            g = (spec.group or "通用").strip() or "通用"
+            if g not in groups:
+                groups[g] = []
+                group_order.append(g)
+            groups[g].append(spec)
 
-        layout.addStretch(1)
+        # 单一大 grid，5 列：[group_name, label1, editor1, label2, editor2]
+        # group_name 在最左列纵向 spanning 该组所有 row；竖直分隔线靠 stylesheet 模拟。
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(6)
+        grid.setContentsMargins(0, 0, 0, 0)
+
+        current_row = 0
+        for g_idx, gname in enumerate(group_order):
+            specs = groups[gname]
+            row_span = (len(specs) + 1) // 2  # 2 列 → 向上取整
+
+            # 组间横线（首组前不画）
+            if g_idx > 0:
+                sep = QFrame()
+                sep.setFrameShape(QFrame.HLine)
+                sep.setFrameShadow(QFrame.Plain)
+                sep.setStyleSheet("color: #c0c0c0; background: #c0c0c0; max-height: 1px;")
+                sep.setFixedHeight(1)
+                grid.addWidget(sep, current_row, 0, 1, 5)
+                current_row += 1
+
+            gl = QLabel(gname)
+            gl.setAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+            gl.setStyleSheet(
+                "color: #444; font-weight: bold; font-size: 13px;"
+                " background: #f0f0f0; border-right: 2px solid #c0c0c0;"
+                " padding: 4px 8px;"
+            )
+            gl.setMinimumWidth(72)
+            gl.setMaximumWidth(96)
+            grid.addWidget(gl, current_row, 0, row_span, 1)
+
+            for i, spec in enumerate(specs):
+                r = current_row + i // 2
+                col_base = 1 + (i % 2) * 2  # 1 或 3
+                label, editor_cell = self._build_grid_entry(spec)
+                grid.addWidget(label, r, col_base, Qt.AlignVCenter)
+                grid.addWidget(editor_cell, r, col_base + 1)
+
+            current_row += row_span
+
+        # 列宽策略：group / label 紧凑，editor 吃剩余空间
+        grid.setColumnStretch(0, 0)
+        grid.setColumnStretch(1, 0)
+        grid.setColumnStretch(2, 1)
+        grid.setColumnStretch(3, 0)
+        grid.setColumnStretch(4, 1)
+
+        outer.addLayout(grid)
+        outer.addStretch(1)
         self.setWidget(inner)
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -77,31 +133,37 @@ class FlagForm(QScrollArea):
         for button in self._browse_buttons.values():
             button.setEnabled(enabled)
 
-    # ── 行 builder ────────────────────────────────────────────────────────
+    # ── grid entry builder ────────────────────────────────────────────────
 
-    def _build_row(self, spec: FlagSpec) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.setSpacing(6)
+    def _build_grid_entry(self, spec: FlagSpec) -> tuple[QLabel, QWidget]:
+        """Return (label, editor_cell). editor_cell 是 QWidget；path 类型自带浏览按钮。"""
+        tip = _rich_tooltip(spec)
 
         label = QLabel(spec.name)
-        label.setMinimumWidth(180)
-        label.setToolTip(spec.help)
-        row.addWidget(label)
+        label.setMinimumWidth(140)
+        label.setMaximumWidth(180)
+        label.setToolTip(tip)
 
         editor = self._make_editor(spec)
-        editor.setToolTip(spec.help)
+        editor.setToolTip(tip)
         editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._editors[spec.cli_key()] = editor
-        row.addWidget(editor, stretch=1)
 
         if spec.kind == "path":
-            btn = QPushButton("浏览…")
-            btn.setMaximumWidth(80)
+            cell = QWidget()
+            cell_layout = QHBoxLayout(cell)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.setSpacing(4)
+            cell_layout.addWidget(editor, stretch=1)
+            btn = QPushButton("…")
+            btn.setMaximumWidth(28)
+            btn.setToolTip("浏览…")
             btn.clicked.connect(lambda _=False, s=spec: self._browse_path(s))
             self._browse_buttons[spec.cli_key()] = btn
-            row.addWidget(btn)
+            cell_layout.addWidget(btn)
+            return label, cell
 
-        return row
+        return label, editor
 
     def _make_editor(self, spec: FlagSpec) -> QWidget:
         kind = spec.kind
@@ -287,6 +349,26 @@ class FlagForm(QScrollArea):
                     seen.add(p)
             ed.setCurrentText(current)
             ed.blockSignals(False)
+
+
+def _rich_tooltip(spec: FlagSpec) -> str:
+    """Build hover tooltip: <b>flag</b> + 默认值 + 详细描述（spec.tooltip 优先）。"""
+    body = spec.tooltip or spec.help or ""
+    body_html = body.replace("&", "&amp;").replace("<", "&lt;").replace("\n", "<br>")
+    default_txt = ""
+    if spec.kind == "store_true":
+        default_txt = "False（不勾即不传）"
+    elif spec.kind == "bool_optional":
+        default_txt = "True" if spec.default else "False"
+    elif spec.default not in (None, ""):
+        default_txt = str(spec.default)
+    parts = [f"<b>{spec.name}</b>"]
+    if default_txt:
+        parts.append(f"<i>默认</i> <code>{default_txt}</code>")
+    if body_html:
+        parts.append(body_html)
+    # max-width 让 Qt 自动换行（避免过长 tooltip 横向越界）
+    return f'<div style="max-width:480px">{"<br>".join(parts)}</div>'
 
 
 def _load_path_history() -> list[str]:

@@ -165,6 +165,7 @@ def run(
     seed: int = 42,
     raw: bool = False,
     color: str = "no-ui",
+    num_workers: int = -1,
 ) -> dict:
     """Train BC for one game profile. Returns the metrics dict.
 
@@ -179,7 +180,6 @@ def run(
     def _flog(msg: str) -> None:
         log_fh.write(msg + "\n")
         log_fh.flush()
-        log.info(msg)
         print(msg, flush=True)
 
     torch.manual_seed(seed)
@@ -221,13 +221,24 @@ def run(
         num_samples=len(train_ds),
         replacement=True,
     )
+    if num_workers is None or num_workers < 0:
+        import os as _os
+        nw = min(8, max(1, (_os.cpu_count() or 2) // 2))
+    else:
+        nw = int(num_workers)
+    use_cuda = (device == "cuda")
+    pin = use_cuda
+    persistent = nw > 0
+    _flog(f"[BC-TRAIN] DataLoader num_workers={nw} pin_memory={pin} persistent_workers={persistent}")
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, sampler=sampler,
-        num_workers=0, pin_memory=False,
+        num_workers=nw, pin_memory=pin, persistent_workers=persistent,
+        prefetch_factor=4 if nw > 0 else None,
     )
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
-        num_workers=0, pin_memory=False,
+        num_workers=nw, pin_memory=pin, persistent_workers=persistent,
+        prefetch_factor=4 if nw > 0 else None,
     )
 
     if device == "cuda" and not torch.cuda.is_available():
@@ -277,13 +288,14 @@ def run(
         model.backbone.eval()
         total_loss = 0.0
         n_batches = 0
+        nb = use_cuda
         for batch in train_loader:
-            frames = batch["frames"].to(dev)
-            kb_t = batch["kb"].to(dev)
-            mb_t = batch["mouse_btn"].to(dev)
-            dx_t = batch["mouse_dx"].to(dev)
-            dy_t = batch["mouse_dy"].to(dev)
-            w = batch["weight"].to(dev)
+            frames = batch["frames"].to(dev, non_blocking=nb)
+            kb_t = batch["kb"].to(dev, non_blocking=nb)
+            mb_t = batch["mouse_btn"].to(dev, non_blocking=nb)
+            dx_t = batch["mouse_dx"].to(dev, non_blocking=nb)
+            dy_t = batch["mouse_dy"].to(dev, non_blocking=nb)
+            w = batch["weight"].to(dev, non_blocking=nb)
 
             out = model(frames)
             # KB loss: sample-weighted BCE
@@ -440,6 +452,7 @@ def cli(args) -> None:
         recovery_weight=args.recovery_weight,
         raw=raw,
         color=color,
+        num_workers=getattr(args, "num_workers", -1),
     )
     # patch ui_mode into meta (argparse passes it, but BCDataset doesn't track)
     meta_path = output_dir / "meta.json"

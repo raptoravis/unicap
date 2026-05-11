@@ -362,13 +362,37 @@ class BCRawDataset(Dataset):
             idxs.insert(0, idxs[0])
 
         frames = np.empty((T, cfg.input_h, cfg.input_w, 3), dtype=np.float32)
+        cache_subdir = f".bc_cache_{cfg.input_h}x{cfg.input_w}"
         for t, j in enumerate(idxs):
             path = sess['bmp_paths'][j]
-            img = cv2.imread(str(path), cv2.IMREAD_COLOR)
-            if img is None:
-                raise RuntimeError(f"[BC-DS-RAW] 无法读取: {path}")
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            frames[t] = _resize(img, cfg.input_h, cfg.input_w)
+            cache_path = path.parent / cache_subdir / (path.stem + ".npy")
+            small: np.ndarray | None = None
+            if cache_path.is_file():
+                try:
+                    small = np.load(cache_path)
+                    if small.shape != (cfg.input_h, cfg.input_w, 3) or small.dtype != np.uint8:
+                        small = None
+                except Exception:
+                    small = None
+            if small is None:
+                img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+                if img is None:
+                    raise RuntimeError(f"[BC-DS-RAW] 无法读取: {path}")
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                small = cv2.resize(
+                    img, (cfg.input_w, cfg.input_h),
+                    interpolation=cv2.INTER_AREA,
+                )  # (h, w, 3) uint8
+                try:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    # 原子写：先写 .tmp 再 rename，避免并发 worker 读到半文件
+                    # np.save 会自动追加 .npy；用 .tmp.npy 后缀保证不被改名
+                    tmp = cache_path.with_name(cache_path.stem + ".tmp.npy")
+                    np.save(tmp, small, allow_pickle=False)
+                    tmp.replace(cache_path)
+                except OSError:
+                    pass  # 写缓存失败不影响训练
+            frames[t] = small.astype(np.float32) / 255.0
 
         kb_row = sess['kb'][frame_i]
         kb_l = kb_label_from_row(kb_row, self.action_space)

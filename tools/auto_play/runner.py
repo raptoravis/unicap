@@ -32,13 +32,18 @@ def create_driver(profile: GameProfile, *, seed: int | None = None,
     'keep_alive' (default) → KeepAliveDriver — scripted YAML sequence
     'bc'                   → BCDriver — ONNX inference; requires bc.model_path
                              and a frames_dir for reading BackBuffer.png input
+    'hybrid'               → HybridDriver — BC primary + 周期性 keep_alive 穿插，
+                             兼顾 BC 异常时降级
     """
     drv = getattr(profile, "driver", "keep_alive")
-    if drv == "bc":
+    if drv in ("bc", "hybrid"):
         if frames_dir is None:
             raise RuntimeError(
-                "create_driver: driver=bc 需要 frames_dir 参数（读 BackBuffer.png）"
+                f"create_driver: driver={drv} 需要 frames_dir 参数（读 BackBuffer.png）"
             )
+        if drv == "hybrid":
+            from tools.auto_play.hybrid_driver import HybridDriver
+            return HybridDriver(profile, frames_dir=frames_dir, seed=seed)
         from tools.auto_play.bc_driver import BCDriver
         return BCDriver(profile, frames_dir=frames_dir, seed=seed)
     return KeepAliveDriver(profile, seed=seed)
