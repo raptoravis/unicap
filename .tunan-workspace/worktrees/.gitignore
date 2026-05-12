@@ -1,0 +1,5 @@
+# Everything inside worktrees/ is a separate git worktree (full clone with its own .git).
+# Never track worktree contents from the parent repo.
+*
+!.gitignore
+!.gitkeep
