@@ -41,7 +41,7 @@ def step_to_actions(
         ctrl = controls.get(action_name)
         return _press_control(ctrl, dur)
 
-    if action_name in ("attack", "interact", "jump"):
+    if action_name in ("attack", "interact", "jump", "climb_down"):
         ctrl_key = action_name
         if prefer_pad and f"gamepad_{action_name}" in controls:
             ctrl_key = f"gamepad_{action_name}"

@@ -110,6 +110,15 @@ class LaunchDashboard(QWidget):
         # counters row
         self._watchdog_label = QLabel("WATCHDOG: 0")
         self._attack_led = _LED()
+        # F6/F7 demo-quality 状态 —— LaunchTab 解析 [DEMO] log 喂进来
+        self._demo_label = QLabel("DEMO: —")
+        self._demo_label.setToolTip(
+            "当前段的 demo_quality 标记（仅 --record-demo 模式有效）：\n"
+            "• UNMARKED — 默认；训练时权重 0.5\n"
+            "• GOOD     — F6 按下；权重 1.0\n"
+            "• BAD      — F7 按下；训练时丢弃"
+        )
+        self._set_demo_state("unmarked")
 
         # 顶层 layout
         layout = QGridLayout(self)
@@ -133,6 +142,7 @@ class LaunchDashboard(QWidget):
         ab_box.addWidget(self._attack_led)
         ab_w = QWidget(); ab_w.setLayout(ab_box)
         layout.addWidget(ab_w, 2, 1)
+        layout.addWidget(self._demo_label, 2, 2, 1, 2)
 
         # 1Hz 主 timer：读 fc_state.txt + 数 frames + 算 elapsed
         self._tick = QTimer(self)
@@ -156,7 +166,7 @@ class LaunchDashboard(QWidget):
 
         # 关键标签加粗 + 略大，让 frames / elapsed / counters 一眼可读
         for lbl in (self._session_link, self._frame_count_label,
-                    self._elapsed_label, self._watchdog_label):
+                    self._elapsed_label, self._watchdog_label, self._demo_label):
             f = lbl.font()
             f.setPointSize(max(f.pointSize(), 10) + 1)
             f.setBold(True)
@@ -270,3 +280,23 @@ class LaunchDashboard(QWidget):
         self._watchdog_label.setText("WATCHDOG: 0")
         self._frame_count_label.setText("frames: 0")
         self._duration_bar.setValue(0)
+        self._set_demo_state("unmarked")
+
+    # ── public: F6/F7 demo-quality ────────────────────────────────────────
+    def set_demo_quality(self, state: str) -> None:
+        """LaunchTab 解析 [DEMO] F6 → GOOD / UNMARKED / BAD 行后调。"""
+        self._set_demo_state(state.lower())
+
+    def _set_demo_state(self, state: str) -> None:
+        # state ∈ {good, bad, unmarked}
+        palette = {
+            "good":     ("#2e7d32", "GOOD"),       # 绿
+            "bad":      ("#c62828", "BAD"),        # 红
+            "unmarked": ("#9e9e9e", "UNMARKED"),   # 灰
+        }
+        color, text = palette.get(state, palette["unmarked"])
+        self._demo_label.setText(f"DEMO: {text}")
+        self._demo_label.setStyleSheet(
+            f"color: white; background: {color};"
+            " padding: 2px 8px; border-radius: 4px;"
+        )

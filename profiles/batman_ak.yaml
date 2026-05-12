@@ -3,6 +3,19 @@ description: |
   Batman: Arkham Knight — DX11。
   动作潜入：WASD + 鼠标视角 + LMB 普通攻击 + RMB 反击 + Space 抓钩/披风滑翔 + E 互动。
 
+driver: hybrid
+
+bc:
+  model_path: models/batman_ak/model.onnx
+  min_confidence: 0.5
+  hysteresis_n: 2
+  decision_period_s: 0.0333   # ≈30 Hz
+  device: cpu                 # 可改 cuda / directml
+
+hybrid:
+  # 每 N 秒穿插一个 keep_alive.sequence 步骤，强制打破模型死循环（卡墙 / 卡提示）
+  diversify_period_s: 12.0
+
 controls:
   move_forward: W
   move_back: S
@@ -13,6 +26,7 @@ controls:
   counter: mouse_right    # 自定义
   interact: E
   jump: SPACE             # 也用作披风滑翔
+  climb_down: LCTRL       # 从檐口/扶手下来；游戏内提示 "Climb Down (LCtrl)+RMB"
   dismiss_ui: ESC         # 退当前 UI / 关菜单
 
 reserved_keys: [F8, F9]
@@ -38,6 +52,9 @@ keep_alive:
     - {action: dismiss_ui, duration_ms: 100}
     - {action: wait,      duration_ms: 200}
     - {action: dismiss_ui, duration_ms: 100}
+    # 卡在房檐/扶手时游戏提示 "Climb Down (LCtrl)+RMB"
+    - {action: climb_down, duration_ms: 150}
+    - {action: wait,       duration_ms: 100}
     - {action: press_key, payload: {vk: SPACE}, duration_ms: 100}
     # 连续 4 次同向大转向 ≈ 180° 调头
     - {action: turn, duration_ms: 100, payload: {direction: left, magnitude: 2.0}}

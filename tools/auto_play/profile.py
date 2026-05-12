@@ -21,8 +21,8 @@ REQUIRED_TOP_LEVEL_KEYS = {
     "keep_alive", "watchdog", "input",
 }
 # Optional top-level keys (do not raise if missing).
-OPTIONAL_TOP_LEVEL_KEYS = {"driver", "bc"}
-VALID_DRIVERS = {"keep_alive", "bc"}
+OPTIONAL_TOP_LEVEL_KEYS = {"driver", "bc", "hybrid"}
+VALID_DRIVERS = {"keep_alive", "bc", "hybrid"}
 REQUIRED_KEEP_ALIVE_KEYS = {"period_s", "sequence", "recovery"}
 REQUIRED_WATCHDOG_KEYS = {
     "sample_period_s", "static_diff_threshold", "consecutive_static_required",
@@ -41,6 +41,9 @@ VALID_STEP_ACTIONS = {
     # `dismiss_ui` resolves to controls.dismiss_ui — the per-game "back / close
     # current UI / return to gameplay" key. ff7r=M, most other games=ESC.
     "dismiss_ui",
+    # `climb_down` resolves to controls.climb_down — Batman: AK 房檐/扶手解卡键
+    # (LCtrl)，其他游戏可不设这个 control 就不会用。
+    "climb_down",
 }
 
 
@@ -54,8 +57,9 @@ class GameProfile:
     watchdog: dict[str, Any]
     input: dict[str, Any]
     source_path: Path | None = None
-    driver: str = "keep_alive"          # 'keep_alive' (default) | 'bc'
+    driver: str = "keep_alive"          # 'keep_alive' (default) | 'bc' | 'hybrid'
     bc: dict[str, Any] = field(default_factory=dict)
+    hybrid: dict[str, Any] = field(default_factory=dict)
 
 
 def _profiles_dir(override: Path | None) -> Path:
@@ -75,15 +79,15 @@ def _validate_profile(data: dict, source: str) -> None:
         raise ValueError(
             f"profile {source}: driver={driver!r} 不在 {sorted(VALID_DRIVERS)}"
         )
-    if driver == "bc":
+    if driver in ("bc", "hybrid"):
         bc = data.get("bc")
         if not isinstance(bc, dict):
             raise ValueError(
-                f"profile {source}: driver=bc 时必须有 'bc:' 段（含 model_path）"
+                f"profile {source}: driver={driver} 时必须有 'bc:' 段（含 model_path）"
             )
         if not bc.get("model_path"):
             raise ValueError(
-                f"profile {source}: driver=bc 时 bc.model_path 必填"
+                f"profile {source}: driver={driver} 时 bc.model_path 必填"
                 f"（指向 train-bc 输出的 model.onnx）"
             )
 
@@ -168,9 +172,47 @@ def load_profile(
             print(f"[AUTO-PLAY] profile {name!r} 未找到，回落 _default.yaml")
             return _read_profile_file(default_path)
 
+    # fallback=False 且 profile 不存在：从 _default 复制一份 stub 出来再 raise，
+    # 让用户少一步 cp，但强制确认 controls 后再重跑（避免拿默认绑定训出错的模型）。
+    default_path = pdir / "_default.yaml"
+    if not target_path.exists() and default_path.is_file() and _is_safe_profile_name(name):
+        _stub_profile_from_default(default_path, target_path, name)
+        raise FileNotFoundError(
+            f"profile '{name}' 不存在，已基于 _default 生成模板:\n"
+            f"  {target_path}\n"
+            f"请编辑 controls / keep_alive 后重跑（确保按键绑定匹配实际游戏）。"
+        )
+
     raise FileNotFoundError(
         f"profile '{name}' 未在 {pdir} 找到 (fallback={'on' if fallback else 'off'})"
     )
+
+
+_SAFE_PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-]*$")
+
+
+def _is_safe_profile_name(name: str) -> bool:
+    # 防止 ../ 之类路径注入；只允许常见 stem 字符。
+    return bool(_SAFE_PROFILE_NAME_RE.match(name)) and name != "_default"
+
+
+def _stub_profile_from_default(default_path: Path, target_path: Path, name: str) -> None:
+    text = default_path.read_text(encoding="utf-8")
+    # 替换顶层 `name:` 行
+    new_text = re.sub(
+        r"^name:\s*.*$",
+        f"name: {name}",
+        text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    header = (
+        f"# AUTO-GENERATED stub for '{name}' — 复制自 _default.yaml\n"
+        f"# TODO: 检查 controls 是否匹配游戏实际按键（互动键、攻击键、dismiss_ui 等）\n"
+        f"# 改完后重跑命令；本注释可删。\n"
+    )
+    target_path.write_text(header + new_text, encoding="utf-8")
+    print(f"[AUTO-PLAY] stub profile 已生成: {target_path}")
 
 
 def _read_profile_file(path: Path) -> GameProfile:
@@ -195,6 +237,7 @@ def _read_profile_file(path: Path) -> GameProfile:
         source_path=path,
         driver=str(data.get("driver", "keep_alive")),
         bc=dict(data.get("bc", {})),
+        hybrid=dict(data.get("hybrid", {})),
     )
 
 

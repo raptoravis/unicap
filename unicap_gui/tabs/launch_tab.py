@@ -68,6 +68,8 @@ class LaunchTab(BaseTab):
         self._runner.started.connect(self._on_run_started)
         self._runner.session_changed.connect(self._dashboard.set_session_dir)
         self._runner.stopped.connect(self._on_run_stopped)
+        # 解析 `[DEMO] F6 → GOOD` 类行喂 dashboard 的 DEMO 标签
+        self._runner.line_received.connect(self._on_log_line_for_demo)
 
     # ── slots ─────────────────────────────────────────────────────────────
 
@@ -89,6 +91,19 @@ class LaunchTab(BaseTab):
     def _on_run_stopped(self, _rc: int) -> None:
         self._dashboard.detach()
         self._btn_redo_survey.setEnabled(True)
+
+    def _on_log_line_for_demo(self, line: str) -> None:
+        # main.py prints: `[DEMO] F6 → GOOD` / `[DEMO] F6 → UNMARKED`
+        #                 `[DEMO] F7 → BAD`  / `[DEMO] F7 → UNMARKED`
+        if "[DEMO]" not in line:
+            return
+        upper = line.upper()
+        if "→ GOOD" in upper or "-> GOOD" in upper:
+            self._dashboard.set_demo_quality("good")
+        elif "→ BAD" in upper or "-> BAD" in upper:
+            self._dashboard.set_demo_quality("bad")
+        elif "UNMARKED" in upper:
+            self._dashboard.set_demo_quality("unmarked")
 
     def _on_press_f8(self) -> None:
         ok = sendinput.press_f8()

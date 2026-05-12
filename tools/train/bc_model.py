@@ -100,9 +100,13 @@ class BCModel(nn.Module):
         return out
 
     def export_onnx(self, path, frame_window: int, input_h: int, input_w: int,
-                    opset: int = 17) -> None:
+                    opset: int = 18) -> None:
         """Export ONNX with static shape (1, T, 3, H, W). Output names match
         forward() dict keys; BCDriver reads them by name."""
+        # 切 eval：关 dropout + BN 用 running stats（推理一致性）。
+        # 函数结束前恢复原始 mode，避免破坏 caller 的训练循环（虽然当前
+        # call-site 都是训完导出，但行为更稳）。
+        was_training = self.training
         self.eval()
         device = next(self.parameters()).device
         dummy = torch.zeros(1, frame_window, 3, input_h, input_w, device=device)
@@ -122,6 +126,9 @@ class BCModel(nn.Module):
                 d = self_inner.m(x)
                 return tuple(d[n] for n in self_inner.names)
 
+        wrap = _Wrap(self, out_names)
+        wrap.eval()  # 新建的 wrapper 默认 train mode → 显式置 eval
+
         # Dynamic batch dim so eval_bc.py can run with B>1 throughput while the
         # runtime BCDriver still feeds B=1 per tick. Frame-window / resolution
         # remain static — they are part of the model contract surfaced via
@@ -129,12 +136,17 @@ class BCModel(nn.Module):
         dyn_axes = {"frames": {0: "B"}}
         for n in out_names:
             dyn_axes[n] = {0: "B"}
-        torch.onnx.export(
-            _Wrap(self, out_names),
-            (dummy,),
-            str(path),
-            input_names=["frames"],
-            output_names=out_names,
-            opset_version=opset,
-            dynamic_axes=dyn_axes,
-        )
+        try:
+            with torch.no_grad():
+                torch.onnx.export(
+                    wrap,
+                    (dummy,),
+                    str(path),
+                    input_names=["frames"],
+                    output_names=out_names,
+                    opset_version=opset,
+                    dynamic_axes=dyn_axes,
+                )
+        finally:
+            if was_training:
+                self.train()

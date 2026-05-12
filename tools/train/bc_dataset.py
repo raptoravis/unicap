@@ -75,6 +75,9 @@ class BCDataset(Dataset):
         self._index: list[tuple[Path, int]] = []
         # Pre-computed per-sample weight (for WeightedRandomSampler)
         self._weights: list[float] = []
+        # Per-sample labels (for pos_weight 计算 — 避免训练前再扫一遍)
+        self._kb_labels: list[np.ndarray] = []
+        self._mb_labels: list[np.ndarray] = []
 
         # Open files and build flat index. Keep no h5 handles in __init__ —
         # they're cached lazily in __getitem__ (worker-safe).
@@ -120,6 +123,8 @@ class BCDataset(Dataset):
                 w = (1.0 if active else 0.2) * w_q
                 self._index.append((path, i))
                 self._weights.append(w)
+                self._kb_labels.append(kb_l)
+                self._mb_labels.append(mb_l)
 
         if not self._index:
             raise RuntimeError(
@@ -134,6 +139,15 @@ class BCDataset(Dataset):
     @property
     def weights(self) -> np.ndarray:
         return np.asarray(self._weights, dtype=np.float64)
+
+    def label_pos_freq(self) -> tuple[np.ndarray, np.ndarray]:
+        """Returns (kb_pos_freq, mouse_btn_pos_freq) over indexed samples.
+        Both shape (K,) float64 in [0, 1]. Empty arrays if no labels."""
+        kb = (np.stack(self._kb_labels, axis=0).astype(np.float64).mean(axis=0)
+              if self._kb_labels else np.zeros((0,), dtype=np.float64))
+        mb = (np.stack(self._mb_labels, axis=0).astype(np.float64).mean(axis=0)
+              if self._mb_labels else np.zeros((0,), dtype=np.float64))
+        return kb, mb
 
     def __len__(self) -> int:
         return len(self._index)
@@ -262,6 +276,8 @@ class BCRawDataset(Dataset):
         # Flat sample index: (session_idx, frame_i)
         self._index: list[tuple[int, int]] = []
         self._weights: list[float] = []
+        self._kb_labels: list[np.ndarray] = []
+        self._mb_labels: list[np.ndarray] = []
 
         for sess_dir in session_dirs:
             sess_dir = Path(sess_dir)
@@ -333,6 +349,8 @@ class BCRawDataset(Dataset):
                 w = (1.0 if active else 0.2) * w_q
                 self._index.append((sess_idx, i))
                 self._weights.append(w)
+                self._kb_labels.append(kb_l)
+                self._mb_labels.append(mb_l)
 
         if not self._index:
             raise RuntimeError(
@@ -345,6 +363,14 @@ class BCRawDataset(Dataset):
     @property
     def weights(self) -> np.ndarray:
         return np.asarray(self._weights, dtype=np.float64)
+
+    def label_pos_freq(self) -> tuple[np.ndarray, np.ndarray]:
+        """Returns (kb_pos_freq, mouse_btn_pos_freq) over indexed samples."""
+        kb = (np.stack(self._kb_labels, axis=0).astype(np.float64).mean(axis=0)
+              if self._kb_labels else np.zeros((0,), dtype=np.float64))
+        mb = (np.stack(self._mb_labels, axis=0).astype(np.float64).mean(axis=0)
+              if self._mb_labels else np.zeros((0,), dtype=np.float64))
+        return kb, mb
 
     def __len__(self) -> int:
         return len(self._index)
@@ -362,13 +388,37 @@ class BCRawDataset(Dataset):
             idxs.insert(0, idxs[0])
 
         frames = np.empty((T, cfg.input_h, cfg.input_w, 3), dtype=np.float32)
+        cache_subdir = f".bc_cache_{cfg.input_h}x{cfg.input_w}"
         for t, j in enumerate(idxs):
             path = sess['bmp_paths'][j]
-            img = cv2.imread(str(path), cv2.IMREAD_COLOR)
-            if img is None:
-                raise RuntimeError(f"[BC-DS-RAW] 无法读取: {path}")
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            frames[t] = _resize(img, cfg.input_h, cfg.input_w)
+            cache_path = path.parent / cache_subdir / (path.stem + ".npy")
+            small: np.ndarray | None = None
+            if cache_path.is_file():
+                try:
+                    small = np.load(cache_path)
+                    if small.shape != (cfg.input_h, cfg.input_w, 3) or small.dtype != np.uint8:
+                        small = None
+                except Exception:
+                    small = None
+            if small is None:
+                img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+                if img is None:
+                    raise RuntimeError(f"[BC-DS-RAW] 无法读取: {path}")
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                small = cv2.resize(
+                    img, (cfg.input_w, cfg.input_h),
+                    interpolation=cv2.INTER_AREA,
+                )  # (h, w, 3) uint8
+                try:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    # 原子写：先写 .tmp 再 rename，避免并发 worker 读到半文件
+                    # np.save 会自动追加 .npy；用 .tmp.npy 后缀保证不被改名
+                    tmp = cache_path.with_name(cache_path.stem + ".tmp.npy")
+                    np.save(tmp, small, allow_pickle=False)
+                    tmp.replace(cache_path)
+                except OSError:
+                    pass  # 写缓存失败不影响训练
+            frames[t] = small.astype(np.float32) / 255.0
 
         kb_row = sess['kb'][frame_i]
         kb_l = kb_label_from_row(kb_row, self.action_space)
